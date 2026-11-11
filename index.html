@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>GASHO — 合掌</title>
+  <meta name="description" content="手を合わせる。ただそれだけのためのサイト。">
+  <meta name="theme-color" content="#000000">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%99%8F%3C/text%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;400;500&family=Zen+Old+Mincho:wght@400;700;900&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.13/dist/lenis.min.js" defer></script>
+  <script type="module" src="js/main.js"></script>
+</head>
+<body class="is-loading">
+  <canvas id="gl" aria-hidden="true"></canvas>
+
+  <!-- ===== overlays ===== -->
+  <div class="grain" aria-hidden="true"></div>
+  <div class="flash" aria-hidden="true"></div>
+  <div class="cursor" aria-hidden="true">
+    <div class="cursor__ring"><span class="cursor__label"></span></div>
+    <div class="cursor__dot"></div>
+  </div>
+
+  <div class="loader" aria-hidden="true">
+    <div class="loader__hand loader__hand--l"></div>
+    <div class="loader__hand loader__hand--r"></div>
+    <div class="loader__kanji">合掌</div>
+    <p class="loader__status"><span data-loader-status>手を合わせる準備をしています</span><i class="loader__caret"></i></p>
+    <div class="loader__foot">
+      <span class="loader__label">GASHO / JOINING HANDS</span>
+      <span class="loader__count" data-loader-count>000</span>
+    </div>
+    <div class="loader__bar"><i></i></div>
+  </div>
+
+  <!-- ===== chrome ===== -->
+  <header class="nav">
+    <a class="nav__logo" href="#top" data-magnetic><span data-scramble>GASHO</span><sup>合掌</sup></a>
+    <div class="nav__clock"><span data-clock>--:--:--</span>&nbsp;JST</div>
+    <nav class="nav__links" aria-label="セクション">
+      <a href="#manifesto" data-magnetic><span data-scramble>Manifesto</span></a>
+      <a href="#form" data-magnetic><span data-scramble>Form</span></a>
+      <a href="#ritual" data-magnetic><span data-scramble>Ritual</span></a>
+    </nav>
+    <div class="nav__right">
+      <span class="nav__count">N°&nbsp;<b data-nav-count>0000</b></span>
+      <button class="nav__sound" type="button" aria-pressed="false" data-sound data-magnetic>
+        <span class="nav__eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>SOUND&nbsp;<b data-sound-label>OFF</b></span>
+      </button>
+    </div>
+  </header>
+
+  <aside class="hud" aria-hidden="true">
+    <div><span>FPS</span><b data-hud="fps">--</b></div>
+    <div><span>PARTICLES</span><b data-hud="count">--</b></div>
+    <div><span>STATE</span><b data-hud="state">--</b></div>
+    <div><span>POINTER</span><b data-hud="pointer">+0.000 / +0.000</b></div>
+    <div><span>VELOCITY</span><b data-hud="vel">0</b></div>
+  </aside>
+
+  <div class="progress" aria-hidden="true">
+    <span class="progress__num" data-progress>000</span>
+    <div class="progress__rail"><i></i></div>
+  </div>
+
+  <main id="top">
+    <!-- ===== 00 HERO ===== -->
+    <section class="hero" data-particles="cycle">
+      <div class="hero__top">
+        <p class="hero__kicker" data-hero-reveal><span>(00)</span>The art of joining hands</p>
+        <p class="hero__note" data-hero-reveal>両の掌を、胸の前で静かに合わせる。<br>感謝も、祈りも、詫びも、ひとつの形で。</p>
+      </div>
+
+      <p class="hero__vertical" data-hero-reveal>ただ、手を合わせる。</p>
+      <p class="hero__forming" data-hero-reveal><span class="hero__forming-label">NOW FORMING</span><span class="hero__forming-name" data-forming>合掌 / GASSHŌ</span></p>
+
+      <h1 class="hero__title" data-text="GASHO" aria-label="GASHO"><span class="split" data-split data-hero-split>GASHO</span></h1>
+
+      <div class="hero__bottom" data-hero-reveal>
+        <span>Ver.&nbsp;1.0 — 2026</span>
+        <span class="hero__scroll"><i></i>Scroll to pray</span>
+        <span>Move · Click · Hold</span>
+      </div>
+    </section>
+
+    <!-- ===== 01 MANIFESTO ===== -->
+    <section class="manifesto" id="manifesto" data-particles="field">
+      <div class="section-label"><span>(01)</span>Manifesto — 宣言</div>
+      <div class="manifesto__body">
+        <p data-reveal-chars>右の手と、左の手。</p>
+        <p data-reveal-chars>離れていたものが、ひとつに重なる。</p>
+        <p data-reveal-chars>願いでも、感謝でも、詫びでもいい。</p>
+        <p data-reveal-chars>理由は要らない。ただ、手を合わせる。</p>
+      </div>
+      <p class="manifesto__en" data-reveal>Right hand and left. What was apart becomes one. A wish, a thanks, an apology&nbsp;— no reason is needed. Simply join your hands.</p>
+    </section>
+
+    <!-- ===== MARQUEE ===== -->
+    <section class="marquee" data-particles="field" aria-hidden="true">
+      <div class="marquee__row" data-marquee="-1">
+        <div class="marquee__track"><span>合掌</span><em>✳</em><span>Gasshō</span><em>✳</em><span>Join your hands</span><em>✳</em></div>
+      </div>
+      <div class="marquee__row marquee__row--outline" data-marquee="1">
+        <div class="marquee__track"><span>Pray</span><em>—</em><span>祈り</span><em>—</em><span>Thank</span><em>—</em><span>感謝</span><em>—</em><span>Bow</span><em>—</em><span>一礼</span><em>—</em></div>
+      </div>
+    </section>
+
+    <!-- ===== 02 INVERSION ===== -->
+    <section class="invert" data-particles="enso">
+      <div class="invert__head">
+        <div class="section-label section-label--dark"><span>(02)</span>Inversion — 反転</div>
+        <p class="invert__en">Opposites meet in a single gesture.</p>
+      </div>
+      <p class="invert__kanji" aria-hidden="true">祈</p>
+      <div class="invert__foot">
+        <p class="invert__caption">白と黒、右と左、わたしと誰か。<br>反対のものが、ひとつの所作で重なる。</p>
+        <p class="invert__meta">ENSŌ — 円相<br>ONE STROKE, ONE BREATH</p>
+      </div>
+    </section>
+
+    <!-- ===== 03 THE FORM ===== -->
+    <section class="form" id="form" data-particles="field">
+      <div class="form__sticky">
+        <div class="form__head">
+          <div class="section-label"><span>(03)</span>The Form — 作法</div>
+          <div class="form__bar"><i></i></div>
+        </div>
+        <div class="form__track">
+          <div class="form__intro">
+            <h2 class="form__title">合掌の<br>作法</h2>
+            <p class="form__lead">四つの所作で、手を合わせる。<br><em>Four movements, one gesture.</em></p>
+          </div>
+
+          <article class="step">
+            <span class="step__num" data-n="01">01</span>
+            <div class="step__glyph step__glyph--spine" aria-hidden="true"><i></i><b></b></div>
+            <div class="step__body">
+              <h3 class="step__title">姿勢を正す</h3>
+              <p class="step__en">Stand still</p>
+              <p class="step__text">背筋を伸ばし、肩の力を抜く。<br>まず、呼吸をひとつ。</p>
+            </div>
+          </article>
+
+          <article class="step">
+            <span class="step__num" data-n="02">02</span>
+            <div class="step__glyph step__glyph--join" aria-hidden="true"><i></i><i></i></div>
+            <div class="step__body">
+              <h3 class="step__title">掌を合わせる</h3>
+              <p class="step__en">Join the palms</p>
+              <p class="step__text">胸の前で、両の掌と指先を<br>ぴたりと揃える。</p>
+            </div>
+          </article>
+
+          <article class="step">
+            <span class="step__num" data-n="03">03</span>
+            <div class="step__glyph step__glyph--tilt" aria-hidden="true"><i></i><b></b><span>45°</span></div>
+            <div class="step__body">
+              <h3 class="step__title">指先を傾ける</h3>
+              <p class="step__en">Tilt forward</p>
+              <p class="step__text">指先はやや前へ、およそ四十五度。<br>肘は張らずに、自然に。</p>
+            </div>
+          </article>
+
+          <article class="step">
+            <span class="step__num" data-n="04">04</span>
+            <div class="step__glyph step__glyph--eye" aria-hidden="true"><i></i><b></b></div>
+            <div class="step__body">
+              <h3 class="step__title">目を閉じ、一礼</h3>
+              <p class="step__en">Close &amp; bow</p>
+              <p class="step__text">目を閉じて、静かに頭を下げる。<br>それで、おしまい。</p>
+            </div>
+          </article>
+
+          <div class="form__end" aria-hidden="true">→</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 04 RITUAL ===== -->
+    <section class="ritual" id="ritual" data-particles="ritual">
+      <div class="section-label"><span>(04)</span>Ritual — 合掌する</div>
+      <h2 class="ritual__title"><span class="split" data-split>Press &amp; Hold</span></h2>
+      <p class="ritual__sub" data-reveal>中央の円を長押しして、手を合わせてください。<br><span>Space キーを押し続けても合掌できます。</span></p>
+
+      <div class="ritual__stage">
+        <button class="pray" type="button" data-pray data-cursor="HOLD" aria-label="長押しで合掌する" aria-describedby="pray-status">
+          <span class="pray__ripple" aria-hidden="true"></span>
+          <span class="pray__ripple" aria-hidden="true"></span>
+          <svg class="pray__ring" viewBox="0 0 200 200" aria-hidden="true">
+            <circle class="pray__track" cx="100" cy="100" r="92"/>
+            <circle class="pray__fill" cx="100" cy="100" r="92"/>
+          </svg>
+          <svg class="pray__orbit" viewBox="0 0 200 200" aria-hidden="true">
+            <defs><path id="pray-orbit" d="M100,100 m-79,0 a79,79 0 1,1 158,0 a79,79 0 1,1 -158,0"/></defs>
+            <text><textPath href="#pray-orbit">PRESS AND HOLD · 長押しで合掌 · PRESS AND HOLD · 長押しで合掌 ·</textPath></text>
+          </svg>
+          <span class="pray__core" aria-hidden="true">
+            <span class="pray__kanji">合掌</span>
+            <span class="pray__hint" data-pray-hint>HOLD</span>
+          </span>
+        </button>
+        <p class="ritual__message" id="pray-status" data-message aria-live="polite"></p>
+      </div>
+
+      <div class="ritual__count">
+        <span class="ritual__count-label">Your gasshō — あなたの合掌</span>
+        <span class="ritual__count-num"><span class="odometer" data-odometer></span><span class="ritual__count-unit">回</span></span>
+      </div>
+    </section>
+
+    <!-- ===== FOOTER ===== -->
+    <footer class="footer" data-particles="hands">
+      <p class="footer__thanks" data-reveal>手を合わせてくれて、ありがとう。<br><em>Thank you for joining your hands.</em></p>
+      <div class="footer__big" data-spotlight aria-hidden="true">
+        <span class="footer__big-line">GASHO</span>
+        <span class="footer__big-fill">GASHO</span>
+      </div>
+      <div class="footer__row">
+        <span>© 2026 GASHO</span>
+        <a href="https://github.com/4rtoflow/Gasho" target="_blank" rel="noopener" data-magnetic><span data-scramble>GitHub ↗</span></a>
+        <button type="button" data-top data-magnetic><span data-scramble>Back to top ↑</span></button>
+        <span>Made with <span class="emoji">🙏</span></span>
+      </div>
+    </footer>
+  </main>
+
+  <noscript><p class="noscript">このページは JavaScript で描画しています。</p></noscript>
+</body>
+</html>
