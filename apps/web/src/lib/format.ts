@@ -1,0 +1,71 @@
+import type { RcMode, SessionInfo, SessionStatus } from "@gasho/protocol";
+import type { BadgeTone } from "@/components/ui/badge";
+
+const rtf = new Intl.RelativeTimeFormat("ja", { numeric: "auto" });
+
+export function relativeTime(ms: number | undefined, now = Date.now()): string {
+  if (!ms) return "-";
+  const sec = (ms - now) / 1000;
+  const abs = Math.abs(sec);
+  if (abs < 45) return "たった今";
+  if (abs < 3600) return rtf.format(Math.round(sec / 60), "minute");
+  if (abs < 86400) return rtf.format(Math.round(sec / 3600), "hour");
+  return rtf.format(Math.round(sec / 86400), "day");
+}
+
+export function clockTime(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+export const STATUS_LABEL: Record<SessionStatus, string> = {
+  busy: "作業中",
+  waiting: "確認待ち",
+  idle: "待機中",
+  unknown: "不明",
+};
+
+export const STATUS_TONE: Record<SessionStatus, BadgeTone> = {
+  busy: "success",
+  waiting: "warning",
+  idle: "neutral",
+  unknown: "neutral",
+};
+
+export const RC_MODE_LABEL: Record<RcMode, string> = {
+  server: "rc サーバーモード",
+  interactive: "Remote Control",
+  none: "ローカルのみ",
+};
+
+export function waitingLabel(waitingFor: string | undefined): string | undefined {
+  if (!waitingFor) return undefined;
+  return waitingFor === "permission prompt" ? "権限の確認" : waitingFor;
+}
+
+export function basename(p: string): string {
+  return p.split("/").filter(Boolean).pop() ?? p;
+}
+
+export function sessionLabel(s: SessionInfo): string {
+  return s.title || s.name || basename(s.cwd) || s.sessionId.slice(0, 8);
+}
+
+export function claudeUrl(s: SessionInfo): string | undefined {
+  return s.bridgeSessionId ? `https://claude.ai/code/${s.bridgeSessionId}` : undefined;
+}
+
+export function repoLabel(s: SessionInfo): string {
+  return s.github ? `${s.github.owner}/${s.github.name}` : basename(s.cwd);
+}
+
+/** Claude Code records "HEAD" outside git repositories; hide it there. */
+export function branchLabel(s: SessionInfo): string | undefined {
+  if (!s.gitBranch || (s.gitBranch === "HEAD" && !s.github)) return undefined;
+  return s.gitBranch;
+}
+
+export function formatCost(usd: number | undefined): string | undefined {
+  return usd === undefined ? undefined : `$${usd.toFixed(2)}`;
+}
