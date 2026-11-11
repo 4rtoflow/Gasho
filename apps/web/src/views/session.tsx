@@ -1,11 +1,10 @@
-import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest, Square } from "lucide-react";
+import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MachineInfo, SessionInfo } from "@gasho/protocol";
 import { StatusBadge } from "@/components/status-badge";
 import { Transcript } from "@/components/transcript";
 import { PromptInput } from "@/components/ui/prompt-input";
 import {
-  RC_MODE_LABEL,
   branchLabel,
   claudeUrl,
   formatCost,
@@ -50,7 +49,7 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold tracking-tight">{sessionLabel(s)}</h1>
             <p className="truncate text-xs text-muted-foreground">
-              {m.name} · {s.cwd} · {s.managed ? "Gasho が起動" : RC_MODE_LABEL[s.rcMode]}
+              {m.name} · {s.cwd}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -119,7 +118,6 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
 
 function Composer({ machine, session: s }: { machine: MachineInfo; session: SessionInfo }) {
   const [error, setError] = useState<string>();
-  const [stopping, setStopping] = useState(false);
   const url = claudeUrl(s);
 
   if (!s.managed) {
@@ -148,14 +146,10 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
       ? `送信待ち ${s.pendingInputs} 件。作業が終わったら順に送ります。`
       : s.status === "waiting"
         ? "権限の確認を待っています。公式アプリで答えてください。"
-        : busy
-          ? "作業中です。いま送った入力は、作業が終わってから届きます。"
-          : undefined;
+        : undefined;
 
   const stop = async () => {
-    setStopping(true);
     const r = await sendCommand(machine.id, { type: "session.interrupt", sessionId: s.sessionId });
-    setStopping(false);
     if (!r.ok) setError(r.error);
   };
 
@@ -171,25 +165,15 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
               throw new Error(r.error);
             }
           }}
+          // While Claude is working, the send button turns into a stop button (Esc also stops).
+          streaming={busy}
+          onStop={() => void stop()}
           disabled={offline}
           models={[]}
           allowAttachments={false}
           maxLength={20_000}
           placeholder="Agent への指示を入力…"
           safeArea
-          actions={
-            busy ? (
-              <button
-                type="button"
-                onClick={() => void stop()}
-                disabled={stopping}
-                className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:border-border-hover disabled:opacity-50"
-              >
-                <Square className="size-3 fill-current" />
-                停止
-              </button>
-            ) : undefined
-          }
           hint={false}
         />
         {(status || error) && (

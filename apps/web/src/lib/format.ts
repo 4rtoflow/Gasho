@@ -1,4 +1,4 @@
-import type { RcMode, SessionInfo, SessionStatus } from "@gasho/protocol";
+import type { SessionInfo, SessionStatus } from "@gasho/protocol";
 import type { BadgeTone } from "@/components/ui/badge";
 
 const rtf = new Intl.RelativeTimeFormat("ja", { numeric: "auto" });
@@ -31,12 +31,6 @@ export const STATUS_TONE: Record<SessionStatus, BadgeTone> = {
   waiting: "warning",
   idle: "neutral",
   unknown: "neutral",
-};
-
-export const RC_MODE_LABEL: Record<RcMode, string> = {
-  server: "rc サーバーモード",
-  interactive: "Remote Control",
-  none: "ローカルのみ",
 };
 
 export function waitingLabel(waitingFor: string | undefined): string | undefined {

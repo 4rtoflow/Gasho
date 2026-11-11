@@ -3,6 +3,7 @@
 import { AlertTriangle, ChevronRight, Image as ImageIcon, Wrench } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
 import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
+import { MarkdownText } from "@/components/markdown";
 import { clockTime } from "@/lib/format";
 import type { TranscriptState } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -45,10 +46,15 @@ function Fold({ summary, children, tone }: { summary: React.ReactNode; children:
   );
 }
 
-function BlockView({ block }: { block: TranscriptBlock }) {
+/** Claude's text is Markdown; what the user typed is shown as typed. */
+function BlockView({ block, markdown = false }: { block: TranscriptBlock; markdown?: boolean }) {
   switch (block.type) {
     case "text":
-      return <p className="whitespace-pre-wrap break-words leading-relaxed">{block.text}</p>;
+      return markdown ? (
+        <MarkdownText text={block.text} />
+      ) : (
+        <p className="whitespace-pre-wrap break-words leading-relaxed">{block.text}</p>
+      );
     case "tool_use":
       return (
         <Fold
@@ -116,7 +122,7 @@ function EntryView({ entry }: { entry: TranscriptEntry }) {
     <div className={cn("space-y-2 text-sm", onlyResults && "pl-5")}>
       {entry.isSidechain && <div className="text-[10px] uppercase tracking-wide text-muted-foreground">サブエージェント</div>}
       {entry.blocks.map((b, i) => (
-        <BlockView key={i} block={b} />
+        <BlockView key={i} block={b} markdown={entry.role === "assistant"} />
       ))}
     </div>
   );
