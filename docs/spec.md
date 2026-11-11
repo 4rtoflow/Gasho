@@ -167,7 +167,7 @@ hook の `onFailure` は既定のままにする。こうすると、gasho-daemo
 検証で分かったことから、次の規則を守る。
 
 - 発言を送るのは、状態が idle のときだけにする。権限の確認が開いているときに Enter を送ると、確認への許可として扱われる。busy のあいだはいつ確認が開くか分からないので、gasho-daemon で発言を待たせる。実装では、待たせた発言を idle になるたびに1件ずつ送り、送る直前に状態を取り直して、画面に権限の確認が出ていないことも確かめる
-- 応答が始まる前に割り込むと、送った発言が入力欄に戻る。次の発言を送る前に入力欄を空にする（方法は未確認）
+- 応答が始まる前に割り込むと、送った発言が入力欄に戻る。次の発言を貼り付ける前に、Ctrl+U と Backspace を入力欄の行数より1組多く送って、入力欄を空にする。割り込んでから1.5秒は、発言が入力欄に戻るのを待つために送らない。Ctrl+C は、続けて押すと Claude Code が終了するので使わない
 - 割り込まれたときは Stop が届かない。トランスクリプトの `[Request interrupted by user]` か、状態の変化から判断する
 - 画面の承認待ちの表示は gasho-daemon が消す。公式アプリで答えられても hook は打ち切られないので、PostToolUse や状態の変化を見て消す。PermissionRequest には `tool_use_id` がないので、直前の PreToolUse とは、セッション・ツール名・入力の内容で対応づける
 - zellij を操作するときは、`--session` と `--pane-id` を必ず指定する
@@ -185,7 +185,7 @@ hook の `onFailure` は既定のままにする。こうすると、gasho-daemo
 | 画面 | 内容 | 主な部品 |
 |---|---|---|
 | ホーム | working server とセッションの一覧、承認待ち、通知 | Data Table、Badge、Notification Stack |
-| セッション | 会話の履歴と、Agent への入力欄。ツールやイベントのタブは置かない | 自作の会話の表示、Prompt Input |
+| セッション | 会話の履歴と、Agent への入力欄。Claude の返答は Markdown として表示する。作業中は送信ボタンが停止ボタンに変わる。ツールやイベントのタブは置かない | 自作の会話の表示、Prompt Input、AI Response のコードブロック |
 | リポジトリ | ブランチツリー、worktree、Issues、PRs、Actions | Animated Tabs、Data Table、自作の SVG |
 | 端末 | 登録した端末の一覧、登録コードの発行 | Data Table、Badge |
 | 登録 | 登録していないブラウザに出す、登録コードの入力 | 自作 |
@@ -226,7 +226,6 @@ Gasho からは手元のマシンでコマンドを実行させられるので�
 ## 未確認の事項
 
 - hook から拒否を返したときの動き
-- 割り込みで入力欄に戻った発言を消す方法
 - Mac（launchd、zellij）での動き
 - AskUserQuestion に hook で答える方法
 - トランスクリプトなどの内部の形式が、Claude Code の更新で変わったときの影響

@@ -16,6 +16,29 @@ export const PANE = "terminal_0";
 export const TRUST_PROMPT_RE = /trust this folder|Quick safety check/i;
 export const PERMISSION_PROMPT_RE = /Do you want to proceed\?/;
 
+/**
+ * The lines of Claude Code's prompt box: the lines between the last two horizontal rules on the screen,
+ * the first of which starts with "❯". Undefined when the screen does not show the prompt box.
+ */
+export function promptBoxLines(screen: string): string[] | undefined {
+  const lines = screen.split("\n").map((l) => l.trimEnd());
+  const rules = lines.flatMap((l, i) => (/^─{8,}/.test(l) ? [i] : []));
+  const [start, end] = rules.slice(-2);
+  if (start === undefined || end === undefined) return undefined;
+  const box = lines.slice(start + 1, end);
+  return box[0]?.startsWith("❯") ? box : undefined;
+}
+
+/**
+ * Keys that empty the prompt box, for a box that takes `lines` lines on the screen. Ctrl+U deletes back to the
+ * start of the line on the screen, and Backspace then deletes the line break before it (or a whole
+ * "[Pasted text]"), so one pair per line is enough. On an empty box they do nothing. Ctrl+C would also empty
+ * the box, but a second Ctrl+C within a few seconds quits Claude Code.
+ */
+export function clearPromptKeys(lines: number): string[] {
+  return Array.from({ length: Math.max(1, lines) + 1 }, () => ["Ctrl u", "Backspace"]).flat();
+}
+
 export interface ManagedSession {
   sessionId: string;
   zellijSession: string;

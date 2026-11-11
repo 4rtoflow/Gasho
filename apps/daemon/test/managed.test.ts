@@ -3,7 +3,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { cleanEnv, launchableFolders, launchArgs, ManagedSessions, zellijSessionName } from "../src/managed.ts";
+import {
+  cleanEnv,
+  clearPromptKeys,
+  launchableFolders,
+  launchArgs,
+  ManagedSessions,
+  promptBoxLines,
+  zellijSessionName,
+} from "../src/managed.ts";
 
 test("cleanEnv keeps only what Claude Code and zellij need", () => {
   const env = cleanEnv({
@@ -95,4 +103,38 @@ test("launchableFolders lists trusted folders that exist, plus the given ones", 
   } finally {
     await fs.rm(home, { recursive: true });
   }
+});
+
+// Screens dumped from Claude Code v2.1.322 in a 50-column zellij pane.
+const RULE = "─".repeat(50);
+const screenWith = (...box: string[]) =>
+  [
+    " ▐▛███▛█   Claude Code v2.1.322",
+    "  /remote-control is active · Continue here, on",
+    "❯ 前の指示",
+    "● はい",
+    RULE,
+    ...box,
+    RULE,
+    "  ⏵⏵ auto mode on (shift+tab to cycle)",
+    "",
+  ].join("\n");
+
+test("promptBoxLines reads the prompt box at the bottom of the screen", () => {
+  assert.deepEqual(promptBoxLines(screenWith("❯ ")), ["❯"]);
+  assert.deepEqual(promptBoxLines(screenWith("❯ 停止の実験 その2。", "  二行目です。", "  三行目は折り返される")), [
+    "❯ 停止の実験 その2。",
+    "  二行目です。",
+    "  三行目は折り返される",
+  ]);
+  assert.deepEqual(promptBoxLines(screenWith("❯ [Pasted text #2 +40 lines]")), ["❯ [Pasted text #2 +40 lines]"]);
+  assert.equal(promptBoxLines(screenWith(" Do you want to proceed?", " ❯ 1. Yes")), undefined);
+  assert.equal(promptBoxLines("no prompt here"), undefined);
+});
+
+test("clearPromptKeys sends one Ctrl+U and Backspace pair per line, plus one", () => {
+  assert.deepEqual(clearPromptKeys(1), ["Ctrl u", "Backspace", "Ctrl u", "Backspace"]);
+  assert.equal(clearPromptKeys(3).length, 8);
+  assert.equal(clearPromptKeys(0).length, 4);
+  assert.ok(!clearPromptKeys(5).includes("Ctrl c"));
 });

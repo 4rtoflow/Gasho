@@ -15,6 +15,8 @@ import {
   ManagedSessions,
   PERMISSION_PROMPT_RE,
   TRUST_PROMPT_RE,
+  clearPromptKeys,
+  promptBoxLines,
   Zellij,
   zellijSessionName,
 } from "./managed.ts";
@@ -27,6 +29,7 @@ const GITHUB_CACHE_MS = 5 * 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
 const MAX_INPUT = 20_000;
+const INTERRUPT_SETTLE_MS = 1500;
 
 interface Tracked {
   info: SessionInfo;
@@ -54,6 +57,8 @@ export class Daemon {
   private canLaunch = false;
   private folders: string[] = [];
   private flushing = new Set<string>();
+  /** Until when input must wait after an interrupt, so Claude Code has put the stopped prompt back first. */
+  private settleUntil = new Map<string, number>();
 
   constructor(cfg: DaemonConfig) {
     this.cfg = cfg;
@@ -389,12 +394,21 @@ export class Daemon {
     try {
       const m = this.managed.get(sessionId);
       if (!m || this.managed.pending(sessionId) === 0) return;
+      const wait = (this.settleUntil.get(sessionId) ?? 0) - Date.now();
+      if (wait > 0) {
+        this.scheduleRefresh(wait + 100);
+        return;
+      }
+      this.settleUntil.delete(sessionId);
       if ((await this.currentStatus(m.pid)) !== "idle") return;
       const screen = await this.zellij.screen(m.zellijSession).catch(() => "");
       if (PERMISSION_PROMPT_RE.test(screen) || TRUST_PROMPT_RE.test(screen)) return;
       const text = this.managed.next(sessionId);
       if (text === undefined) return;
       try {
+        // When a prompt is stopped before Claude starts answering, Claude Code puts it back into the prompt box,
+        // and it would be sent together with this input. Empty the box first.
+        await this.zellij.keys(m.zellijSession, ...clearPromptKeys(promptBoxLines(screen)?.length ?? 1));
         await this.zellij.paste(m.zellijSession, text);
         await this.zellij.keys(m.zellijSession, "Enter");
       } catch (e) {
@@ -413,6 +427,7 @@ export class Daemon {
     if (!m) return { ok: false, error: "このセッションは Gasho から止められません。公式アプリで止めてください。" };
     if ((await this.currentStatus(m.pid)) !== "busy") return { ok: false, error: "作業中ではありません。" };
     await this.zellij.keys(m.zellijSession, "Esc");
+    this.settleUntil.set(sessionId, Date.now() + INTERRUPT_SETTLE_MS);
     this.scheduleRefresh(500);
     return { ok: true };
   }
