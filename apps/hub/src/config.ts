@@ -1,25 +1,28 @@
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseNets } from "./netallow.ts";
 
 export interface HubConfig {
   host: string;
   port: number;
-  token: string;
+  allowNets: string[];
   dbFile: string;
   webDist: string;
 }
 
+export function dbFileOf(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GASHO_DB ?? path.join(os.homedir(), ".local", "share", "gasho", "hub.db");
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
-  const token = env.GASHO_TOKEN;
-  if (!token) throw new Error("GASHO_TOKEN is not set (the token gasho-daemon uses to connect)");
   const here = path.dirname(fileURLToPath(import.meta.url));
   return {
-    // Only reachable from this machine by default; publish it with Tailscale Serve, never directly.
-    host: env.GASHO_HUB_HOST ?? "127.0.0.1",
+    // Listens on the LAN by default; GASHO_ALLOW_NETS decides which source addresses are served.
+    host: env.GASHO_HUB_HOST ?? "0.0.0.0",
     port: Number(env.GASHO_HUB_PORT ?? 7740),
-    token,
-    dbFile: env.GASHO_DB ?? path.join(os.homedir(), ".local", "share", "gasho", "hub.db"),
+    allowNets: parseNets(env.GASHO_ALLOW_NETS),
+    dbFile: dbFileOf(env),
     webDist: env.GASHO_WEB_DIST ?? path.resolve(here, "../../web/dist"),
   };
 }

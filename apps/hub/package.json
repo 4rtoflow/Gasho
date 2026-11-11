@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/index.ts",
-    "dev": "node --watch --disable-warning=ExperimentalWarning src/index.ts"
+    "start": "node --disable-warning=ExperimentalWarning src/cli.ts start",
+    "dev": "node --watch --disable-warning=ExperimentalWarning src/cli.ts start",
+    "pair": "node --disable-warning=ExperimentalWarning src/cli.ts pair",
+    "devices": "node --disable-warning=ExperimentalWarning src/cli.ts devices"
   },
   "dependencies": {
     "@gasho/protocol": "*",

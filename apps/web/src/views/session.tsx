@@ -24,7 +24,7 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
   const { machines, transcripts, events } = useAppState();
   const now = useNow();
   const [tab, setTab] = useState<Tab>("chat");
-  const m = machines.find((x) => x.name === machine);
+  const m = machines.find((x) => x.id === machine);
   const s = m?.sessions.find((x) => x.sessionId === sessionId);
   const t = transcripts[transcriptKey(machine, sessionId)];
   const sessionEvents = useMemo(
@@ -40,7 +40,7 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
     return (
       <div className="mx-auto max-w-3xl p-6 text-sm text-muted-foreground">
         <BackLink />
-        <p className="mt-4">このセッションは見つかりません。終了したか、{machine} の gasho-daemon が接続していません。</p>
+        <p className="mt-4">このセッションは見つかりません。終了したか、{m?.name ?? "このマシン"} の gasho-daemon が接続していません。</p>
       </div>
     );
   }
@@ -58,7 +58,7 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold tracking-tight">{sessionLabel(s)}</h1>
             <p className="truncate text-xs text-muted-foreground">
-              {machine} · {s.cwd} · {RC_MODE_LABEL[s.rcMode]}
+              {m?.name} · {s.cwd} · {RC_MODE_LABEL[s.rcMode]}
             </p>
           </div>
           <div className="flex items-center gap-2">

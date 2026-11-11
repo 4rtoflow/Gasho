@@ -1,8 +1,9 @@
-// Hub state and message handling, independent of the transport so it can be tested without sockets.
+// Gasho server state and message handling, independent of the transport so it can be tested without sockets.
 import { randomUUID } from "node:crypto";
 import type {
   ClientToHub,
   DaemonToHub,
+  DeviceInfo,
   HubToClient,
   HubToDaemon,
   MachineHookEvent,
@@ -16,8 +17,15 @@ export interface Peer<T> {
   close(code: number, reason: string): void;
 }
 
-export type DaemonPeer = Peer<HubToDaemon> & { machine?: string };
-export type ClientPeer = Peer<HubToClient>;
+/** A gasho-daemon connection; `machineId` is set once its hello is accepted. */
+export type DaemonPeer = Peer<HubToDaemon> & { machineId?: string };
+/** A browser connection of a registered device. */
+export type ClientPeer = Peer<HubToClient> & { deviceId: string };
+
+/** WebSocket close codes. */
+export const CLOSE_INVALID_CREDENTIALS = 4001;
+export const CLOSE_REPLACED = 4002;
+export const CLOSE_UNAUTHORIZED = 4401;
 
 interface PendingRequest {
   client: ClientPeer;
@@ -30,45 +38,47 @@ const REQUEST_TIMEOUT_MS = 15_000;
 
 export class Hub {
   private store: Store;
-  private token: string;
   private machines = new Map<string, MachineInfo>();
   private daemons = new Map<string, DaemonPeer>();
   private clients = new Set<ClientPeer>();
   private pending = new Map<string, PendingRequest>();
 
-  constructor(store: Store, token: string) {
+  constructor(store: Store) {
     this.store = store;
-    this.token = token;
-    for (const m of store.loadMachines()) this.machines.set(m.name, m);
+    for (const m of store.loadMachines()) this.machines.set(m.id, m);
   }
 
   // ---- daemons ----
 
   onDaemonMessage(peer: DaemonPeer, msg: DaemonToHub): void {
     if (msg.type === "hello") {
-      if (msg.token !== this.token) {
-        peer.close(4001, "invalid token");
+      const device = this.store.verifyDevice(msg.machineId, msg.token, "machine");
+      if (!device) {
+        peer.close(CLOSE_INVALID_CREDENTIALS, "invalid credentials");
         return;
       }
-      const previous = this.daemons.get(msg.machine);
-      if (previous && previous !== peer) previous.close(4002, "replaced by a new connection");
-      peer.machine = msg.machine;
-      this.daemons.set(msg.machine, peer);
-      const m = this.machine(msg.machine);
+      const previous = this.daemons.get(device.id);
+      if (previous && previous !== peer) previous.close(CLOSE_REPLACED, "replaced by a new connection");
+      peer.machineId = device.id;
+      this.daemons.set(device.id, peer);
+      const m = this.machine(device.id, device.name);
+      m.name = device.name;
       m.connected = true;
       m.lastSeen = Date.now();
       m.daemonVersion = msg.daemonVersion;
       this.store.saveMachine(m);
+      this.store.touchDevice(device.id);
       peer.send({ type: "welcome" });
       this.broadcast({ type: "machine", machine: m });
       return;
     }
-    const name = peer.machine;
-    if (!name) {
-      peer.close(4001, "hello first");
+    const id = peer.machineId;
+    if (!id) {
+      peer.close(CLOSE_INVALID_CREDENTIALS, "hello first");
       return;
     }
-    const m = this.machine(name);
+    const m = this.machines.get(id);
+    if (!m) return;
     m.lastSeen = Date.now();
     switch (msg.type) {
       case "sessions":
@@ -77,7 +87,7 @@ export class Hub {
         this.broadcast({ type: "machine", machine: m });
         break;
       case "transcript.append":
-        this.broadcast({ type: "transcript.append", machine: name, sessionId: msg.sessionId, entries: msg.entries });
+        this.broadcast({ type: "transcript.append", machine: id, sessionId: msg.sessionId, entries: msg.entries });
         break;
       case "transcript.page": {
         const req = this.pending.get(msg.requestId);
@@ -85,15 +95,15 @@ export class Hub {
         clearTimeout(req.timer);
         this.pending.delete(msg.requestId);
         const { type: _type, requestId: _requestId, ...page } = msg;
-        req.client.send({ type: "transcript.page", machine: name, ...page });
+        req.client.send({ type: "transcript.page", machine: id, ...page });
         break;
       }
       case "hook": {
-        const event: MachineHookEvent = { ...msg.event, machine: name };
+        const event: MachineHookEvent = { ...msg.event, machine: id };
         this.store.addEvent(event);
         this.broadcast({ type: "event", event });
         const session = m.sessions.find((s) => s.sessionId === event.sessionId);
-        const n = notificationFor(name, event, session, randomUUID());
+        const n = notificationFor(id, event, session, randomUUID());
         if (n) {
           this.store.addNotification(n);
           this.broadcast({ type: "notification", notification: n });
@@ -104,34 +114,24 @@ export class Hub {
   }
 
   onDaemonClose(peer: DaemonPeer): void {
-    const name = peer.machine;
-    if (!name || this.daemons.get(name) !== peer) return;
-    this.daemons.delete(name);
-    const m = this.machine(name);
-    m.connected = false;
-    m.lastSeen = Date.now();
-    this.store.saveMachine(m);
-    this.broadcast({ type: "machine", machine: m });
-    for (const [id, req] of this.pending) {
-      if (req.machine !== name) continue;
-      clearTimeout(req.timer);
-      this.pending.delete(id);
-      req.client.send({
-        type: "transcript.page",
-        machine: name,
-        sessionId: req.sessionId,
-        entries: [],
-        start: 0,
-        total: 0,
-        error: "machine disconnected",
-      });
+    const id = peer.machineId;
+    if (!id || this.daemons.get(id) !== peer) return;
+    this.daemons.delete(id);
+    const m = this.machines.get(id);
+    if (m) {
+      m.connected = false;
+      m.lastSeen = Date.now();
+      this.store.saveMachine(m);
+      this.broadcast({ type: "machine", machine: m });
     }
+    this.failPending((req) => req.machine === id, "machine disconnected");
   }
 
   // ---- browsers ----
 
   onClientConnect(peer: ClientPeer): void {
     this.clients.add(peer);
+    this.store.touchDevice(peer.deviceId);
     peer.send({
       type: "snapshot",
       machines: [...this.machines.values()],
@@ -144,30 +144,14 @@ export class Hub {
     switch (msg.type) {
       case "transcript.get": {
         const daemon = this.daemons.get(msg.machine);
+        const reply = { type: "transcript.page" as const, machine: msg.machine, sessionId: msg.sessionId, entries: [], start: 0, total: 0 };
         if (!daemon) {
-          peer.send({
-            type: "transcript.page",
-            machine: msg.machine,
-            sessionId: msg.sessionId,
-            entries: [],
-            start: 0,
-            total: 0,
-            error: "machine is offline",
-          });
+          peer.send({ ...reply, error: "machine is offline" });
           return;
         }
         const requestId = randomUUID();
         const timer = setTimeout(() => {
-          if (!this.pending.delete(requestId)) return;
-          peer.send({
-            type: "transcript.page",
-            machine: msg.machine,
-            sessionId: msg.sessionId,
-            entries: [],
-            start: 0,
-            total: 0,
-            error: "timed out",
-          });
+          if (this.pending.delete(requestId)) peer.send({ ...reply, error: "timed out" });
         }, REQUEST_TIMEOUT_MS);
         this.pending.set(requestId, { client: peer, machine: msg.machine, sessionId: msg.sessionId, timer });
         const limit = Math.min(Math.max(1, msg.limit), 500);
@@ -190,15 +174,72 @@ export class Hub {
     }
   }
 
+  // ---- devices ----
+
+  listDevices(currentId?: string): DeviceInfo[] {
+    return this.store.listDevices().map(({ revokedAt: _revoked, ...d }) => ({ ...d, current: d.id === currentId }));
+  }
+
+  renameDevice(id: string, name: string): boolean {
+    if (!this.store.renameDevice(id, name)) return false;
+    const m = this.machines.get(id);
+    if (m) {
+      m.name = name;
+      this.broadcast({ type: "machine", machine: m });
+    }
+    return true;
+  }
+
+  revokeDevice(id: string): boolean {
+    if (!this.store.revokeDevice(id)) return false;
+    this.disconnectRevoked([id]);
+    return true;
+  }
+
+  /** Closes connections of devices revoked elsewhere, e.g. with the command line tool. */
+  checkRevocations(): void {
+    const ids = [...this.daemons.keys(), ...[...this.clients].map((c) => c.deviceId)];
+    const revoked = this.store.revokedSince([...new Set(ids)]);
+    if (revoked.length > 0) this.disconnectRevoked(revoked);
+  }
+
+  private disconnectRevoked(ids: string[]): void {
+    for (const id of ids) {
+      const daemon = this.daemons.get(id);
+      if (daemon) {
+        this.daemons.delete(id);
+        daemon.close(CLOSE_INVALID_CREDENTIALS, "registration revoked");
+      }
+      for (const c of [...this.clients]) {
+        if (c.deviceId !== id) continue;
+        this.clients.delete(c);
+        c.close(CLOSE_UNAUTHORIZED, "registration revoked");
+      }
+      if (this.machines.delete(id)) {
+        this.failPending((req) => req.machine === id, "machine was removed");
+        this.broadcast({ type: "machine.removed", id });
+      }
+    }
+  }
+
   // ---- helpers ----
 
-  private machine(name: string): MachineInfo {
-    let m = this.machines.get(name);
+  private machine(id: string, name: string): MachineInfo {
+    let m = this.machines.get(id);
     if (!m) {
-      m = { name, connected: false, lastSeen: Date.now(), sessions: [] };
-      this.machines.set(name, m);
+      m = { id, name, connected: false, lastSeen: Date.now(), sessions: [] };
+      this.machines.set(id, m);
     }
     return m;
+  }
+
+  private failPending(match: (req: PendingRequest) => boolean, error: string): void {
+    for (const [id, req] of this.pending) {
+      if (!match(req)) continue;
+      clearTimeout(req.timer);
+      this.pending.delete(id);
+      req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
+    }
   }
 
   private broadcast(msg: HubToClient): void {

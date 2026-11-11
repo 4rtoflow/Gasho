@@ -11,7 +11,9 @@ import { useNow } from "@/lib/use-now";
 
 interface Row {
   id: string;
+  /** machine id */
   machine: string;
+  machineName: string;
   online: boolean;
   s: SessionInfo;
 }
@@ -36,7 +38,7 @@ export function HomeView() {
   const rows = useMemo<Row[]>(
     () =>
       machines.flatMap((m) =>
-        m.sessions.map((s) => ({ id: `${m.name}/${s.sessionId}`, machine: m.name, online: m.connected, s })),
+        m.sessions.map((s) => ({ id: `${m.id}/${s.sessionId}`, machine: m.id, machineName: m.name, online: m.connected, s })),
       ),
     [machines],
   );
@@ -71,7 +73,7 @@ export function HomeView() {
         accessor: (r) => (r.online ? STATUS_ORDER[r.s.status] : 9),
         cell: (r) => (r.online ? <StatusBadge status={r.s.status} /> : <span className="text-xs text-neutral-500">オフライン</span>),
       },
-      { key: "machine", header: "マシン", width: "110px", accessor: (r) => r.machine },
+      { key: "machine", header: "マシン", width: "140px", accessor: (r) => r.machineName },
       {
         key: "updated",
         header: "最終更新",
@@ -138,7 +140,7 @@ export function HomeView() {
               >
                 <div className="truncate text-sm font-medium">{sessionLabel(r.s)}</div>
                 <div className="text-xs text-muted-foreground">
-                  {r.machine} · {waitingLabel(r.s.waitingFor) ?? "確認待ち"}
+                  {r.machineName} · {waitingLabel(r.s.waitingFor) ?? "確認待ち"}
                 </div>
               </button>
             ))}
@@ -154,7 +156,7 @@ export function HomeView() {
             defaultSort={{ key: "updated", dir: "desc" }}
             searchable
             searchPlaceholder="セッションを検索…"
-            searchText={(r) => `${sessionLabel(r.s)} ${r.s.cwd} ${r.s.gitBranch ?? ""} ${r.machine}`}
+            searchText={(r) => `${sessionLabel(r.s)} ${r.s.cwd} ${r.s.gitBranch ?? ""} ${r.machineName}`}
             getRowLabel={(r) => sessionLabel(r.s)}
             onRowClick={(r) => openSession(r.machine, r.s.sessionId)}
             selectable={false}

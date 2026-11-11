@@ -3,11 +3,16 @@
 import type { DaemonToHub, HubToDaemon } from "@gasho/protocol";
 import { log } from "./util.ts";
 
+/** Close code the Gasho server uses for unknown or revoked registrations. */
+const CLOSE_INVALID_CREDENTIALS = 4001;
+
 export interface HubClientOptions {
   url: string;
   hello: () => DaemonToHub;
   onReady: () => void;
   onMessage: (m: HubToDaemon) => void;
+  /** Called instead of reconnecting when the Gasho server rejects the registration. */
+  onRejected: (reason: string) => void;
 }
 
 export class HubClient {
@@ -49,6 +54,10 @@ export class HubClient {
       if (this.ready) log(`hub: disconnected (${ev.code} ${ev.reason})`);
       this.ready = false;
       this.ws = undefined;
+      if (ev.code === CLOSE_INVALID_CREDENTIALS) {
+        this.opts.onRejected(ev.reason || "invalid credentials");
+        return;
+      }
       setTimeout(() => this.connect(), this.backoff);
       this.backoff = Math.min(this.backoff * 2, 30_000);
     });

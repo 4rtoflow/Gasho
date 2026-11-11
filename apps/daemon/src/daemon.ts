@@ -34,17 +34,22 @@ export class Daemon {
     this.cfg = cfg;
     this.hub = new HubClient({
       url: cfg.hubUrl,
-      hello: () => ({ type: "hello", machine: cfg.machine, token: cfg.token, daemonVersion: DAEMON_VERSION }),
+      hello: () => ({ type: "hello", machineId: cfg.machineId, token: cfg.token, daemonVersion: DAEMON_VERSION }),
       onReady: () => {
         this.lastSent = "";
         this.emitSessions();
       },
       onMessage: (m) => void this.onHubMessage(m),
+      onRejected: (reason) => {
+        log(`the Gasho server rejected this machine (${reason}). Its registration was revoked or is unknown;`);
+        log("register again: node src/cli.ts register --server <url> --code <code>");
+        process.exit(1);
+      },
     });
   }
 
   start(): void {
-    log(`machine "${this.cfg.machine}", hub ${this.cfg.hubUrl}`);
+    log(`machine ${this.cfg.machineId}, Gasho server ${this.cfg.hubUrl}`);
     if (!this.cfg.hookSecret) log("GASHO_HOOK_SECRET is not set; hook requests are accepted without a secret");
     this.hub.connect();
     startHookServer({

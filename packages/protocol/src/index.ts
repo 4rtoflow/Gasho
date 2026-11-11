@@ -73,6 +73,8 @@ export interface HookEvent {
   summary?: string;
 }
 
+// In the messages below, `machine` is always a machine id (the id of its registered device), never its name.
+
 export interface MachineHookEvent extends HookEvent {
   machine: string;
 }
@@ -90,12 +92,49 @@ export interface GashoNotification {
   read: boolean;
 }
 
+/** A working server: a machine that runs Claude Code and gasho-daemon. */
 export interface MachineInfo {
+  /** Id issued when the machine was registered. */
+  id: string;
+  /** Display name; can be changed on the Gasho server. */
   name: string;
   connected: boolean;
   lastSeen: number;
   daemonVersion?: string;
   sessions: SessionInfo[];
+}
+
+/** Something registered with the Gasho server: a browser or a working server. */
+export type DeviceKind = "browser" | "machine";
+
+export interface DeviceInfo {
+  id: string;
+  kind: DeviceKind;
+  name: string;
+  createdAt: number;
+  lastSeenAt?: number;
+  /** True for the browser making the request. */
+  current?: boolean;
+}
+
+/** POST /api/pair */
+export interface PairRequest {
+  code: string;
+  kind: DeviceKind;
+  name: string;
+}
+
+/** Response of POST /api/pair. `token` is returned to machines only; browsers get it as a cookie. */
+export interface PairResponse {
+  deviceId: string;
+  name: string;
+  token?: string;
+}
+
+/** Response of POST /api/pairing-codes. */
+export interface PairingCode {
+  code: string;
+  expiresAt: number;
 }
 
 /** A page of transcript entries. `start` is the index of entries[0]; `total` counts all entries. */
@@ -108,7 +147,7 @@ export interface TranscriptPage {
 
 // gasho-daemon -> gasho-hub
 export type DaemonToHub =
-  | { type: "hello"; machine: string; token: string; daemonVersion: string }
+  | { type: "hello"; machineId: string; token: string; daemonVersion: string }
   | { type: "sessions"; sessions: SessionInfo[] }
   | { type: "transcript.append"; sessionId: string; entries: TranscriptEntry[] }
   | ({ type: "transcript.page"; requestId: string; sessionId: string } & TranscriptPage)
@@ -128,6 +167,7 @@ export type HubToClient =
       events: MachineHookEvent[];
     }
   | { type: "machine"; machine: MachineInfo }
+  | { type: "machine.removed"; id: string }
   | ({ type: "transcript.page"; machine: string; sessionId: string } & TranscriptPage)
   | { type: "transcript.append"; machine: string; sessionId: string; entries: TranscriptEntry[] }
   | { type: "notification"; notification: GashoNotification }

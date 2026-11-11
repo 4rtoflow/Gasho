@@ -1,10 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { connect } from "./lib/store";
+import { start } from "./lib/store";
 import "./index.css";
 
-connect();
+void start();
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>

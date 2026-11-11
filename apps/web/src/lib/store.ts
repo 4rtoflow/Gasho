@@ -2,12 +2,17 @@
 import { useSyncExternalStore } from "react";
 import type {
   ClientToHub,
+  DeviceInfo,
   GashoNotification,
   HubToClient,
   MachineHookEvent,
   MachineInfo,
   TranscriptEntry,
 } from "@gasho/protocol";
+import { fetchMe } from "./api";
+
+/** Close code the Gasho server uses when this browser is not (or no longer) registered. */
+const CLOSE_UNAUTHORIZED = 4401;
 
 export interface TranscriptState {
   entries: TranscriptEntry[];
@@ -18,7 +23,11 @@ export interface TranscriptState {
   error?: string;
 }
 
+export type AuthState = "checking" | "registered" | "unregistered" | "unreachable";
+
 export interface State {
+  auth: AuthState;
+  me?: DeviceInfo;
   connected: boolean;
   machines: MachineInfo[];
   notifications: GashoNotification[];
@@ -32,7 +41,8 @@ const MAX_NOTIFICATIONS = 200;
 
 export const transcriptKey = (machine: string, sessionId: string): string => `${machine}\u0000${sessionId}`;
 
-let state: State = { connected: false, machines: [], notifications: [], events: [], transcripts: {} };
+const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {} };
+let state: State = { auth: "checking", ...EMPTY };
 const listeners = new Set<() => void>();
 
 function update(next: Partial<State>): void {
@@ -47,7 +57,33 @@ function setTranscript(key: string, t: TranscriptState): void {
 let socket: WebSocket | undefined;
 let backoff = 1000;
 
-export function connect(): void {
+/** Checks the registration of this browser and connects when it is registered. */
+export async function start(): Promise<void> {
+  update({ auth: "checking" });
+  try {
+    const me = await fetchMe();
+    if (!me) {
+      update({ auth: "unregistered", me: undefined });
+      return;
+    }
+    update({ auth: "registered", me });
+    if (!socket) connect();
+  } catch {
+    update({ auth: "unreachable" });
+    setTimeout(() => void start(), 5000);
+  }
+}
+
+/** Forgets everything after this browser's registration ended. */
+export function becomeUnregistered(): void {
+  const ws = socket;
+  socket = undefined;
+  ws?.close();
+  state = { auth: "unregistered", ...EMPTY };
+  for (const l of listeners) l();
+}
+
+function connect(): void {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/client`);
   socket = ws;
@@ -67,8 +103,13 @@ export function connect(): void {
       console.error("gasho: bad message", e);
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
+    if (socket !== ws) return; // replaced or closed on purpose
     socket = undefined;
+    if (ev.code === CLOSE_UNAUTHORIZED) {
+      becomeUnregistered();
+      return;
+    }
     update({ connected: false });
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 15_000);
@@ -89,10 +130,16 @@ function handle(m: HubToClient): void {
       update({ machines: m.machines, notifications: m.notifications, events: m.events.slice(-MAX_EVENTS) });
       break;
     case "machine": {
-      const machines = state.machines.filter((x) => x.name !== m.machine.name);
+      const machines = state.machines.filter((x) => x.id !== m.machine.id);
       machines.push(m.machine);
       machines.sort((a, b) => a.name.localeCompare(b.name));
       update({ machines });
+      break;
+    }
+    case "machine.removed": {
+      const prefix = transcriptKey(m.id, "");
+      const transcripts = Object.fromEntries(Object.entries(state.transcripts).filter(([k]) => !k.startsWith(prefix)));
+      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts });
       break;
     }
     case "transcript.page": {

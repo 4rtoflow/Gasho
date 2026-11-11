@@ -1,9 +1,10 @@
 import os from "node:os";
 import path from "node:path";
+import { daemonUrl, type Credentials } from "./credentials.ts";
 
 export interface DaemonConfig {
   hubUrl: string;
-  machine: string;
+  machineId: string;
   token: string;
   hookPort: number;
   hookSecret: string | undefined;
@@ -12,13 +13,11 @@ export interface DaemonConfig {
   pollIntervalMs: number;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
-  const token = env.GASHO_TOKEN;
-  if (!token) throw new Error("GASHO_TOKEN is not set (the token shared with gasho-hub)");
+export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.env): DaemonConfig {
   return {
-    hubUrl: env.GASHO_HUB_URL ?? "ws://127.0.0.1:7740/ws/daemon",
-    machine: env.GASHO_MACHINE ?? os.hostname(),
-    token,
+    hubUrl: env.GASHO_HUB_URL ?? daemonUrl(creds.server),
+    machineId: creds.machineId,
+    token: creds.token,
     hookPort: Number(env.GASHO_HOOK_PORT ?? 7741),
     hookSecret: env.GASHO_HOOK_SECRET || undefined,
     claudeDir: env.GASHO_CLAUDE_DIR ?? path.join(os.homedir(), ".claude"),

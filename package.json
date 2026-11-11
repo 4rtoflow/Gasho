@@ -10,6 +10,8 @@
     "typecheck": "tsc -p packages/protocol && tsc -p apps/daemon && tsc -p apps/hub && npm run typecheck -w @gasho/web",
     "test": "node --test --disable-warning=ExperimentalWarning \"apps/*/test/*.test.ts\"",
     "hub": "npm run start -w @gasho/hub",
+    "hub:pair": "npm run pair -w @gasho/hub",
+    "hub:devices": "npm run devices -w @gasho/hub",
     "daemon": "npm run start -w @gasho/daemon",
     "web:dev": "npm run dev -w @gasho/web",
     "web:build": "npm run build -w @gasho/web"
