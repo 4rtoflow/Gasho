@@ -1,23 +1,43 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import type { GitHubRepo, HubToDaemon, SessionInfo } from "@gasho/protocol";
+import type { CommandResult, GitHubRepo, HubToDaemon, SessionInfo } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf } from "./git.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
+import {
+  cleanEnv,
+  isAlive,
+  launchableFolders,
+  launchArgs,
+  ManagedSessions,
+  PERMISSION_PROMPT_RE,
+  TRUST_PROMPT_RE,
+  Zellij,
+  zellijSessionName,
+} from "./managed.ts";
 import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.1.0";
+export const DAEMON_VERSION = "0.2.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
+const FOLDERS_REFRESH_MS = 5 * 60_000;
+const LAUNCH_TIMEOUT_MS = 30_000;
+const MAX_INPUT = 20_000;
 
 interface Tracked {
   info: SessionInfo;
   transcript?: string;
   tail?: TranscriptTail;
   meta: TranscriptMeta;
+  /** The transcript did not exist yet when the session was first seen (Claude Code writes it on the first message). */
+  sawWithoutTranscript?: boolean;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export class Daemon {
   private cfg: DaemonConfig;
@@ -29,15 +49,23 @@ export class Daemon {
   private refreshTimer: NodeJS.Timeout | undefined;
   private polling = false;
   private github = new Map<string, { at: number; repo?: GitHubRepo }>();
+  private zellij: Zellij;
+  private managed: ManagedSessions;
+  private canLaunch = false;
+  private folders: string[] = [];
+  private flushing = new Set<string>();
 
   constructor(cfg: DaemonConfig) {
     this.cfg = cfg;
+    this.zellij = new Zellij(cleanEnv());
+    this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
     this.hub = new HubClient({
       url: cfg.hubUrl,
       hello: () => ({ type: "hello", machineId: cfg.machineId, token: cfg.token, daemonVersion: DAEMON_VERSION }),
       onReady: () => {
         this.lastSent = "";
         this.emitSessions();
+        this.emitCapabilities();
       },
       onMessage: (m) => void this.onHubMessage(m),
       onRejected: (reason) => {
@@ -48,9 +76,16 @@ export class Daemon {
     });
   }
 
-  start(): void {
+  async start(): Promise<void> {
     log(`machine ${this.cfg.machineId}, Gasho server ${this.cfg.hubUrl}`);
     if (!this.cfg.hookSecret) log("GASHO_HOOK_SECRET is not set; hook requests are accepted without a secret");
+    this.canLaunch = await this.zellij.available();
+    if (!this.canLaunch) log("zellij is not available; sessions cannot be started from Gasho on this machine");
+    const live = this.canLaunch ? await this.zellij.liveSessions() : new Set<string>();
+    await this.managed.load(async (m) => isAlive(m.pid) && live.has(m.zellijSession));
+    await this.refreshFolders();
+    setInterval(() => void this.refreshFolders(), FOLDERS_REFRESH_MS).unref();
+
     this.hub.connect();
     startHookServer({
       host: "127.0.0.1",
@@ -101,7 +136,9 @@ export class Daemon {
       for (const id of [...this.tracked.keys()]) {
         if (!seen.has(id)) this.tracked.delete(id);
       }
+      await this.forgetEndedSessions(seen);
       this.emitSessions();
+      for (const m of this.managed.all()) if (this.managed.pending(m.sessionId) > 0) void this.flushInput(m.sessionId);
     } catch (e) {
       log("refresh failed", e);
     } finally {
@@ -111,6 +148,19 @@ export class Daemon {
         void this.refresh();
       }
     }
+  }
+
+  /** Managed sessions whose Claude Code has exited: drop them and close their zellij session. */
+  private async forgetEndedSessions(seen: Set<string>): Promise<void> {
+    let changed = false;
+    for (const m of this.managed.all()) {
+      if (seen.has(m.sessionId) || isAlive(m.pid)) continue;
+      this.managed.remove(m.sessionId);
+      await this.zellij.kill(m.zellijSession);
+      log(`session ${m.name} ended; closed zellij session ${m.zellijSession}`);
+      changed = true;
+    }
+    if (changed) await this.managed.save();
   }
 
   private newTracked(row: AgentRow): Tracked {
@@ -133,14 +183,23 @@ export class Daemon {
     info.rcMode = rcModeOf(reg);
 
     if (!t.transcript) {
-      t.transcript = await findTranscript(this.cfg.claudeDir, info.sessionId);
-      if (t.transcript) {
+      const found = await findTranscript(this.cfg.claudeDir, info.sessionId);
+      if (!found) {
+        t.sawWithoutTranscript = true;
+      } else if (t.sawWithoutTranscript) {
+        // Written after we started following the session: stream it from the start, so browsers that
+        // loaded the (then empty) conversation receive the first messages too.
+        t.transcript = found;
+        t.meta = emptyMeta();
+        t.tail = new TranscriptTail(found, 0);
+      } else {
         try {
-          const { meta, consumed } = await readTranscript(t.transcript);
+          const { meta, consumed } = await readTranscript(found);
+          t.transcript = found;
           t.meta = meta;
-          t.tail = new TranscriptTail(t.transcript, consumed);
+          t.tail = new TranscriptTail(found, consumed);
         } catch (e) {
-          log(`cannot read ${t.transcript}`, e);
+          log(`cannot read ${found}`, e);
         }
       }
     }
@@ -168,12 +227,29 @@ export class Daemon {
 
   private emitSessions(): void {
     const sessions = [...this.tracked.values()]
-      .map((t) => t.info)
+      .map((t) => {
+        const m = this.managed.get(t.info.sessionId);
+        const pending = this.managed.pending(t.info.sessionId);
+        // A session started from Gasho keeps the name it was given (also its Remote Control name).
+        return { ...t.info, name: m?.name ?? t.info.name, managed: m ? true : undefined, pendingInputs: pending || undefined };
+      })
       .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
     const json = JSON.stringify(sessions);
     if (json === this.lastSent || !this.hub.connected) return;
     this.lastSent = json;
     this.hub.send({ type: "sessions", sessions });
+  }
+
+  private async refreshFolders(): Promise<void> {
+    const cwds = [...this.tracked.values()].map((t) => t.info.cwd);
+    const folders = await launchableFolders(os.homedir(), cwds);
+    if (JSON.stringify(folders) === JSON.stringify(this.folders)) return;
+    this.folders = folders;
+    this.emitCapabilities();
+  }
+
+  private emitCapabilities(): void {
+    if (this.hub.connected) this.hub.send({ type: "capabilities", canLaunch: this.canLaunch, folders: this.folders });
   }
 
   private async pollTails(): Promise<void> {
@@ -196,11 +272,37 @@ export class Daemon {
   }
 
   private async onHubMessage(m: HubToDaemon): Promise<void> {
-    if (m.type !== "transcript.get") return;
+    switch (m.type) {
+      case "transcript.get":
+        return this.sendTranscriptPage(m);
+      case "session.launch":
+      case "session.input":
+      case "session.interrupt": {
+        let result: CommandResult;
+        try {
+          if (m.type === "session.launch") result = await this.launch(m.cwd, m.name);
+          else if (m.type === "session.input") result = await this.input(m.sessionId, m.text);
+          else result = await this.interrupt(m.sessionId);
+        } catch (e) {
+          log(`${m.type} failed`, e);
+          result = { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+        this.hub.send({ type: "command.result", requestId: m.requestId, result });
+        return;
+      }
+    }
+  }
+
+  private async sendTranscriptPage(m: Extract<HubToDaemon, { type: "transcript.get" }>): Promise<void> {
     const t = this.tracked.get(m.sessionId);
     const reply = { type: "transcript.page" as const, requestId: m.requestId, sessionId: m.sessionId };
-    if (!t?.transcript) {
-      this.hub.send({ ...reply, entries: [], start: 0, total: 0, error: "transcript not found" });
+    if (!t) {
+      this.hub.send({ ...reply, entries: [], start: 0, total: 0, error: "session not found" });
+      return;
+    }
+    if (!t.transcript) {
+      // A new session has no transcript until its first message; that is an empty conversation, not an error.
+      this.hub.send({ ...reply, entries: [], start: 0, total: 0 });
       return;
     }
     try {
@@ -212,5 +314,106 @@ export class Daemon {
     } catch (e) {
       this.hub.send({ ...reply, entries: [], start: 0, total: 0, error: String(e) });
     }
+  }
+
+  // ---- sessions started by Gasho ----
+
+  /** Starts `claude --remote-control` in `cwd` inside a new zellij session and waits for its session id. */
+  private async launch(cwd: string, name: string | undefined): Promise<CommandResult> {
+    if (!this.canLaunch) return { ok: false, error: "この working server には zellij がないので、セッションを起動できません。" };
+    const dir = path.resolve(cwd);
+    const stat = await fsp.stat(dir).catch(() => undefined);
+    if (!stat?.isDirectory()) return { ok: false, error: `フォルダーがありません：${dir}` };
+    const rcName = name?.trim() || `${path.basename(dir)}-gasho`;
+    const zellijSession = zellijSessionName(rcName);
+    const pidFile = path.join(this.cfg.stateDir, `${zellijSession}.pid`);
+    await fsp.mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
+    await this.zellij.run(
+      launchArgs({ zellijSession, pidFile, cwd: dir, claudeBin: this.cfg.claudeBin, rcName, env: cleanEnv() }),
+    );
+    log(`launching "${rcName}" in ${dir} (zellij session ${zellijSession})`);
+
+    const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
+    let pid: number | undefined;
+    while (Date.now() < deadline) {
+      await sleep(500);
+      pid ??= Number((await fsp.readFile(pidFile, "utf8").catch(() => "")).trim()) || undefined;
+      if (!pid) continue;
+      const screen = await this.zellij.screen(zellijSession).catch(() => "");
+      if (TRUST_PROMPT_RE.test(screen)) {
+        await this.zellij.kill(zellijSession);
+        return {
+          ok: false,
+          error: "このフォルダーは、まだ Claude Code に信頼されていません。端末で一度 claude を起動して信頼してから、もう一度試してください。",
+        };
+      }
+      const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid && r.sessionId);
+      if (row?.sessionId) {
+        this.managed.add({ sessionId: row.sessionId, zellijSession, pid, cwd: dir, name: rcName, launchedAt: Date.now() });
+        await this.managed.save();
+        await fsp.rm(pidFile, { force: true });
+        await this.refresh();
+        return { ok: true, sessionId: row.sessionId };
+      }
+      if (!isAlive(pid)) break;
+    }
+    await this.zellij.kill(zellijSession);
+    await fsp.rm(pidFile, { force: true });
+    return { ok: false, error: "Claude Code を起動できませんでした（時間内にセッションを確認できませんでした）。" };
+  }
+
+  private async input(sessionId: string, text: string): Promise<CommandResult> {
+    if (!this.managed.has(sessionId)) {
+      return { ok: false, error: "このセッションには Gasho から入力できません。入力できるのは、Gasho が起動したセッションだけです。" };
+    }
+    const body = text.trim();
+    if (!body) return { ok: false, error: "入力が空です。" };
+    if (body.length > MAX_INPUT) return { ok: false, error: `入力が長すぎます（${MAX_INPUT} 文字まで）。` };
+    this.managed.enqueue(sessionId, body);
+    await this.flushInput(sessionId);
+    const queued = this.managed.pending(sessionId) > 0;
+    this.emitSessions();
+    return { ok: true, queued };
+  }
+
+  /** The session's status right now (not the last poll), so input is never typed into a busy session. */
+  private async currentStatus(pid: number): Promise<string | undefined> {
+    const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid);
+    return row ? mapStatus(row) : undefined;
+  }
+
+  /** Types the next waiting input if the session is idle and no dialog is open. One message per idle period. */
+  private async flushInput(sessionId: string): Promise<void> {
+    if (this.flushing.has(sessionId)) return;
+    this.flushing.add(sessionId);
+    try {
+      const m = this.managed.get(sessionId);
+      if (!m || this.managed.pending(sessionId) === 0) return;
+      if ((await this.currentStatus(m.pid)) !== "idle") return;
+      const screen = await this.zellij.screen(m.zellijSession).catch(() => "");
+      if (PERMISSION_PROMPT_RE.test(screen) || TRUST_PROMPT_RE.test(screen)) return;
+      const text = this.managed.next(sessionId);
+      if (text === undefined) return;
+      try {
+        await this.zellij.paste(m.zellijSession, text);
+        await this.zellij.keys(m.zellijSession, "Enter");
+      } catch (e) {
+        this.managed.unshift(sessionId, text);
+        throw e;
+      }
+      this.emitSessions();
+      this.scheduleRefresh(500);
+    } finally {
+      this.flushing.delete(sessionId);
+    }
+  }
+
+  private async interrupt(sessionId: string): Promise<CommandResult> {
+    const m = this.managed.get(sessionId);
+    if (!m) return { ok: false, error: "このセッションは Gasho から止められません。公式アプリで止めてください。" };
+    if ((await this.currentStatus(m.pid)) !== "busy") return { ok: false, error: "作業中ではありません。" };
+    await this.zellij.keys(m.zellijSession, "Esc");
+    this.scheduleRefresh(500);
+    return { ok: true };
   }
 }

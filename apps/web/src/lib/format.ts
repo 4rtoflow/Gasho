@@ -49,6 +49,8 @@ export function basename(p: string): string {
 }
 
 export function sessionLabel(s: SessionInfo): string {
+  // Sessions started from Gasho show the name the user gave them rather than the generated title.
+  if (s.managed && s.name) return s.name;
   return s.title || s.name || basename(s.cwd) || s.sessionId.slice(0, 8);
 }
 

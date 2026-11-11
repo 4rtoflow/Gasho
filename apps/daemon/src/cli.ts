@@ -39,7 +39,7 @@ try {
     }
     case "run": {
       const creds = await loadCredentials(credentialsPath());
-      new Daemon(loadConfig(creds)).start();
+      await new Daemon(loadConfig(creds)).start();
       break;
     }
     case "hooks": {

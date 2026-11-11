@@ -1,5 +1,5 @@
-import { ExternalLink } from "lucide-react";
-import { useMemo } from "react";
+import { ExternalLink, Plus } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { GashoNotification, SessionInfo, SessionStatus } from "@gasho/protocol";
 import { StatusBadge } from "@/components/status-badge";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
@@ -8,6 +8,7 @@ import { branchLabel, claudeUrl, relativeTime, repoLabel, sessionLabel, waitingL
 import { go } from "@/lib/route";
 import { markRead, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
+import { LaunchPanel } from "@/views/launch";
 
 interface Row {
   id: string;
@@ -34,6 +35,7 @@ function openSession(machine: string, sessionId: string): void {
 export function HomeView() {
   const { machines, notifications } = useAppState();
   const now = useNow();
+  const [launching, setLaunching] = useState(false);
 
   const rows = useMemo<Row[]>(
     () =>
@@ -57,7 +59,14 @@ export function HomeView() {
           const branch = branchLabel(r.s);
           return (
             <div className="min-w-0">
-              <div className="truncate font-medium">{sessionLabel(r.s)}</div>
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate font-medium">{sessionLabel(r.s)}</span>
+                {r.s.managed && (
+                  <span className="shrink-0 rounded border border-emerald-500/40 px-1 text-[10px] text-emerald-400" title="Gasho が起動したセッション。Gasho から入力できます">
+                    入力可
+                  </span>
+                )}
+              </div>
               <div className="truncate text-xs text-neutral-500">
                 {repoLabel(r.s)}
                 {branch && ` · ${branch}`}
@@ -120,12 +129,26 @@ export function HomeView() {
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6 p-4 md:p-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">ホーム</h1>
-        <p className="text-sm text-muted-foreground">
-          {machines.length} 台のマシン・{rows.length} セッション
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">ホーム</h1>
+          <p className="text-sm text-muted-foreground">
+            {machines.length} 台のマシン・{rows.length} セッション
+          </p>
+        </div>
+        {!launching && (
+          <button
+            type="button"
+            onClick={() => setLaunching(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+          >
+            <Plus className="size-4" />
+            新しいセッション
+          </button>
+        )}
       </div>
+
+      {launching && <LaunchPanel onClose={() => setLaunching(false)} />}
 
       {waiting.length > 0 && (
         <section className="space-y-2">

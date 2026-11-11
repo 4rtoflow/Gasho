@@ -44,6 +44,10 @@ export interface SessionInfo {
   prLinks: PrLink[];
   costUSD?: number;
   lastActivityAt?: number;
+  /** Started by Gasho (in zellij), so Gasho can send input to it. */
+  managed?: boolean;
+  /** Inputs waiting until the session is idle. */
+  pendingInputs?: number;
 }
 
 export type TranscriptBlock =
@@ -102,6 +106,10 @@ export interface MachineInfo {
   lastSeen: number;
   daemonVersion?: string;
   sessions: SessionInfo[];
+  /** Whether Gasho can start sessions on this machine (zellij is available). */
+  canLaunch?: boolean;
+  /** Folders a session can be started in (already trusted by Claude Code). */
+  folders?: string[];
 }
 
 /** Something registered with the Gasho server: a browser or a working server. */
@@ -151,12 +159,15 @@ export type DaemonToHub =
   | { type: "sessions"; sessions: SessionInfo[] }
   | { type: "transcript.append"; sessionId: string; entries: TranscriptEntry[] }
   | ({ type: "transcript.page"; requestId: string; sessionId: string } & TranscriptPage)
-  | { type: "hook"; event: HookEvent };
+  | { type: "hook"; event: HookEvent }
+  | { type: "capabilities"; canLaunch: boolean; folders: string[] }
+  | { type: "command.result"; requestId: string; result: CommandResult };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
   | { type: "welcome" }
-  | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number };
+  | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number }
+  | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
 export type HubToClient =
@@ -172,9 +183,25 @@ export type HubToClient =
   | { type: "transcript.append"; machine: string; sessionId: string; entries: TranscriptEntry[] }
   | { type: "notification"; notification: GashoNotification }
   | { type: "notification.read"; ids: string[] }
-  | { type: "event"; event: MachineHookEvent };
+  | { type: "event"; event: MachineHookEvent }
+  | { type: "command.result"; requestId: string; machine: string; result: CommandResult };
 
 // browser -> gasho-hub
 export type ClientToHub =
   | { type: "transcript.get"; machine: string; sessionId: string; before?: number; limit: number }
-  | { type: "notification.read"; ids: string[] };
+  | { type: "notification.read"; ids: string[] }
+  | ({ requestId: string; machine: string } & SessionCommand);
+
+/** Commands a browser can send to a working server, relayed by the Gasho server. */
+export type SessionCommand =
+  | { type: "session.launch"; cwd: string; name?: string }
+  | { type: "session.input"; sessionId: string; text: string }
+  | { type: "session.interrupt"; sessionId: string };
+
+export interface CommandResult {
+  ok: boolean;
+  error?: string;
+  /** session.launch: the new session; session.input: whether the input waits for the session to become idle. */
+  sessionId?: string;
+  queued?: boolean;
+}

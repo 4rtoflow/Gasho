@@ -2,11 +2,13 @@
 import { useSyncExternalStore } from "react";
 import type {
   ClientToHub,
+  CommandResult,
   DeviceInfo,
   GashoNotification,
   HubToClient,
   MachineHookEvent,
   MachineInfo,
+  SessionCommand,
   TranscriptEntry,
 } from "@gasho/protocol";
 import { fetchMe } from "./api";
@@ -120,6 +122,33 @@ function send(m: ClientToHub): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(m));
 }
 
+const pendingCommands = new Map<string, (r: CommandResult) => void>();
+
+/** crypto.randomUUID() is unavailable over plain HTTP on the LAN (it needs a secure context). */
+function requestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Sends a command to a working server through the Gasho server and waits for its result. */
+export function sendCommand(machine: string, cmd: SessionCommand, timeoutMs = 60_000): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    if (socket?.readyState !== WebSocket.OPEN) {
+      resolve({ ok: false, error: "Gasho サーバーにつながっていません。" });
+      return;
+    }
+    const id = requestId();
+    const timer = setTimeout(() => {
+      pendingCommands.delete(id);
+      resolve({ ok: false, error: "応答がありませんでした。" });
+    }, timeoutMs);
+    pendingCommands.set(id, (r) => {
+      clearTimeout(timer);
+      resolve(r);
+    });
+    send({ ...cmd, requestId: id, machine });
+  });
+}
+
 function sameEntry(a: TranscriptEntry, b: TranscriptEntry): boolean {
   return a.uuid !== "" && a.uuid === b.uuid;
 }
@@ -155,7 +184,9 @@ function handle(m: HubToClient): void {
       } else {
         // Keep live entries that arrived after the page was read.
         const extra = (cur?.entries ?? []).filter((e) => e.uuid && !m.entries.some((p) => sameEntry(p, e)));
-        const tail = extra.filter((e) => e.ts && m.entries.at(-1)?.ts && e.ts > (m.entries.at(-1)?.ts ?? ""));
+        const lastTs = m.entries.at(-1)?.ts;
+        // With an empty page (a brand-new session) every live entry is newer than the page.
+        const tail = lastTs ? extra.filter((e) => e.ts && e.ts > lastTs) : extra;
         setTranscript(key, { entries: [...m.entries, ...tail], start: m.start, total: m.total + tail.length, loading: false });
       }
       break;
@@ -179,6 +210,10 @@ function handle(m: HubToClient): void {
     }
     case "event":
       update({ events: [...state.events, m.event].slice(-MAX_EVENTS) });
+      break;
+    case "command.result":
+      pendingCommands.get(m.requestId)?.(m.result);
+      pendingCommands.delete(m.requestId);
       break;
   }
 }

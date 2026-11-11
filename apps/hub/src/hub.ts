@@ -2,12 +2,14 @@
 import { randomUUID } from "node:crypto";
 import type {
   ClientToHub,
+  CommandResult,
   DaemonToHub,
   DeviceInfo,
   HubToClient,
   HubToDaemon,
   MachineHookEvent,
   MachineInfo,
+  SessionCommand,
 } from "@gasho/protocol";
 import { notificationFor } from "./notify.ts";
 import type { Store } from "./store.ts";
@@ -35,6 +37,33 @@ interface PendingRequest {
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
+const LAUNCH_TIMEOUT_MS = 45_000;
+const MAX_INPUT = 20_000;
+
+interface PendingCommand {
+  client: ClientPeer;
+  clientRequestId: string;
+  machine: string;
+  timer: NodeJS.Timeout;
+}
+
+/** Checks a command from a browser; returns an error message or undefined. */
+export function validateCommand(cmd: SessionCommand): string | undefined {
+  switch (cmd.type) {
+    case "session.launch":
+      if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
+      if (cmd.name !== undefined && (typeof cmd.name !== "string" || cmd.name.length > 60)) return "名前は60文字までです。";
+      return undefined;
+    case "session.input":
+      if (typeof cmd.text !== "string" || !cmd.text.trim()) return "入力が空です。";
+      if (cmd.text.length > MAX_INPUT) return `入力が長すぎます（${MAX_INPUT} 文字まで）。`;
+      return undefined;
+    case "session.interrupt":
+      return undefined;
+    default:
+      return "不明な命令です。";
+  }
+}
 
 export class Hub {
   private store: Store;
@@ -42,6 +71,7 @@ export class Hub {
   private daemons = new Map<string, DaemonPeer>();
   private clients = new Set<ClientPeer>();
   private pending = new Map<string, PendingRequest>();
+  private commands = new Map<string, PendingCommand>();
 
   constructor(store: Store) {
     this.store = store;
@@ -89,6 +119,19 @@ export class Hub {
       case "transcript.append":
         this.broadcast({ type: "transcript.append", machine: id, sessionId: msg.sessionId, entries: msg.entries });
         break;
+      case "capabilities":
+        m.canLaunch = msg.canLaunch;
+        m.folders = msg.folders;
+        this.broadcast({ type: "machine", machine: m });
+        break;
+      case "command.result": {
+        const cmd = this.commands.get(msg.requestId);
+        if (!cmd) break;
+        clearTimeout(cmd.timer);
+        this.commands.delete(msg.requestId);
+        cmd.client.send({ type: "command.result", requestId: cmd.clientRequestId, machine: id, result: msg.result });
+        break;
+      }
       case "transcript.page": {
         const req = this.pending.get(msg.requestId);
         if (!req) break;
@@ -125,6 +168,7 @@ export class Hub {
       this.broadcast({ type: "machine", machine: m });
     }
     this.failPending((req) => req.machine === id, "machine disconnected");
+    this.failCommands((c) => c.machine === id, "working server との接続が切れました。");
   }
 
   // ---- browsers ----
@@ -162,11 +206,44 @@ export class Hub {
         this.store.markRead(msg.ids);
         this.broadcast({ type: "notification.read", ids: msg.ids });
         break;
+      case "session.launch":
+      case "session.input":
+      case "session.interrupt": {
+        const { requestId: clientRequestId, machine, ...cmd } = msg;
+        this.relayCommand(peer, clientRequestId, machine, cmd);
+        break;
+      }
     }
+  }
+
+  private relayCommand(peer: ClientPeer, clientRequestId: string, machine: string, cmd: SessionCommand): void {
+    const reply = (result: CommandResult) => peer.send({ type: "command.result", requestId: clientRequestId, machine, result });
+    const invalid = validateCommand(cmd);
+    if (invalid) return reply({ ok: false, error: invalid });
+    const daemon = this.daemons.get(machine);
+    if (!daemon) return reply({ ok: false, error: "この working server はオフラインです。" });
+    // Audit trail of what browsers asked working servers to do.
+    const sessionId = "sessionId" in cmd ? cmd.sessionId : "";
+    const summary = cmd.type === "session.input" ? cmd.text.slice(0, 300) : cmd.type === "session.launch" ? cmd.cwd : "";
+    const event: MachineHookEvent = { machine, sessionId, event: `Gasho:${cmd.type}`, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` };
+    this.store.addEvent(event);
+
+    const requestId = randomUUID();
+    const timeout = cmd.type === "session.launch" ? LAUNCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
+    }, timeout);
+    this.commands.set(requestId, { client: peer, clientRequestId, machine, timer });
+    daemon.send({ requestId, ...cmd });
   }
 
   onClientClose(peer: ClientPeer): void {
     this.clients.delete(peer);
+    for (const [id, c] of this.commands) {
+      if (c.client !== peer) continue;
+      clearTimeout(c.timer);
+      this.commands.delete(id);
+    }
     for (const [id, req] of this.pending) {
       if (req.client !== peer) continue;
       clearTimeout(req.timer);
@@ -239,6 +316,15 @@ export class Hub {
       clearTimeout(req.timer);
       this.pending.delete(id);
       req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
+    }
+  }
+
+  private failCommands(match: (c: PendingCommand) => boolean, error: string): void {
+    for (const [id, c] of this.commands) {
+      if (!match(c)) continue;
+      clearTimeout(c.timer);
+      this.commands.delete(id);
+      c.client.send({ type: "command.result", requestId: c.clientRequestId, machine: c.machine, result: { ok: false, error } });
     }
   }
 

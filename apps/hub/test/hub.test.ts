@@ -176,3 +176,51 @@ test("notificationFor covers permission, idle and errors, and ignores other even
   assert.equal(notificationFor("m", { ...ev, event: "PreToolUse" }, session, "4"), null);
   assert.equal(notificationFor("m", { ...ev, event: "Stop" }, undefined, "5")?.title, "s1 の応答が終わりました");
 });
+
+test("session commands are relayed to the working server and the result goes back to the asking browser only", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.2.0" });
+  hub.onDaemonMessage(d, { type: "capabilities", canLaunch: true, folders: ["/home/rg/repos/Gasho"] });
+  const asking = fakePeer<HubToClient>(browserId);
+  const other = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(asking);
+  hub.onClientConnect(other);
+  const snap = asking.sent[0];
+  assert.ok(snap?.type === "snapshot");
+  assert.deepEqual(snap.machines[0]?.folders, ["/home/rg/repos/Gasho"]);
+
+  hub.onClientMessage(asking, { type: "session.input", requestId: "c1", machine: machineId, sessionId: "s1", text: "テスト" });
+  const relayed = d.sent.at(-1);
+  assert.ok(relayed?.type === "session.input");
+  assert.equal(relayed.text, "テスト");
+  assert.notEqual(relayed.requestId, "c1"); // the hub uses its own ids towards working servers
+
+  hub.onDaemonMessage(d, { type: "command.result", requestId: relayed.requestId, result: { ok: true, queued: true } });
+  assert.deepEqual(asking.sent.at(-1), { type: "command.result", requestId: "c1", machine: machineId, result: { ok: true, queued: true } });
+  assert.ok(!other.sent.some((m) => m.type === "command.result"));
+});
+
+test("session commands are refused when invalid or when the working server is offline, and fail when it disconnects", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  hub.onClientMessage(c, { type: "session.input", requestId: "a", machine: machineId, sessionId: "s1", text: "hi" });
+  let r = c.sent.at(-1);
+  assert.ok(r?.type === "command.result" && !r.result.ok);
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.2.0" });
+  hub.onClientMessage(c, { type: "session.input", requestId: "b", machine: machineId, sessionId: "s1", text: "   " });
+  r = c.sent.at(-1);
+  assert.ok(r?.type === "command.result" && r.requestId === "b" && r.result.error === "入力が空です。");
+  hub.onClientMessage(c, { type: "session.launch", requestId: "c", machine: machineId, cwd: "relative/path" });
+  r = c.sent.at(-1);
+  assert.ok(r?.type === "command.result" && r.requestId === "c" && !r.result.ok);
+
+  hub.onClientMessage(c, { type: "session.interrupt", requestId: "d", machine: machineId, sessionId: "s1" });
+  assert.equal(d.sent.at(-1)?.type, "session.interrupt");
+  hub.onDaemonClose(d);
+  r = c.sent.at(-1);
+  assert.ok(r?.type === "command.result" && r.requestId === "d" && !r.result.ok);
+});

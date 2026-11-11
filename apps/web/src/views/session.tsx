@@ -1,9 +1,9 @@
-import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest, Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { MachineInfo, SessionInfo } from "@gasho/protocol";
 import { StatusBadge } from "@/components/status-badge";
-import { ToolActivity } from "@/components/tool-activity";
 import { Transcript } from "@/components/transcript";
-import { AnimatedTabs } from "@/components/ui/animated-tabs";
+import { PromptInput } from "@/components/ui/prompt-input";
 import {
   RC_MODE_LABEL,
   branchLabel,
@@ -15,32 +15,25 @@ import {
   waitingLabel,
 } from "@/lib/format";
 import { go } from "@/lib/route";
-import { loadTranscript, transcriptKey, useAppState } from "@/lib/store";
+import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 
-type Tab = "chat" | "tools" | "events";
-
 export function SessionView({ machine, sessionId }: { machine: string; sessionId: string }) {
-  const { machines, transcripts, events } = useAppState();
+  const { machines, transcripts } = useAppState();
   const now = useNow();
-  const [tab, setTab] = useState<Tab>("chat");
   const m = machines.find((x) => x.id === machine);
   const s = m?.sessions.find((x) => x.sessionId === sessionId);
   const t = transcripts[transcriptKey(machine, sessionId)];
-  const sessionEvents = useMemo(
-    () => events.filter((e) => e.machine === machine && e.sessionId === sessionId).reverse(),
-    [events, machine, sessionId],
-  );
 
   useEffect(() => {
     if (m?.connected) loadTranscript(machine, sessionId);
   }, [machine, sessionId, m?.connected]);
 
-  if (!s) {
+  if (!m || !s) {
     return (
       <div className="mx-auto max-w-3xl p-6 text-sm text-muted-foreground">
         <BackLink />
-        <p className="mt-4">このセッションは見つかりません。終了したか、{m?.name ?? "このマシン"} の gasho-daemon が接続していません。</p>
+        <p className="mt-4">このセッションは見つかりません。終了したか、{m?.name ?? "この working server"} の gasho-daemon が接続していません。</p>
       </div>
     );
   }
@@ -48,21 +41,20 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
   const url = claudeUrl(s);
   const branch = branchLabel(s);
   const cost = formatCost(s.costUSD);
-  const toolCount = t?.entries.reduce((n, e) => n + e.blocks.filter((b) => b.type === "tool_use").length, 0) ?? 0;
 
   return (
     <div className="flex h-full flex-col">
-      <header className="shrink-0 space-y-3 border-b border-border px-4 py-3 md:px-6">
+      <header className="shrink-0 space-y-2 border-b border-border px-4 py-3 md:px-6">
         <BackLink />
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h1 className="truncate text-lg font-semibold tracking-tight">{sessionLabel(s)}</h1>
             <p className="truncate text-xs text-muted-foreground">
-              {m?.name} · {s.cwd} · {RC_MODE_LABEL[s.rcMode]}
+              {m.name} · {s.cwd} · {s.managed ? "Gasho が起動" : RC_MODE_LABEL[s.rcMode]}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {m?.connected ? <StatusBadge status={s.status} /> : <span className="text-xs text-muted-foreground">オフライン</span>}
+            {m.connected ? <StatusBadge status={s.status} /> : <span className="text-xs text-muted-foreground">オフライン</span>}
             {url && (
               <a
                 href={url}
@@ -116,54 +108,92 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
           <span>最終更新 {relativeTime(s.lastActivityAt, now)}</span>
           {cost && <span>費用 {cost}</span>}
         </div>
-        <AnimatedTabs
-          tabs={[
-            { id: "chat", label: "会話" },
-            { id: "tools", label: "ツール", badge: toolCount || undefined },
-            { id: "events", label: "イベント", badge: sessionEvents.length || undefined },
-          ]}
-          activeTab={tab}
-          onChange={(id) => setTab(id as Tab)}
-          renderContent={false}
-          variant="pill"
-        />
       </header>
       <div className="min-h-0 flex-1">
-        {tab === "chat" && (
-          <Transcript
-            key={`${machine}/${sessionId}`}
-            state={t}
-            onLoadOlder={() => loadTranscript(machine, sessionId, true)}
-          />
-        )}
-        {tab === "tools" && (
-          <div className="h-full overflow-y-auto p-4 md:p-6">
-            <div className="mx-auto max-w-3xl">
-              <ToolActivity entries={t?.entries ?? []} busy={s.status === "busy"} agentName={sessionLabel(s)} />
-            </div>
-          </div>
-        )}
-        {tab === "events" && (
-          <div className="h-full overflow-y-auto p-4 md:p-6">
-            <ul className="mx-auto max-w-3xl divide-y divide-border text-sm">
-              {sessionEvents.length === 0 && (
-                <li className="py-8 text-center text-muted-foreground">
-                  hooks のイベントはまだ届いていません。hooks を設定すると、ツールの実行や応答の完了がここに出ます。
-                </li>
-              )}
-              {sessionEvents.map((e, i) => (
-                <li key={`${e.at}-${i}`} className="flex gap-3 py-2">
-                  <span className="w-14 shrink-0 text-xs text-muted-foreground">
-                    {new Date(e.at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                  <span className="w-36 shrink-0 font-mono text-xs">{e.event}</span>
-                  <span className="min-w-0 truncate text-xs text-muted-foreground">
-                    {[e.toolName, e.notificationType, e.summary].filter(Boolean).join(" · ")}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
+        <Transcript key={`${machine}/${sessionId}`} state={t} onLoadOlder={() => loadTranscript(machine, sessionId, true)} />
+      </div>
+      <Composer machine={m} session={s} />
+    </div>
+  );
+}
+
+function Composer({ machine, session: s }: { machine: MachineInfo; session: SessionInfo }) {
+  const [error, setError] = useState<string>();
+  const [stopping, setStopping] = useState(false);
+  const url = claudeUrl(s);
+
+  if (!s.managed) {
+    return (
+      <div className="shrink-0 border-t border-border px-4 py-3 md:px-6">
+        <div className="mx-auto max-w-3xl space-y-2">
+          <PromptInput onSend={() => undefined} disabled models={[]} allowAttachments={false} placeholder="このセッションには、Gasho からは入力できません" hint={false} />
+          <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span>claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。</span>
+            {url && (
+              <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-foreground/80 hover:text-foreground">
+                公式アプリで開く <ExternalLink className="size-3" />
+              </a>
+            )}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const busy = s.status === "busy";
+  const offline = !machine.connected;
+  const status = offline
+    ? "working server がオフラインです。"
+    : s.pendingInputs
+      ? `送信待ち ${s.pendingInputs} 件。作業が終わったら順に送ります。`
+      : s.status === "waiting"
+        ? "権限の確認を待っています。公式アプリで答えてください。"
+        : busy
+          ? "作業中です。いま送った入力は、作業が終わってから届きます。"
+          : undefined;
+
+  const stop = async () => {
+    setStopping(true);
+    const r = await sendCommand(machine.id, { type: "session.interrupt", sessionId: s.sessionId });
+    setStopping(false);
+    if (!r.ok) setError(r.error);
+  };
+
+  return (
+    <div className="shrink-0 border-t border-border px-4 py-3 md:px-6">
+      <div className="mx-auto max-w-3xl space-y-1.5">
+        <PromptInput
+          onSend={async ({ text }) => {
+            setError(undefined);
+            const r = await sendCommand(machine.id, { type: "session.input", sessionId: s.sessionId, text });
+            if (!r.ok) {
+              setError(r.error);
+              throw new Error(r.error);
+            }
+          }}
+          disabled={offline}
+          models={[]}
+          allowAttachments={false}
+          maxLength={20_000}
+          placeholder="Agent への指示を入力…"
+          safeArea
+          actions={
+            busy ? (
+              <button
+                type="button"
+                onClick={() => void stop()}
+                disabled={stopping}
+                className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:border-border-hover disabled:opacity-50"
+              >
+                <Square className="size-3 fill-current" />
+                停止
+              </button>
+            ) : undefined
+          }
+          hint={false}
+        />
+        {(status || error) && (
+          <p className={error ? "text-xs text-red-400" : "text-xs text-muted-foreground"}>{error ?? status}</p>
         )}
       </div>
     </div>

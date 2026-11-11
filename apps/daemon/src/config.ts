@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { daemonUrl, type Credentials } from "./credentials.ts";
+import { credentialsPath, daemonUrl, type Credentials } from "./credentials.ts";
 
 export interface DaemonConfig {
   hubUrl: string;
@@ -11,6 +11,8 @@ export interface DaemonConfig {
   claudeDir: string;
   claudeBin: string;
   pollIntervalMs: number;
+  /** Where the daemon keeps its own files (managed sessions); next to the registration. */
+  stateDir: string;
 }
 
 export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.env): DaemonConfig {
@@ -23,5 +25,6 @@ export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.
     claudeDir: env.GASHO_CLAUDE_DIR ?? path.join(os.homedir(), ".claude"),
     claudeBin: env.GASHO_CLAUDE_BIN ?? "claude",
     pollIntervalMs: Number(env.GASHO_POLL_MS ?? 3000),
+    stateDir: path.dirname(credentialsPath(env)),
   };
 }
