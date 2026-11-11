@@ -109,7 +109,7 @@ Ubuntu では systemd のユーザーサービスとして、Mac では launchd 
 
 ドキュメントでは SessionStart は HTTP 型に対応していないとされているので、セッションの開始は `claude agents --json` で見つける。
 
-送り先は、daemon が 127.0.0.1 で待ち受けるポートにする。ヘッダーには共有シークレットを入れる。シークレットは Claude Code を起動する環境（systemd や launchd の設定）に環境変数として置き、hook の設定の `allowedEnvVars` で差し込む。ユーザー設定の hooks は、Mac の Claude Desktop で動かすセッションも含め、そのマシンのすべてのセッションにかかる。
+送り先は、daemon が 127.0.0.1 で待ち受けるポートにする。ヘッダーには共有シークレットを入れ、その値は hooks の設定に直接書く。環境変数から差し込む方式（`allowedEnvVars`）は、Claude Code 本体の環境変数しか読まないので、動いている `claude rc` を起動し直すまで効かない。そのため採らない。ユーザー設定の hooks は、Mac の Claude Desktop で動かすセッションも含め、そのマシンのすべてのセッションにかかる。
 
 hook の `onFailure` は既定のままにする。こうすると、daemon が止まっていても hook の失敗は判断なしとして扱われ、公式アプリの動きは変わらない。
 
