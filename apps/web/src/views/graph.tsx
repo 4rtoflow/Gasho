@@ -98,7 +98,8 @@ export function GraphView({ machine, sessionId }: { machine: string; sessionId: 
             {graph.commits.length === 0 ? (
               <p className="text-sm text-muted-foreground">コミットはまだありません。</p>
             ) : (
-              <div className="overflow-hidden rounded-xl border border-border py-1">
+              // Long subjects scroll sideways inside this box, not the whole page.
+              <div className="overflow-x-auto overscroll-x-contain rounded-xl border border-border py-1">
                 <CommitGraph graph={graph} now={now} />
               </div>
             )}

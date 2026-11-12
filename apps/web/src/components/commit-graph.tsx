@@ -1,4 +1,6 @@
-// The commit graph of a repository: one row per commit, newest first, with its lane lines drawn in SVG.
+// The commit graph of a repository: one table row per commit, newest first, with its lane lines drawn in SVG.
+// Nothing is cut short: subjects and branch names stay on one line in full, and the table scrolls sideways
+// inside its box. The lanes column stays at the left edge while scrolling.
 import { Cloud, Tag } from "lucide-react";
 import { useMemo } from "react";
 import type { GitCommit, GitGraph, GitHubRepo, GitRef } from "@gasho/protocol";
@@ -13,7 +15,8 @@ const COLORS = ["#60a5fa", "#34d399", "#f472b6", "#fbbf24", "#a78bfa", "#22d3ee"
 const color = (lane: number) => COLORS[lane % COLORS.length];
 const x = (lane: number) => PAD + LANE / 2 + lane * LANE;
 const MID = ROW / 2;
-const MAX_REFS = 3;
+/** The checked-out commit's tint, also painted over the opaque background of the pinned lanes cell. */
+const HEAD_TINT = "rgb(16 185 129 / 0.07)";
 
 export function CommitGraph({ graph, now }: { graph: GitGraph; now: number }) {
   const { rows, width } = useMemo(() => layoutGraph(graph.commits), [graph.commits]);
@@ -23,47 +26,45 @@ export function CommitGraph({ graph, now }: { graph: GitGraph; now: number }) {
   );
   const svgWidth = PAD * 2 + width * LANE;
   return (
-    <ol aria-label="コミットの履歴" className="text-[13px]">
-      {graph.commits.map((c, i) => {
-        const row = rows[i];
-        if (!row) return null;
-        const isHead = c.hash === graph.headHash;
-        return (
-          <li
-            key={c.hash}
-            className={cn("flex items-center gap-2 pr-3", isHead && "bg-emerald-500/[0.07]")}
-            style={{ height: ROW }}
-          >
-            <Lanes row={row} width={svgWidth} head={isHead} merge={c.parents.length > 1} />
-            <div className="flex min-w-0 flex-1 items-center gap-1.5">
-              {(c.refs.length > 0 || (isHead && !graph.head)) && (
-                // The badges take at most about two thirds of the row and shrink first; the subject keeps the rest.
-                <span className="flex min-w-0 max-w-[65%] shrink-0 items-center gap-1 overflow-hidden">
+    <table aria-label="コミットの履歴" className="w-max min-w-full text-[13px]">
+      <tbody>
+        {graph.commits.map((c, i) => {
+          const row = rows[i];
+          if (!row) return null;
+          const isHead = c.hash === graph.headHash;
+          return (
+            <tr key={c.hash} style={{ height: ROW, backgroundColor: isHead ? HEAD_TINT : undefined }}>
+              <td
+                className="sticky left-0 z-10 bg-background p-0"
+                style={isHead ? { backgroundImage: `linear-gradient(${HEAD_TINT}, ${HEAD_TINT})` } : undefined}
+              >
+                <Lanes row={row} width={svgWidth} head={isHead} merge={c.parents.length > 1} />
+              </td>
+              <td className="w-full whitespace-nowrap py-0 pr-6 pl-1">
+                <span className="flex items-center gap-1.5">
                   <Refs commit={c} head={isHead} headBranch={graph.head} upstreams={upstreams} />
+                  <span>{c.subject}</span>
                 </span>
-              )}
-              <span className="min-w-0 truncate" title={c.subject}>
-                {c.subject}
-              </span>
-            </div>
-            <span className="hidden w-32 shrink-0 truncate text-xs text-muted-foreground lg:block" title={c.author}>
-              {c.author}
-            </span>
-            <span className="w-16 shrink-0 text-right text-xs text-muted-foreground" title={new Date(c.at).toLocaleString("ja-JP")}>
-              {relativeTime(c.at, now)}
-            </span>
-            <ShortHash hash={c.hash} github={graph.github} />
-          </li>
-        );
-      })}
-    </ol>
+              </td>
+              <td className="whitespace-nowrap py-0 pr-4 text-xs text-muted-foreground">{c.author}</td>
+              <td className="whitespace-nowrap py-0 pr-4 text-right text-xs text-muted-foreground" title={new Date(c.at).toLocaleString("ja-JP")}>
+                {relativeTime(c.at, now)}
+              </td>
+              <td className="whitespace-nowrap py-0 pr-3">
+                <ShortHash hash={c.hash} github={graph.github} />
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
   );
 }
 
 function Lanes({ row, width, head, merge }: { row: GraphRow; width: number; head: boolean; merge: boolean }) {
   const col = x(row.col);
   return (
-    <svg width={width} height={ROW} className="shrink-0" aria-hidden>
+    <svg width={width} height={ROW} className="block" aria-hidden>
       <g fill="none" strokeWidth={2} strokeLinecap="round">
         {row.through.map((i) => (
           <line key={`t${i}`} x1={x(i)} y1={0} x2={x(i)} y2={ROW} stroke={color(i)} />
@@ -117,15 +118,17 @@ function Refs({
       return up && here.has(`remote:${up}`) ? [up] : [];
     }),
   );
-  const refs = commit.refs.filter((r) => !(r.kind === "remote" && synced.has(r.name))).sort(
-    (a, b) => Number(b.name === headBranch && b.kind === "local") - Number(a.name === headBranch && a.kind === "local") || KIND_ORDER[a.kind] - KIND_ORDER[b.kind],
-  );
-  const shown = refs.slice(0, MAX_REFS);
-  const hidden = refs.slice(MAX_REFS);
+  const refs = commit.refs
+    .filter((r) => !(r.kind === "remote" && synced.has(r.name)))
+    .sort(
+      (a, b) =>
+        Number(b.name === headBranch && b.kind === "local") - Number(a.name === headBranch && a.kind === "local") ||
+        KIND_ORDER[a.kind] - KIND_ORDER[b.kind],
+    );
   return (
     <>
       {head && !headBranch && <RefBadge label="HEAD" tone="head" title="HEAD（特定のブランチを指していません）" />}
-      {shown.map((r) => {
+      {refs.map((r) => {
         const up = r.kind === "local" ? upstreams.get(r.name) : undefined;
         const onRemote = up !== undefined && synced.has(up);
         const title =
@@ -144,11 +147,6 @@ function Refs({
           />
         );
       })}
-      {hidden.length > 0 && (
-        <span className="shrink-0 text-[11px] text-muted-foreground" title={hidden.map((r) => r.name).join("\n")}>
-          +{hidden.length}
-        </span>
-      )}
     </>
   );
 }
@@ -174,13 +172,10 @@ function RefBadge({
   return (
     <span
       title={title}
-      className={cn(
-        "inline-flex min-w-0 max-w-44 items-center gap-1 rounded-md px-1.5 py-px font-mono text-[11px] font-medium ring-1",
-        TONE[tone],
-      )}
+      className={cn("inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-px font-mono text-[11px] font-medium ring-1", TONE[tone])}
     >
       {tone === "tag" && <Tag className="size-3 shrink-0" />}
-      <span className="truncate">{label}</span>
+      {label}
       {onRemote && <Cloud className="size-3 shrink-0 opacity-80" aria-label="リモートと同じ" />}
     </span>
   );
@@ -188,7 +183,7 @@ function RefBadge({
 
 function ShortHash({ hash, github }: { hash: string; github?: GitHubRepo }) {
   const short = hash.slice(0, 7);
-  const cls = "hidden w-16 shrink-0 text-right font-mono text-xs text-muted-foreground sm:block";
+  const cls = "font-mono text-xs text-muted-foreground";
   return github ? (
     <a href={githubCommitUrl(github, hash)} target="_blank" rel="noreferrer" title="GitHub でコミットを開く" className={cn(cls, "hover:text-foreground hover:underline")}>
       {short}
