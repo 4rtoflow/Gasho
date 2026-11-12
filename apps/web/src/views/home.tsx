@@ -1,8 +1,8 @@
 // The home screen: a dashboard of tiles of several sizes (a bento grid). On a computer, four columns: the states of
-// the sessions and the instructions sent lately as number tiles, the sessions as the largest tile, then the
-// notifications, the latest operations, the open issues and pull requests, and the working servers. On a phone, the
-// number tiles two by two and the rest one under the other. Only sessions started from Gasho are shown.
-import { CircleDot, FolderGit2, GitPullRequest, Hand, Layers, Moon, Plus, Rocket, Send, Server, Square, Zap } from "lucide-react";
+// the sessions and the instructions sent lately as number tiles, the sessions as the largest tile, the notifications,
+// the tokens used, then the latest operations, the open issues and pull requests, and the working servers. On a
+// phone, the number tiles two by two and the rest one under the other. Only sessions started from Gasho are shown.
+import { CircleDot, Cpu, FolderGit2, GitPullRequest, Hand, Layers, Moon, Plus, Rocket, Send, Server, Square, Zap } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   GashoNotification,
@@ -12,6 +12,7 @@ import type {
   MachineInfo,
   SessionInfo,
   SessionStatus,
+  TokenUsage,
 } from "@gasho/protocol";
 import { EFFORTS } from "@/components/session-controls";
 import { StatusBadge } from "@/components/status-badge";
@@ -79,6 +80,7 @@ export function HomeView() {
   };
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines));
   const sent = useMemo(() => sentTrend(events, now), [events, now]);
+  const tokens = useMemo(() => tokenTrend(rows, now), [rows, now]);
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-4 p-4 md:p-6">
@@ -134,11 +136,12 @@ export function HomeView() {
           trend={sent.trend}
           trendLabels={sent.labels}
           {...(sent.previous !== undefined ? { previous: sent.previous, deltaLabel: "前の24時間と比べて" } : {})}
+          goodWhen="neither"
           period="過去24時間"
           color={CHART_BLUE}
         />
 
-        <Tile title="セッション" icon={<Layers className="size-4" />} className="col-span-2 lg:col-span-3 lg:row-span-2">
+        <Tile title="セッション" icon={<Layers className="size-4" />} className="col-span-2 lg:col-span-3">
           <Sessions rows={rows} now={now} onLaunch={() => setLaunching(true)} />
         </Tile>
 
@@ -159,6 +162,23 @@ export function HomeView() {
               openSession(n.machine, n.sessionId);
             }}
           />
+        </Tile>
+
+        <StatCard
+          label="トークン"
+          icon={<Cpu className="size-3.5" />}
+          value={tokens.total}
+          trend={tokens.trend}
+          trendLabels={tokens.labels}
+          {...(tokens.previous ? { previous: tokens.previous, deltaLabel: "前の24時間と比べて" } : {})}
+          goodWhen="neither"
+          period="過去24時間（サブエージェントを含む）"
+          format={compact}
+          color={CHART_BLUE}
+          className="col-span-2 lg:col-span-1"
+        />
+        <Tile title="トークンの内訳（過去24時間）" icon={<Cpu className="size-4" />} className="col-span-2">
+          <TokenBreakdown tokens={tokens} />
         </Tile>
 
         <Tile title="最近の操作" icon={<CircleDot className="size-4" />} className="col-span-2">
@@ -187,6 +207,119 @@ function Tile({ title, icon, className, children }: { title?: string; icon?: Rea
       )}
       <div className="@container min-h-0 flex-1">{children}</div>
     </section>
+  );
+}
+
+const compactFormat = new Intl.NumberFormat("ja-JP", { notation: "compact", maximumFractionDigits: 1 });
+const plainFormat = new Intl.NumberFormat("ja-JP", { maximumFractionDigits: 0 });
+/** 75,808 → "7.6万", 1,847 → "1,847": token counts at a glance. */
+const compact = (n: number) => (n < 10_000 ? plainFormat.format(n) : compactFormat.format(n));
+/** A share in percent, one decimal; a share too small for that is not shown as 0. */
+const share = (part: number, whole: number) => {
+  const pct = whole > 0 ? (part / whole) * 100 : 0;
+  return pct > 0 && pct < 0.1 ? "0.1% 未満" : `${Math.round(pct * 10) / 10}%`;
+};
+const sumUsage = (u: TokenUsage) => u.input + u.output + u.cacheWrite + u.cacheRead;
+
+/**
+ * The kinds of tokens, in the order of the validated categorical palette (dark steps, all checks passed against the
+ * tiles' surface #0b0b0c): the colors follow the kind, never its size.
+ */
+const TOKEN_KINDS: { key: keyof TokenUsage; name: string; color: string }[] = [
+  { key: "input", name: "入力", color: "#3987e5" },
+  { key: "output", name: "出力", color: "#d95926" },
+  { key: "cacheWrite", name: "キャッシュへの書き込み", color: "#199e70" },
+  { key: "cacheRead", name: "キャッシュからの読み込み", color: "#c98500" },
+];
+
+interface TokenTrend {
+  /** The last 24 hours, in all, in twelve 2-hour steps, per kind and per session (the most first). */
+  total: number;
+  trend: number[];
+  labels: string[];
+  byKind: TokenUsage;
+  bySession: { key: string; label: string; total: number }[];
+  /** The 24 hours before, when any tokens were used then. */
+  previous?: number;
+}
+
+/** The tokens the shown sessions used in the last 24 hours (the current hour and the 23 before it). */
+function tokenTrend(rows: Row[], now: number): TokenTrend {
+  const hourNow = Math.floor(now / HOUR) * HOUR;
+  const start = hourNow - 23 * HOUR;
+  const steps = Array.from({ length: 12 }, () => 0);
+  const byKind: TokenUsage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 };
+  const bySession: TokenTrend["bySession"] = [];
+  let previous = 0;
+  for (const { machine, s } of rows) {
+    let mine = 0;
+    for (const [hour, u] of s.tokenHours ?? []) {
+      const n = sumUsage(u);
+      if (hour >= start && hour <= hourNow) {
+        const i = Math.floor((hour - start) / (2 * HOUR));
+        steps[i] = (steps[i] ?? 0) + n;
+        for (const k of TOKEN_KINDS) byKind[k.key] += u[k.key];
+        mine += n;
+      } else if (hour >= start - 24 * HOUR && hour < start) previous += n;
+    }
+    if (mine > 0) bySession.push({ key: `${machine.id}/${s.sessionId}`, label: sessionLabel(s), total: mine });
+  }
+  const hm = (ms: number) => `${new Date(ms).getHours()}時`;
+  return {
+    total: sumUsage(byKind),
+    trend: steps,
+    labels: steps.map((_, i) => `${hm(start + i * 2 * HOUR)}〜${hm(start + (i + 1) * 2 * HOUR)}`),
+    byKind,
+    bySession: bySession.sort((a, b) => b.total - a.total),
+    ...(previous > 0 ? { previous } : {}),
+  };
+}
+
+/**
+ * The last 24 hours' tokens by kind (a thin bar of the whole, then each kind with its swatch, amount and share) and by
+ * session (bars from a common baseline, the most first).
+ */
+function TokenBreakdown({ tokens }: { tokens: TokenTrend }) {
+  if (tokens.total === 0) return <p className="text-sm text-muted-foreground">過去24時間に使ったトークンはありません。</p>;
+  const max = tokens.bySession[0]?.total ?? 0;
+  return (
+    <div className="grid gap-5 @xl:grid-cols-2">
+      <div className="space-y-3">
+        {/* The whole, split by kind: a 2px gap of the surface between the parts, no text on the bar. */}
+        <div className="flex h-2 gap-[2px] overflow-hidden rounded-full" aria-hidden>
+          {TOKEN_KINDS.filter((k) => tokens.byKind[k.key] > 0).map((k) => (
+            <div key={k.key} style={{ flexGrow: tokens.byKind[k.key], backgroundColor: k.color }} />
+          ))}
+        </div>
+        <ul className="space-y-1.5 text-xs">
+          {TOKEN_KINDS.map((k) => (
+            <li key={k.key} className="flex items-center gap-2">
+              <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ backgroundColor: k.color }} />
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">{k.name}</span>
+              <span className="tabular-nums text-foreground">{compact(tokens.byKind[k.key])}</span>
+              <span className="w-16 text-right tabular-nums text-muted-foreground">{share(tokens.byKind[k.key], tokens.total)}</span>
+            </li>
+          ))}
+        </ul>
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          キャッシュからの読み込みは、それまでの会話を毎回読み直した分です。
+        </p>
+      </div>
+      <ul className="space-y-2" aria-label="セッションごとのトークン">
+        {tokens.bySession.slice(0, 5).map((t) => (
+          <li key={t.key} className="space-y-1">
+            <div className="flex items-baseline justify-between gap-2 text-xs">
+              <span className="min-w-0 truncate text-muted-foreground">{t.label}</span>
+              <span className="shrink-0 tabular-nums text-foreground">{compact(t.total)}</span>
+            </div>
+            {/* A thin bar from a common baseline: square at the start, rounded at the data end. */}
+            <div className="h-2 rounded-r-[4px] bg-white/[0.04]">
+              <div className="h-full rounded-r-[4px]" style={{ width: `${max ? Math.max(2, (t.total / max) * 100) : 0}%`, backgroundColor: CHART_BLUE }} />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -283,7 +416,12 @@ function SessionCard({ row: { machine, s }, now }: { row: Row; now: number }) {
         {effort && <Chip>{effort}</Chip>}
         {s.ultracode && <Chip className="bg-violet-500/15 text-violet-200">Ultracode</Chip>}
         {s.pendingInputs ? <Chip className="bg-amber-500/10 text-amber-300">送信待ち {s.pendingInputs}</Chip> : null}
-        {cost && <span className="ml-auto tabular-nums">{cost}</span>}
+        {s.tokens && sumUsage(s.tokens) > 0 && (
+          <span className="ml-auto tabular-nums" title="このセッションでこれまでに使ったトークン（サブエージェントを含む）">
+            {compact(sumUsage(s.tokens))} トークン
+          </span>
+        )}
+        {cost && <span className={cn("tabular-nums", !(s.tokens && sumUsage(s.tokens) > 0) && "ml-auto")}>{cost}</span>}
       </div>
     </button>
   );

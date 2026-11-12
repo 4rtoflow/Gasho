@@ -117,8 +117,8 @@ export interface StatCardProps {
   delta?: number;
   /** What the delta compares with ("前の24時間と比べて"), shown on hover and read out. */
   deltaLabel?: string;
-  /** Which direction is good news. */
-  goodWhen?: "up" | "down";
+  /** Which direction is good news; "neither" when the change is not good or bad (the pill stays gray). */
+  goodWhen?: "up" | "down" | "neither";
   /** The text under the number. */
   period?: string;
   format?: (n: number) => string;
@@ -175,7 +175,7 @@ export function StatCard({
 
   const pct = delta ?? (previous !== undefined && previous !== 0 ? ((value - previous) / Math.abs(previous)) * 100 : undefined);
   const rounded = pct === undefined ? undefined : Math.round(pct * 10) / 10;
-  const good = !rounded ? null : goodWhen === "up" ? rounded > 0 : rounded < 0;
+  const good = !rounded || goodWhen === "neither" ? null : goodWhen === "up" ? rounded > 0 : rounded < 0;
 
   // The number counts up on mount and follows the scrubber afterwards.
   const fmt = useRef(format);

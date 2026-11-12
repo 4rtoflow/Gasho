@@ -63,6 +63,20 @@ export interface SessionInfo {
   /** Sessions started from Gasho: the effort level and ultracode as Claude Code shows them above the prompt. */
   effort?: EffortLevel;
   ultracode?: boolean;
+  /** Sessions started from Gasho: the tokens used so far, by the session's replies and its subagents'. */
+  tokens?: TokenUsage;
+  /** …and per hour over the last 48 hours, oldest first: [start of the hour (ms), use]. Hours without use are left out. */
+  tokenHours?: [number, TokenUsage][];
+}
+
+/** Tokens as Claude Code records them for each reply. */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  /** Written to the prompt cache. */
+  cacheWrite: number;
+  /** Read from the prompt cache (the conversation so far, read again at every turn). */
+  cacheRead: number;
 }
 
 export type TranscriptBlock =

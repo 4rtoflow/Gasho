@@ -19,6 +19,7 @@ import type {
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
 import { ghError, listGitHub, viewGitHub } from "./github.ts";
+import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
@@ -80,6 +81,8 @@ const RETRY_MS = 5000;
 const LATE_PICKER_WAIT_MS = 10_000;
 /** A session is used to read the model names only once it has run this long (Claude Code has finished starting). */
 const PROBE_MIN_AGE_MS = 30_000;
+/** An idle session's tokens are counted again after this long (a working one at every refresh). */
+const TOKENS_IDLE_MS = 30_000;
 /** After a look at the model names whose "/model" was not taken in time, how long to watch for the picker it opens. */
 const LATE_PICKER_WATCH_MS = 5 * 60_000;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -97,6 +100,9 @@ interface Tracked {
   sawWithoutTranscript?: boolean;
   /** Sessions started from Gasho: the model in Claude Code's welcome banner, until the transcript records one. */
   bannerModel?: string;
+  /** Sessions started from Gasho: the tokens they used, and when they were last counted. */
+  tokens?: TokenCounter;
+  tokensAt?: number;
 }
 
 /** What happened to the switches asked for with an input (`id`: the request of the input that was handled). */
@@ -240,6 +246,7 @@ export class Daemon {
       }
       await this.forgetEndedSessions(seen);
       await this.readManagedScreens();
+      await this.countTokens();
       this.emitSessions();
       for (const m of this.managed.all()) {
         if (this.managed.pending(m.sessionId) === 0) continue;
@@ -458,6 +465,25 @@ export class Daemon {
           !this.flushing.has(m.sessionId),
       );
     if (idle) await this.probeModelsIn(idle);
+  }
+
+  /** Sessions started from Gasho: the tokens they have used, read from their transcripts and their subagents'. */
+  private async countTokens(): Promise<void> {
+    const now = Date.now();
+    for (const m of this.managed.all()) {
+      const t = this.tracked.get(m.sessionId);
+      if (!t?.transcript) continue;
+      t.tokens ??= new TokenCounter(t.transcript);
+      if (t.info.status !== "busy" && t.tokensAt !== undefined && now - t.tokensAt < TOKENS_IDLE_MS) continue;
+      t.tokensAt = now;
+      try {
+        await t.tokens.update();
+      } catch (e) {
+        log(`could not count the tokens of ${m.name}`, e);
+      }
+      t.info.tokens = t.tokens.totals();
+      t.info.tokenHours = t.tokens.hours(now);
+    }
   }
 
   /**
