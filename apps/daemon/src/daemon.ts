@@ -2,9 +2,9 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { CommandResult, GitHubRepo, HubToDaemon, SessionInfo } from "@gasho/protocol";
+import type { CommandResult, GitHubRepo, HubToDaemon, SessionInfo, SessionRepo } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
-import { githubRepoOf, readGitGraph } from "./git.ts";
+import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
@@ -24,8 +24,10 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.3.0";
+export const DAEMON_VERSION = "0.4.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
+/** How long the list of repositories inside a folder (and their branches) is reused. */
+const REPOS_CACHE_MS = 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
 const MAX_INPUT = 20_000;
@@ -52,6 +54,7 @@ export class Daemon {
   private refreshTimer: NodeJS.Timeout | undefined;
   private polling = false;
   private github = new Map<string, { at: number; repo?: GitHubRepo }>();
+  private repos = new Map<string, { at: number; repos?: SessionRepo[] }>();
   private zellij: Zellij;
   private managed: ManagedSessions;
   private canLaunch = false;
@@ -211,6 +214,7 @@ export class Daemon {
     info.bridgeSessionId = reg?.bridgeSessionId ?? t.meta.bridgeSessionId;
     this.applyMeta(t);
     info.github = await this.githubOf(info.cwd);
+    info.repos = await this.reposOf(info.cwd);
   }
 
   private applyMeta(t: Tracked): void {
@@ -228,6 +232,15 @@ export class Daemon {
     const repo = await githubRepoOf(cwd);
     this.github.set(cwd, { at: Date.now(), repo });
     return repo;
+  }
+
+  /** Repositories inside a folder that is not itself in one (see nestedRepos). */
+  private async reposOf(cwd: string): Promise<SessionRepo[] | undefined> {
+    const hit = this.repos.get(cwd);
+    if (hit && Date.now() - hit.at < REPOS_CACHE_MS) return hit.repos;
+    const repos = await nestedRepos(cwd).catch(() => undefined);
+    this.repos.set(cwd, { at: Date.now(), repos });
+    return repos;
   }
 
   private emitSessions(): void {
@@ -325,14 +338,24 @@ export class Daemon {
 
   /** Branches and history of the repository the session works in. Only for sessions this daemon tracks. */
   private async sendGitGraph(m: Extract<HubToDaemon, { type: "git.graph.get" }>): Promise<void> {
-    const reply = { type: "git.graph" as const, requestId: m.requestId, sessionId: m.sessionId };
+    const reply = { type: "git.graph" as const, requestId: m.requestId, sessionId: m.sessionId, repo: m.repo };
     const t = this.tracked.get(m.sessionId);
     if (!t) {
       this.hub.send({ ...reply, error: "このセッションは見つかりません。" });
       return;
     }
+    let dir = t.info.cwd;
+    if (m.repo !== undefined) {
+      // Only a repository this daemon found inside the session's folder; never a path the browser made up.
+      const repo = (await this.reposOf(t.info.cwd))?.find((r) => r.path === m.repo);
+      if (!repo) {
+        this.hub.send({ ...reply, error: "このリポジトリは見つかりません。" });
+        return;
+      }
+      dir = path.join(t.info.cwd, repo.path);
+    }
     try {
-      const [graph, github] = await Promise.all([readGitGraph(t.info.cwd), this.githubOf(t.info.cwd)]);
+      const [graph, github] = await Promise.all([readGitGraph(dir), this.githubOf(dir)]);
       this.hub.send({ ...reply, graph: github ? { ...graph, github } : graph });
     } catch (e) {
       const text = e instanceof Error ? e.message : String(e);

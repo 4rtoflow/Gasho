@@ -264,3 +264,26 @@ test("git.graph.get fails when the working server is offline or disconnects", ()
   const failed = c.sent.filter((m) => m.type === "git.graph").at(-1);
   assert.ok(failed?.type === "git.graph" && failed.error && !failed.graph);
 });
+
+test("git.graph.get passes the chosen repository through and echoes it with the graph", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.3.0" });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1", repo: "org/web" });
+  const req = d.sent.at(-1);
+  assert.ok(req?.type === "git.graph.get");
+  assert.equal(req.repo, "org/web");
+  hub.onDaemonMessage(d, { type: "git.graph", requestId: req.requestId, sessionId: "s1", error: "このリポジトリは見つかりません。" });
+  const got = c.sent.at(-1);
+  assert.ok(got?.type === "git.graph");
+  assert.equal(got.repo, "org/web");
+  assert.equal(got.error, "このリポジトリは見つかりません。");
+
+  // An empty or oversized repository name never reaches the working server.
+  const before = d.sent.length;
+  hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1", repo: "" });
+  hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1", repo: "x".repeat(501) });
+  assert.equal(d.sent.length, before);
+});

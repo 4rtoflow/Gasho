@@ -6,15 +6,19 @@ export type Route =
   | { name: "home" }
   | { name: "devices" }
   | { name: "session"; machine: string; sessionId: string }
-  /** The branch graph of the repository the session works in. */
-  | { name: "graph"; machine: string; sessionId: string };
+  /**
+   * The branch graph of the repository the session works in. `repo` picks one of the repositories inside the
+   * session's folder when the folder itself is not a repository.
+   */
+  | { name: "graph"; machine: string; sessionId: string; repo?: string };
 
 export function parseHash(hash: string): Route {
   if (hash === "#/devices") return { name: "devices" };
-  const m = hash.match(/^#\/s\/([^/]+)\/([^/]+)(\/graph)?$/);
+  const m = hash.match(/^#\/s\/([^/]+)\/([^/]+)(\/graph(?:\/([^/]+))?)?$/);
   if (m?.[1] && m[2]) {
     const ids = { machine: decodeURIComponent(m[1]), sessionId: decodeURIComponent(m[2]) };
-    return m[3] ? { name: "graph", ...ids } : { name: "session", ...ids };
+    if (!m[3]) return { name: "session", ...ids };
+    return m[4] ? { name: "graph", ...ids, repo: decodeURIComponent(m[4]) } : { name: "graph", ...ids };
   }
   return { name: "home" };
 }
@@ -23,11 +27,15 @@ export function hrefOf(r: Route): string {
   if (r.name === "home") return "#/";
   if (r.name === "devices") return "#/devices";
   const base = `#/s/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.sessionId)}`;
-  return r.name === "graph" ? `${base}/graph` : base;
+  if (r.name !== "graph") return base;
+  // A repository path such as "org/app" is one segment, its slashes encoded.
+  return r.repo ? `${base}/graph/${encodeURIComponent(r.repo)}` : `${base}/graph`;
 }
 
-export function go(r: Route): void {
-  location.hash = hrefOf(r);
+/** `replace` swaps the current history entry, for switching tabs without filling the back button's history. */
+export function go(r: Route, { replace = false } = {}): void {
+  if (replace) location.replace(hrefOf(r));
+  else location.hash = hrefOf(r);
 }
 
 function subscribe(l: () => void): () => void {

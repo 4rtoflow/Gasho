@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
-import type { GitBranch, GitCommit, GitGraph, GitHubRepo, GitRef } from "@gasho/protocol";
+import type { GitBranch, GitCommit, GitGraph, GitHubRepo, GitRef, SessionRepo } from "@gasho/protocol";
 
 const execFileP = promisify(execFile);
 
@@ -118,4 +120,53 @@ export async function readGitGraph(cwd: string): Promise<GitGraph> {
     truncated: commits.length > GRAPH_LIMIT,
     ...(changes ? { changes } : {}),
   };
+}
+
+// ---- folders that hold several repositories ----
+
+/**
+ * Git repositories below `dir` (not `dir` itself), at most `maxDepth` folders down. A repository's own folders are
+ * not searched further. Hidden folders, node_modules and symbolic links are skipped, and the search stops after
+ * `maxDirs` folders or `maxRepos` repositories, so a large folder such as a home directory stays cheap.
+ */
+export async function findRepos(dir: string, { maxDepth = 2, maxDirs = 400, maxRepos = 50 } = {}): Promise<string[]> {
+  const found: string[] = [];
+  let visited = 0;
+  const walk = async (d: string, depth: number): Promise<void> => {
+    if (visited >= maxDirs || found.length >= maxRepos) return;
+    visited++;
+    const entries = await fs.readdir(d, { withFileTypes: true }).catch(() => []);
+    // .git is a folder in a normal clone and a file in a worktree or submodule.
+    if (depth > 0 && entries.some((e) => e.name === ".git")) {
+      found.push(d);
+      return;
+    }
+    if (depth === maxDepth) return;
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith(".") || e.name === "node_modules") continue;
+      await walk(path.join(d, e.name), depth + 1);
+    }
+  };
+  await walk(dir, 0);
+  return found.sort();
+}
+
+/**
+ * The repositories inside `cwd`, for a folder that is not itself in a repository: undefined when it is in one,
+ * or holds none.
+ */
+export async function nestedRepos(cwd: string): Promise<SessionRepo[] | undefined> {
+  const inside = await git(cwd, ["rev-parse", "--is-inside-work-tree"]).then((s) => s.trim() === "true", () => false);
+  if (inside) return undefined;
+  const dirs = await findRepos(cwd);
+  if (dirs.length === 0) return undefined;
+  return Promise.all(
+    dirs.map(async (d) => {
+      const [branch, github] = await Promise.all([
+        git(d, ["symbolic-ref", "--quiet", "--short", "HEAD"]).then((s) => s.trim() || undefined, () => undefined),
+        githubRepoOf(d),
+      ]);
+      return { path: path.relative(cwd, d), ...(branch ? { branch } : {}), ...(github ? { github } : {}) };
+    }),
+  );
 }

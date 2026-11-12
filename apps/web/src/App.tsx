@@ -100,7 +100,9 @@ export function App() {
           {route.name === "session" && (
             <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} />
           )}
-          {route.name === "graph" && <GraphView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} />}
+          {route.name === "graph" && (
+            <GraphView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} repo={route.repo} />
+          )}
         </main>
       </div>
     </div>

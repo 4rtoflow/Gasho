@@ -35,6 +35,8 @@ interface PendingRequest {
   client: ClientPeer;
   machine: string;
   sessionId: string;
+  /** graph: the repository inside the session's folder, if one was asked for. */
+  repo?: string;
   timer: NodeJS.Timeout;
 }
 
@@ -148,7 +150,7 @@ export class Hub {
         if (!req || req.kind !== "graph") break;
         clearTimeout(req.timer);
         this.pending.delete(msg.requestId);
-        req.client.send({ type: "git.graph", machine: id, sessionId: msg.sessionId, graph: msg.graph, error: msg.error });
+        req.client.send({ type: "git.graph", machine: id, sessionId: msg.sessionId, repo: req.repo, graph: msg.graph, error: msg.error });
         break;
       }
       case "hook": {
@@ -214,7 +216,12 @@ export class Hub {
       }
       case "git.graph.get": {
         const daemon = this.daemons.get(msg.machine);
-        const reply = { type: "git.graph" as const, machine: msg.machine, sessionId: msg.sessionId };
+        const repo = msg.repo;
+        const reply = { type: "git.graph" as const, machine: msg.machine, sessionId: msg.sessionId, repo };
+        if (repo !== undefined && (typeof repo !== "string" || repo.length === 0 || repo.length > 500)) {
+          peer.send({ ...reply, error: "リポジトリの指定が正しくありません。" });
+          return;
+        }
         if (!daemon) {
           peer.send({ ...reply, error: "この working server はオフラインです。" });
           return;
@@ -223,8 +230,8 @@ export class Hub {
         const timer = setTimeout(() => {
           if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
         }, REQUEST_TIMEOUT_MS);
-        this.pending.set(requestId, { kind: "graph", client: peer, machine: msg.machine, sessionId: msg.sessionId, timer });
-        daemon.send({ type: "git.graph.get", requestId, sessionId: msg.sessionId });
+        this.pending.set(requestId, { kind: "graph", client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
+        daemon.send({ type: "git.graph.get", requestId, sessionId: msg.sessionId, repo });
         break;
       }
       case "notification.read":
@@ -340,7 +347,7 @@ export class Hub {
       if (!match(req)) continue;
       clearTimeout(req.timer);
       this.pending.delete(id);
-      if (req.kind === "graph") req.client.send({ type: "git.graph", machine: req.machine, sessionId: req.sessionId, error });
+      if (req.kind === "graph") req.client.send({ type: "git.graph", machine: req.machine, sessionId: req.sessionId, repo: req.repo, error });
       else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
     }
   }

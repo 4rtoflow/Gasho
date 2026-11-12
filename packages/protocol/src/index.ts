@@ -24,6 +24,14 @@ export interface PrLink {
   repository: string;
 }
 
+/** A Git repository inside a session's folder, for a folder that is not itself in a repository. */
+export interface SessionRepo {
+  /** Path from the session's folder, such as "app" or "org/app". */
+  path: string;
+  branch?: string;
+  github?: GitHubRepo;
+}
+
 export interface SessionInfo {
   /** Local session id (UUID). */
   sessionId: string;
@@ -48,6 +56,8 @@ export interface SessionInfo {
   managed?: boolean;
   /** Inputs waiting until the session is idle. */
   pendingInputs?: number;
+  /** Repositories inside the folder, when the folder is not in a repository but holds some (a workspace of repos). */
+  repos?: SessionRepo[];
 }
 
 export type TranscriptBlock =
@@ -208,13 +218,13 @@ export type DaemonToHub =
   | { type: "hook"; event: HookEvent }
   | { type: "capabilities"; canLaunch: boolean; folders: string[] }
   | { type: "command.result"; requestId: string; result: CommandResult }
-  | { type: "git.graph"; requestId: string; sessionId: string; graph?: GitGraph; error?: string };
+  | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
   | { type: "welcome" }
   | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number }
-  | { type: "git.graph.get"; requestId: string; sessionId: string }
+  | { type: "git.graph.get"; requestId: string; sessionId: string; repo?: string }
   | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
@@ -233,12 +243,13 @@ export type HubToClient =
   | { type: "notification.read"; ids: string[] }
   | { type: "event"; event: MachineHookEvent }
   | { type: "command.result"; requestId: string; machine: string; result: CommandResult }
-  | { type: "git.graph"; machine: string; sessionId: string; graph?: GitGraph; error?: string };
+  | { type: "git.graph"; machine: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string };
 
 // browser -> gasho-hub
 export type ClientToHub =
   | { type: "transcript.get"; machine: string; sessionId: string; before?: number; limit: number }
-  | { type: "git.graph.get"; machine: string; sessionId: string }
+  /** `repo`: one of the session's `repos` (its path); omitted for the repository of the session's folder. */
+  | { type: "git.graph.get"; machine: string; sessionId: string; repo?: string }
   | { type: "notification.read"; ids: string[] }
   | ({ requestId: string; machine: string } & SessionCommand);
 

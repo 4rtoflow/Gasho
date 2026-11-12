@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseGitHubUrl, parseLog, parseRefs, parseStatus, parseTrack, readGitGraph } from "../src/git.ts";
+import { findRepos, nestedRepos, parseGitHubUrl, parseLog, parseRefs, parseStatus, parseTrack, readGitGraph } from "../src/git.ts";
 
 test("parseGitHubUrl handles https, ssh and credentials, and rejects other hosts", () => {
   assert.deepEqual(parseGitHubUrl("https://github.com/4rtoflow/Gasho.git\n"), {
@@ -117,6 +117,47 @@ test("readGitGraph rejects a folder that is not a repository", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-nogit-"));
   try {
     await assert.rejects(readGitGraph(dir), /not a git repository/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("nestedRepos lists the repositories inside a folder that is not one, with their branch and GitHub repository", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-ws-"));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, stdio: "pipe" }).toString();
+  try {
+    for (const p of ["api", "org/web", ".hidden/secret", "node_modules/pkg", "deep/a/b"]) {
+      fs.mkdirSync(path.join(dir, p), { recursive: true });
+      run(path.join(dir, p), "init", "-b", p === "api" ? "main" : "dev");
+    }
+    run(path.join(dir, "api"), "remote", "add", "origin", "git@github.com:4rtoflow/zen-api.git");
+    fs.mkdirSync(path.join(dir, "notes"));
+
+    // Two levels down at most; hidden folders and node_modules are skipped.
+    assert.deepEqual(
+      (await findRepos(dir)).map((d) => path.relative(dir, d)),
+      ["api", "org/web"],
+    );
+    assert.deepEqual(await nestedRepos(dir), [
+      { path: "api", branch: "main", github: { owner: "4rtoflow", name: "zen-api", url: "https://github.com/4rtoflow/zen-api" } },
+      { path: "org/web", branch: "dev" },
+    ]);
+    // A folder inside a repository is that repository, not a workspace.
+    assert.equal(await nestedRepos(path.join(dir, "api")), undefined);
+    // A folder with no repository at all.
+    assert.equal(await nestedRepos(path.join(dir, "notes")), undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("findRepos stops after the folder limit", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-many-"));
+  try {
+    for (let i = 0; i < 30; i++) fs.mkdirSync(path.join(dir, `d${String(i).padStart(2, "0")}`, ".git"), { recursive: true });
+    assert.equal((await findRepos(dir, { maxDirs: 11 })).length, 10);
+    assert.equal((await findRepos(dir, { maxRepos: 5 })).length, 5);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

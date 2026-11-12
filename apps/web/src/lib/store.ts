@@ -45,7 +45,7 @@ export interface State {
   notifications: GashoNotification[];
   events: MachineHookEvent[];
   transcripts: Record<string, TranscriptState>;
-  /** Keyed like transcripts: transcriptKey(machine, sessionId). */
+  /** Keyed by graphKey(machine, sessionId, repo). */
   graphs: Record<string, GraphState>;
 }
 
@@ -54,6 +54,8 @@ const MAX_EVENTS = 300;
 const MAX_NOTIFICATIONS = 200;
 
 export const transcriptKey = (machine: string, sessionId: string): string => `${machine}\u0000${sessionId}`;
+/** A branch graph per session and, in a folder of several repositories, per repository. */
+export const graphKey = (machine: string, sessionId: string, repo?: string): string => `${machine}\u0000${sessionId}\u0000${repo ?? ""}`;
 
 const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {} };
 let state: State = { auth: "checking", ...EMPTY };
@@ -115,8 +117,8 @@ function connect(): void {
     }
     // Requests sent just before the connection dropped are lost; ask again.
     for (const [key, g] of Object.entries(state.graphs)) {
-      const [machine, sessionId] = key.split("\u0000");
-      if (g.loading && machine && sessionId) send({ type: "git.graph.get", machine, sessionId });
+      const [machine, sessionId, repo] = key.split("\u0000");
+      if (g.loading && machine && sessionId) send({ type: "git.graph.get", machine, sessionId, repo: repo || undefined });
     }
   };
   ws.onmessage = (ev) => {
@@ -238,7 +240,7 @@ function handle(m: HubToClient): void {
       pendingCommands.delete(m.requestId);
       break;
     case "git.graph": {
-      const key = transcriptKey(m.machine, m.sessionId);
+      const key = graphKey(m.machine, m.sessionId, m.repo);
       const cur = state.graphs[key];
       // On an error, keep showing the graph read before, with the error.
       setGraph(key, m.graph ? { loading: false, graph: m.graph, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
@@ -247,9 +249,9 @@ function handle(m: HubToClient): void {
   }
 }
 
-/** Reads the branch graph of the session's repository again. */
-export function loadGraph(machine: string, sessionId: string): void {
-  const key = transcriptKey(machine, sessionId);
+/** Reads the branch graph of the session's repository (or of `repo` inside its folder) again. */
+export function loadGraph(machine: string, sessionId: string, repo?: string): void {
+  const key = graphKey(machine, sessionId, repo);
   const cur = state.graphs[key];
   if (cur?.loading) return;
   if (socket?.readyState !== WebSocket.OPEN) {
@@ -257,7 +259,7 @@ export function loadGraph(machine: string, sessionId: string): void {
     return;
   }
   setGraph(key, { ...cur, loading: true, error: undefined });
-  send({ type: "git.graph.get", machine, sessionId });
+  send({ type: "git.graph.get", machine, sessionId, repo });
 }
 
 function requestPage(machine: string, sessionId: string, before: number | undefined): void {

@@ -1,6 +1,7 @@
 import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { MachineInfo, SessionInfo } from "@gasho/protocol";
+import { RepoPicker } from "@/components/repo-picker";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { StatusBadge } from "@/components/status-badge";
 import { Transcript } from "@/components/transcript";
@@ -42,8 +43,14 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
   }
 
   const url = claudeUrl(s);
-  const branch = branchLabel(s);
   const cost = formatCost(s.costUSD);
+  // A folder that is not a repository but holds several shows "複数のリポジトリ…" and "ブランチ…"; one that holds
+  // exactly one shows that repository as if the session worked in it.
+  const several = s.repos && s.repos.length >= 2 ? s.repos : undefined;
+  const only = s.repos?.length === 1 ? s.repos[0] : undefined;
+  const github = only ? only.github : s.github;
+  const branch = only ? only.branch : branchLabel(s);
+  const repoText = github ? `${github.owner}/${github.name}` : only ? only.path : repoLabel(s);
   const status = m.connected ? <StatusBadge status={s.status} /> : <span className="text-xs text-muted-foreground">オフライン</span>;
 
   return (
@@ -75,27 +82,42 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
             {s.status === "waiting" && <span className="text-amber-400">{waitingLabel(s.waitingFor) ?? "確認待ち"}</span>}
-            {s.github ? (
-              <a href={s.github.url} target="_blank" rel="noreferrer" className="hover:text-foreground">
-                {repoLabel(s)}
+            {several ? (
+              <>
+                <RepoPicker repos={several} />
+                <span className="inline-flex items-center gap-1">
+                  <GitBranch className="size-3.5" />
+                  <button
+                    type="button"
+                    onClick={() => go({ name: "graph", machine, sessionId })}
+                    title="ブランチグラフを開き、リポジトリを切り替えて見る"
+                    className="underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    ブランチ…
+                  </button>
+                </span>
+              </>
+            ) : github ? (
+              <a href={github.url} target="_blank" rel="noreferrer" className="hover:text-foreground">
+                {repoText}
               </a>
             ) : (
-              <span>{repoLabel(s)}</span>
+              <span>{repoText}</span>
             )}
-            {branch && (
+            {!several && branch && (
               <span className="inline-flex items-center gap-1">
                 <GitBranch className="size-3.5" />
                 <button
                   type="button"
-                  onClick={() => go({ name: "graph", machine, sessionId })}
+                  onClick={() => go({ name: "graph", machine, sessionId, ...(only ? { repo: only.path } : {}) })}
                   title="ブランチグラフを開く"
                   className="underline-offset-2 hover:text-foreground hover:underline"
                 >
                   {branch}
                 </button>
-                {s.github && (
+                {github && (
                   <a
-                    href={githubTreeUrl(s.github, branch)}
+                    href={githubTreeUrl(github, branch)}
                     target="_blank"
                     rel="noreferrer"
                     aria-label={`${branch} を GitHub で開く`}
