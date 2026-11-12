@@ -1,13 +1,20 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
+/* Gen Interface JP (Inter with Noto Sans JP; SIL OFL 1.1), served from this app in the weights the UI uses: regular,
+   medium and semibold (bold text, such as Markdown's, is shown in semibold). Each weight is split into unicode-range
+   subsets, so a browser downloads only the parts with the characters it shows. */
+@import "gen-interface-jp/400.css";
+@import "gen-interface-jp/500.css";
+@import "gen-interface-jp/600.css";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
     --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', 'Hiragino Sans', 'Noto Sans JP', 'Yu Gothic UI', sans-serif;
+    --font-sans: 'Gen Interface JP', 'Hiragino Sans', 'Noto Sans JP', 'Yu Gothic UI', sans-serif;
+    /* Code stays in a monospaced font; Japanese in it comes from Gen Interface JP. */
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Gen Interface JP', monospace;
     /* Tokens used by the easyui.site components */
     --color-surface: var(--surface);
     --color-surface-raised: var(--surface-raised);

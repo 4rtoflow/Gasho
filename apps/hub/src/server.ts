@@ -25,6 +25,7 @@ const MIME: Record<string, string> = {
   ".ico": "image/x-icon",
   ".webmanifest": "application/manifest+json",
   ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
 };
 
 const HEARTBEAT_MS = 30_000;
