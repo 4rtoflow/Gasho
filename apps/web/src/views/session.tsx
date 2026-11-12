@@ -174,7 +174,6 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
     return (
       <div>
         <PromptInput
-          variant="pill"
           onSend={() => undefined}
           disabled
           models={[]}
@@ -212,7 +211,6 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
   return (
     <div>
       <PromptInput
-        variant="pill"
         onSend={async ({ text }) => {
           setError(undefined);
           const r = await sendCommand(machine.id, { type: "session.input", sessionId: s.sessionId, text });
@@ -229,7 +227,6 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
         allowAttachments={false}
         maxLength={20_000}
         placeholder="Agent への指示を入力…"
-        hint={false}
       />
       {(status || error) && (
         <p className={error ? "mt-1.5 px-3 text-xs text-red-400" : "mt-1.5 px-3 text-xs text-muted-foreground"}>{error ?? status}</p>
