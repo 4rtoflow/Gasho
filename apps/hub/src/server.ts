@@ -234,7 +234,8 @@ export function createServer(opts: ServerOptions): http.Server {
   });
 
   const daemonWss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
-  const clientWss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  // Browsers send files with inputs (10 MB in all, about 13.4 MB as base64).
+  const clientWss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   const alive = new WeakMap<WebSocket, boolean>();
   const track = (ws: WebSocket): void => {
     alive.set(ws, true);

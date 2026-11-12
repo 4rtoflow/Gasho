@@ -1,5 +1,6 @@
 "use client";
-// From easyui.site (PromptInput). Changed for Gasho: user-visible strings are in Japanese.
+// From easyui.site (PromptInput). Changed for Gasho: user-visible strings are in Japanese, and the line under the box
+// can be laid out like EasyUI's preview (`showCount`: keyboard hint on the left, character count on the right).
 
 import {
   forwardRef,
@@ -106,6 +107,11 @@ export interface PromptInputProps {
   hint?: ReactNode | false;
   /** Pad the bottom for the iPhone home indicator (use when the composer is pinned to the screen bottom) */
   safeArea?: boolean;
+  /**
+   * Always show the character count under the box, on the right, with the keyboard hint on the left (as in
+   * EasyUI's preview). Without it the count appears next to the send button only near the limit.
+   */
+  showCount?: boolean;
   className?: string;
 }
 
@@ -300,7 +306,7 @@ function ModelPicker({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={`${uid}-list`}
-        aria-label={`Model: ${current?.name}. Change model`}
+        aria-label={`モデル：${current?.name}（選び直す）`}
         onClick={() => (open ? hide(false) : show())}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -410,6 +416,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
     actions,
     hint,
     safeArea = false,
+    showCount = false,
     className = "",
   },
   ref,
@@ -648,7 +655,10 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const hintNode =
     hint === false ? null : hint !== undefined ? hint : modKey === null ? null : enter ? (
       <>
-        <Kbd>↵</Kbd> で送信 · <Kbd>⇧</Kbd> <Kbd>↵</Kbd> で改行
+        <Kbd>↵</Kbd> で送信
+        <span className="ml-2" />
+        <Kbd>⇧</Kbd>
+        <Kbd>↵</Kbd> で改行
       </>
     ) : (
       <>
@@ -813,7 +823,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
-            {nearLimit && (
+            {nearLimit && !showCount && (
               <span className={cx("text-[11.5px] tabular-nums", over ? "text-rose-500" : "text-neutral-500")} aria-live="polite">
                 {text.length}/{maxLength}
               </span>
@@ -904,12 +914,25 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
       <p id={`${uid}-hint`} className="sr-only">
         {enter ? "Enter で送信、Shift＋Enter で改行。" : "Ctrl（⌘）＋Enter で送信。"}Esc で返答を止めます。
       </p>
-      <div className="flex min-h-[1.5rem] items-center justify-between gap-3 px-3 pt-2 text-[12px] text-neutral-500">
-        <p role="alert" aria-live="polite" className={cx("min-w-0 truncate", error && "text-rose-500")}>
-          {error}
-        </p>
-        {!error && hintNode && <p className="hidden shrink-0 items-center gap-1 sm:flex [@media(pointer:coarse)]:hidden">{hintNode}</p>}
-      </div>
+      {showCount ? (
+        // EasyUI's preview: the hint (or an error) on the left, the character count on the right.
+        <div className="flex min-h-[1.5rem] items-center justify-between gap-3 px-3 pt-2 text-[12px] text-neutral-500">
+          <p role="alert" aria-live="polite" className={cx("min-w-0 truncate text-rose-500", !error && "sr-only")}>
+            {error}
+          </p>
+          {!error && hintNode && <p className="hidden min-w-0 items-center gap-1 sm:flex [@media(pointer:coarse)]:hidden">{hintNode}</p>}
+          <span className={cx("ml-auto shrink-0 tabular-nums", over && "text-rose-500")}>
+            {text.length}/{maxLength}
+          </span>
+        </div>
+      ) : (
+        <div className="flex min-h-[1.5rem] items-center justify-between gap-3 px-3 pt-2 text-[12px] text-neutral-500">
+          <p role="alert" aria-live="polite" className={cx("min-w-0 truncate", error && "text-rose-500")}>
+            {error}
+          </p>
+          {!error && hintNode && <p className="hidden shrink-0 items-center gap-1 sm:flex [@media(pointer:coarse)]:hidden">{hintNode}</p>}
+        </div>
+      )}
     </div>
   );
 });

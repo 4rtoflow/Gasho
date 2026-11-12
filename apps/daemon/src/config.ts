@@ -13,6 +13,8 @@ export interface DaemonConfig {
   pollIntervalMs: number;
   /** Where the daemon keeps its own files (managed sessions); next to the registration. */
   stateDir: string;
+  /** Files sent with inputs, one folder per session; Claude reads them from here. */
+  attachmentsDir: string;
 }
 
 export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.env): DaemonConfig {
@@ -26,5 +28,6 @@ export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.
     claudeBin: env.GASHO_CLAUDE_BIN ?? "claude",
     pollIntervalMs: Number(env.GASHO_POLL_MS ?? 3000),
     stateDir: path.dirname(credentialsPath(env)),
+    attachmentsDir: path.join(env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "gasho", "attachments"),
   };
 }

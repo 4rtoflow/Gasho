@@ -89,6 +89,19 @@ Ubuntu Server には tmux がなく、普段の `claude rc` は zellij（0.45.1�
 
 zellij を操作するときは、`--session` で対象を必ず指定する。rc から起動されたセッションの環境変数には `ZELLIJ_SESSION_NAME=main` が入っていて、指定しないと普段使っている main セッションを操作してしまう。
 
+## 検証4：モデルの切り替えと添付ファイル
+
+2026年11月12日に、Gasho が起動したセッション（Claude Code 2.1.322）で確かめた。
+
+- `/model sonnet` のように名前を付けて送ると、切り替えたうえで「新しいセッションの既定」として `~/.claude/settings.json` に保存された（`Set model to Sonnet 5.5 and saved as your default for new sessions`）。この検証で既定が変わったので、`model` の項目を消して元に戻した
+- 名前を付けずに `/model` を送ると選択画面が開き、`Enter to set as default · s to use this session only · Esc to cancel` と表示された。矢印キーで移ってから「s」を押すと、そのセッションだけが切り替わり（`Set model to Haiku 5.5 for this session only`）、`settings.json` は変わらなかった
+- 発言に `@絶対パス` を書くと、送信のときに Claude Code がそのファイルを読んだ。作業フォルダーの外にあるテキストも画像も、許可を求められずに読まれた
+- 貼り付けた発言は、トランスクリプトに `<pasted_content id="…">…</pasted_content id="…">` で包まれて残る
+- スラッシュコマンドは、`<command-name>` の付いたユーザーの発言と、出力の `<local-command-stdout>` として残る。選択画面を Esc で閉じたときのように、system の記録（subtype が `local_command`）として残ることもある
+- 使ったモデルは、ターンの初めの `attachment` の記録（type が `model`）と、返答の `message.model` に残る
+- まれに満足度のアンケート（`How is Claude doing this session?` と `1: Bad 2: Fine 3: Good 0: Dismiss`）が出る。モデルを切り替えた直後に出たとき、続けて貼り付けた発言が入力欄に入らず、送られなかった
+- Node の組み込みの WebSocket は、14MB のメッセージを受け取れた
+
 ## 未確認の事項
 
 - hook から拒否を返したときの動き

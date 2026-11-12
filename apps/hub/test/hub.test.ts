@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HubToClient, HubToDaemon, SessionInfo } from "@gasho/protocol";
-import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub } from "../src/hub.ts";
+import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, MAX_FILES_BYTES, validateCommand } from "../src/hub.ts";
 import { notificationFor } from "../src/notify.ts";
 import { Store } from "../src/store.ts";
 
@@ -286,4 +286,34 @@ test("git.graph.get passes the chosen repository through and echoes it with the 
   hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1", repo: "" });
   hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1", repo: "x".repeat(501) });
   assert.equal(d.sent.length, before);
+});
+
+test("inputs with a model and files are checked: allowed models, at most 5 files and 10 MB, base64 only", () => {
+  const ok = { type: "session.input", sessionId: "s1", text: "見て" } as const;
+  const file = (bytes: number, name = "a.png") => ({ name, data: Buffer.alloc(bytes, 7).toString("base64") });
+  assert.equal(validateCommand({ ...ok, model: "sonnet", files: [file(10)] }), undefined);
+  // Files alone are an input too.
+  assert.equal(validateCommand({ ...ok, text: "", files: [file(10)] }), undefined);
+  assert.equal(validateCommand({ ...ok, text: "" }), "入力が空です。");
+  assert.match(validateCommand({ ...ok, model: "gpt" as never }) ?? "", /モデル/);
+  assert.match(validateCommand({ ...ok, files: Array.from({ length: 6 }, () => file(1)) }) ?? "", /5 個/);
+  assert.match(validateCommand({ ...ok, files: [file(MAX_FILES_BYTES / 2), file(MAX_FILES_BYTES / 2 + 1)] }) ?? "", /10MB/);
+  assert.equal(validateCommand({ ...ok, files: [file(MAX_FILES_BYTES / 2), file(MAX_FILES_BYTES / 2)] }), undefined);
+  assert.match(validateCommand({ ...ok, files: [{ name: "a", data: "not base64!" }] }) ?? "", /中身/);
+  assert.match(validateCommand({ ...ok, files: [{ name: "", data: "" }] }) ?? "", /ファイル名/);
+});
+
+test("the audit log records file names and sizes, never their contents", () => {
+  const { hub, store, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.5.0" });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const data = Buffer.from("秘密の中身").toString("base64");
+  hub.onClientMessage(c, { type: "session.input", requestId: "f", machine: machineId, sessionId: "s1", text: "読んで", model: "haiku", files: [{ name: "memo.txt", data }] });
+  const relayed = d.sent.at(-1);
+  assert.ok(relayed?.type === "session.input" && relayed.files?.[0]?.data === data && relayed.model === "haiku");
+  const logged = store.recentEvents().at(-1);
+  assert.match(logged?.summary ?? "", /読んで \[model: haiku\] \[file: memo\.txt, 1KB\]/);
+  assert.ok(!(logged?.summary ?? "").includes(data));
 });

@@ -58,6 +58,8 @@ export interface SessionInfo {
   pendingInputs?: number;
   /** Repositories inside the folder, when the folder is not in a repository but holds some (a workspace of repos). */
   repos?: SessionRepo[];
+  /** The model the session uses, as Claude Code names it ("Opus 5.5"); from the transcript. */
+  model?: string;
 }
 
 export type TranscriptBlock =
@@ -253,10 +255,23 @@ export type ClientToHub =
   | { type: "notification.read"; ids: string[] }
   | ({ requestId: string; machine: string } & SessionCommand);
 
+/** Models a session started from Gasho can switch to, as Claude Code's /model picker lists them. */
+export type SessionModel = "default" | "opus" | "fable" | "sonnet" | "haiku";
+
+/** A file sent with an input, base64-encoded. The Gasho server allows 5 files and 10 MB in all per input. */
+export interface InputFile {
+  name: string;
+  data: string;
+}
+
 /** Commands a browser can send to a working server, relayed by the Gasho server. */
 export type SessionCommand =
   | { type: "session.launch"; cwd: string; name?: string }
-  | { type: "session.input"; sessionId: string; text: string }
+  /**
+   * `model`: switch the session to this model (for this session only) before the text is sent.
+   * `files`: saved on the working server and mentioned at the end of the text (`@path`), so Claude reads them.
+   */
+  | { type: "session.input"; sessionId: string; text: string; model?: SessionModel; files?: InputFile[] }
   | { type: "session.interrupt"; sessionId: string };
 
 export interface CommandResult {
@@ -265,4 +280,6 @@ export interface CommandResult {
   /** session.launch: the new session; session.input: whether the input waits for the session to become idle. */
   sessionId?: string;
   queued?: boolean;
+  /** Sent, but something asked for did not happen (e.g. the model could not be switched). */
+  warning?: string;
 }

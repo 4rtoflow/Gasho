@@ -43,6 +43,16 @@ interface PendingRequest {
 const REQUEST_TIMEOUT_MS = 15_000;
 const LAUNCH_TIMEOUT_MS = 45_000;
 const MAX_INPUT = 20_000;
+const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
+/** Files sent with one input: how many, and their size in all. */
+export const MAX_FILES = 5;
+export const MAX_FILES_BYTES = 10 * 1024 * 1024;
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Size of the data a base64 string holds. */
+function base64Bytes(data: string): number {
+  return Math.floor((data.length * 3) / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+}
 
 interface PendingCommand {
   client: ClientPeer;
@@ -58,10 +68,22 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
       if (cmd.name !== undefined && (typeof cmd.name !== "string" || cmd.name.length > 60)) return "名前は60文字までです。";
       return undefined;
-    case "session.input":
-      if (typeof cmd.text !== "string" || !cmd.text.trim()) return "入力が空です。";
+    case "session.input": {
+      const files = cmd.files ?? [];
+      if (typeof cmd.text !== "string" || !Array.isArray(files)) return "入力が正しくありません。";
+      if (!cmd.text.trim() && files.length === 0) return "入力が空です。";
       if (cmd.text.length > MAX_INPUT) return `入力が長すぎます（${MAX_INPUT} 文字まで）。`;
+      if (cmd.model !== undefined && !MODELS.has(cmd.model)) return "モデルの指定が正しくありません。";
+      if (files.length > MAX_FILES) return `添付できるファイルは ${MAX_FILES} 個までです。`;
+      let total = 0;
+      for (const f of files) {
+        if (typeof f?.name !== "string" || !f.name || f.name.length > 255) return "ファイル名が正しくありません。";
+        if (typeof f.data !== "string" || f.data.length % 4 !== 0 || !BASE64_RE.test(f.data)) return "ファイルの中身が正しくありません。";
+        total += base64Bytes(f.data);
+      }
+      if (total > MAX_FILES_BYTES) return `添付できるのは、合わせて ${MAX_FILES_BYTES / 1024 / 1024}MB までです。`;
       return undefined;
+    }
     case "session.interrupt":
       return undefined;
     default:
@@ -256,12 +278,24 @@ export class Hub {
     if (!daemon) return reply({ ok: false, error: "この working server はオフラインです。" });
     // Audit trail of what browsers asked working servers to do.
     const sessionId = "sessionId" in cmd ? cmd.sessionId : "";
-    const summary = cmd.type === "session.input" ? cmd.text.slice(0, 300) : cmd.type === "session.launch" ? cmd.cwd : "";
+    const summary =
+      cmd.type === "session.input"
+        ? [
+            cmd.text.slice(0, 300),
+            cmd.model && `[model: ${cmd.model}]`,
+            ...(cmd.files ?? []).map((f) => `[file: ${f.name.slice(0, 100)}, ${Math.ceil(base64Bytes(f.data) / 1024)}KB]`),
+          ]
+            .filter(Boolean)
+            .join(" ")
+        : cmd.type === "session.launch"
+          ? cmd.cwd
+          : "";
     const event: MachineHookEvent = { machine, sessionId, event: `Gasho:${cmd.type}`, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` };
     this.store.addEvent(event);
 
     const requestId = randomUUID();
-    const timeout = cmd.type === "session.launch" ? LAUNCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+    // Launching waits for Claude Code to start; an input may switch the model first and carry files.
+    const timeout = cmd.type === "session.interrupt" ? REQUEST_TIMEOUT_MS : LAUNCH_TIMEOUT_MS;
     const timer = setTimeout(() => {
       if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
     }, timeout);

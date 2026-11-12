@@ -8,6 +8,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { SessionModel } from "@gasho/protocol";
 
 const execFileP = promisify(execFile);
 
@@ -15,6 +16,8 @@ const execFileP = promisify(execFile);
 export const PANE = "terminal_0";
 export const TRUST_PROMPT_RE = /trust this folder|Quick safety check/i;
 export const PERMISSION_PROMPT_RE = /Do you want to proceed\?/;
+/** Claude Code's occasional feedback survey ("1: Bad 2: Fine 3: Good 0: Dismiss"); "0" dismisses it. */
+export const SURVEY_RE = /How is Claude doing this session\?/;
 
 /**
  * The lines of Claude Code's prompt box: the lines between the last two horizontal rules on the screen,
@@ -30,6 +33,19 @@ export function promptBoxLines(screen: string): string[] | undefined {
 }
 
 /**
+ * Whether the prompt box holds `text`: its first characters (spaces aside), or the "[Pasted text #N]" that Claude
+ * Code shows for a long or multi-line paste. False when the screen shows no prompt box.
+ */
+export function promptHolds(screen: string, text: string): boolean {
+  const box = promptBoxLines(screen);
+  if (!box) return false;
+  const inBox = box.join("").replace(/^❯/, "").replace(/\s+/g, "");
+  if (/\[Pastedtext#\d+/.test(inBox)) return true;
+  const head = text.replace(/\s+/g, "").slice(0, 12);
+  return head.length > 0 && inBox.includes(head);
+}
+
+/**
  * Keys that empty the prompt box, for a box that takes `lines` lines on the screen. Ctrl+U deletes back to the
  * start of the line on the screen, and Backspace then deletes the line break before it (or a whole
  * "[Pasted text]"), so one pair per line is enough. On an empty box they do nothing. Ctrl+C would also empty
@@ -37,6 +53,56 @@ export function promptBoxLines(screen: string): string[] | undefined {
  */
 export function clearPromptKeys(lines: number): string[] {
   return Array.from({ length: Math.max(1, lines) + 1 }, () => ["Ctrl u", "Backspace"]).flat();
+}
+
+/** An input waiting to be typed, and the model to switch to first. */
+export interface QueuedInput {
+  text: string;
+  model?: SessionModel;
+}
+
+/** One line of Claude Code's /model picker. */
+export interface PickerOption {
+  label: string;
+  /** The picker's cursor (❯) is on this line. */
+  cursor: boolean;
+  /** The model the session uses now (✔). */
+  current: boolean;
+}
+
+/**
+ * The options of Claude Code's /model picker, read from the screen between its title ("Select model") and its
+ * key help ("Enter to set as default · s to use this session only · Esc to cancel", which wraps in a narrow
+ * pane). Empty when the picker is not open.
+ */
+export function modelPickerOptions(screen: string): PickerOption[] {
+  const lines = screen.split("\n");
+  const start = lines.findIndex((l) => /^\s*Select model\s*$/.test(l));
+  if (start < 0) return [];
+  const end = lines.findIndex((l, i) => i > start && /Enter to set as default|Esc to cancel/.test(l));
+  if (end < 0) return [];
+  const options: PickerOption[] = [];
+  for (const line of lines.slice(start + 1, end)) {
+    const m = /^\s*(❯\s*)?\d+\.\s+(\S.*?)(?:\s{2,}|$)/.exec(line);
+    if (!m?.[2]) continue;
+    options.push({ label: m[2].replace(/\s*✔\s*$/, "").trim(), cursor: Boolean(m[1]), current: m[2].includes("✔") });
+  }
+  return options;
+}
+
+/** Which picker line stands for a model ("Default (recommended)", "Opus 5.5", …). */
+export function pickerMatches(label: string, model: SessionModel): boolean {
+  return new RegExp(`^${model === "default" ? "Default" : model}\\b`, "i").test(label);
+}
+
+/**
+ * A file name that is safe on disk and in an `@path` mention: letters (any script), digits, dot, dash and underscore;
+ * everything else becomes "_". The end of the name (with its extension) is kept when it is long.
+ */
+export function safeFileName(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? "";
+  const cleaned = base.normalize("NFC").replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^[._]+/, "");
+  return cleaned.slice(-100) || "file";
 }
 
 export interface ManagedSession {
@@ -168,7 +234,7 @@ export class Zellij {
 export class ManagedSessions {
   private file: string;
   private sessions = new Map<string, ManagedSession>();
-  private queues = new Map<string, string[]>();
+  private queues = new Map<string, QueuedInput[]>();
 
   constructor(file: string) {
     this.file = file;
@@ -211,21 +277,21 @@ export class ManagedSessions {
     this.queues.delete(sessionId);
   }
 
-  enqueue(sessionId: string, text: string): number {
+  enqueue(sessionId: string, input: QueuedInput): number {
     const q = this.queues.get(sessionId) ?? [];
-    q.push(text);
+    q.push(input);
     this.queues.set(sessionId, q);
     return q.length;
   }
 
-  next(sessionId: string): string | undefined {
+  next(sessionId: string): QueuedInput | undefined {
     return this.queues.get(sessionId)?.shift();
   }
 
   /** Puts a message back at the front, e.g. when sending it failed. */
-  unshift(sessionId: string, text: string): void {
+  unshift(sessionId: string, input: QueuedInput): void {
     const q = this.queues.get(sessionId) ?? [];
-    q.unshift(text);
+    q.unshift(input);
     this.queues.set(sessionId, q);
   }
 

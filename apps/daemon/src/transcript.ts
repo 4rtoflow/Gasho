@@ -7,6 +7,41 @@ import { clip, inputSummary, str } from "./util.ts";
 const MAX_TEXT = 4000;
 const MAX_TOOL = 2000;
 const INTERRUPT_RE = /^\[Request interrupted by user/;
+/** A slash command typed into Claude Code, recorded as a user message. */
+const COMMAND_RE = /^\s*<command-name>([\s\S]*?)<\/command-name>/;
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+/** What a slash command printed, recorded as a user message. */
+const COMMAND_OUTPUT_RE = /^\s*<local-command-(stdout|stderr)>([\s\S]*?)<\/local-command-\1>\s*$/;
+/** Text pasted into Claude Code (as Gasho sends it) is recorded inside this tag. */
+const PASTED_RE = /<pasted_content(?:\s[^>]*)?>\n?([\s\S]*?)\n?<\/pasted_content(?:\s[^>]*)?>/g;
+const MODEL_SET_RE = /Set model to `?([^`\n]+?)`?(?: and saved| for this session|$)/;
+
+/** "claude-opus-5-5" → "Opus 5.5". Other names are returned as they are. */
+export function modelLabel(id: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(id);
+  if (!m?.[1] || !m[2]) return id;
+  return `${m[1].charAt(0).toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ""}`;
+}
+
+/**
+ * A slash command (such as /model) or what it printed, as a short note; undefined for other text. Claude Code
+ * records these as user messages or as system records. A model switch also updates the session's model.
+ */
+function commandNote(content: string, meta: TranscriptMeta): string | undefined {
+  const command = COMMAND_RE.exec(content);
+  if (command?.[1]) return `${command[1].trim()} ${COMMAND_ARGS_RE.exec(content)?.[1]?.trim() ?? ""}`.trim();
+  const output = COMMAND_OUTPUT_RE.exec(content);
+  if (!output) return undefined;
+  const text = (output[2] ?? "").trim();
+  const model = MODEL_SET_RE.exec(text)?.[1];
+  if (model) meta.model = model.trim();
+  return text;
+}
+
+/** Removes Claude Code's wrapper around pasted text, keeping the text. */
+export function unwrapPasted(text: string): string {
+  return text.replace(PASTED_RE, "$1").replace(/^\n+|\n+$/g, "");
+}
 
 /** Session facts collected from transcript records. */
 export interface TranscriptMeta {
@@ -16,6 +51,8 @@ export interface TranscriptMeta {
   costUSD?: number;
   bridgeSessionId?: string;
   lastActivityAt?: number;
+  /** "Opus 5.5": the model of the latest reply or model switch. */
+  model?: string;
 }
 
 export function emptyMeta(): TranscriptMeta {
@@ -68,6 +105,15 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
     case "bridge-session":
       if (typeof rec.bridgeSessionId === "string") meta.bridgeSessionId = toUrlSessionId(rec.bridgeSessionId);
       return null;
+    case "attachment": {
+      // Claude Code tells the model which model it is at the start of a turn.
+      const a = rec.attachment as { type?: unknown; identity?: { marketingName?: unknown; modelId?: unknown } } | undefined;
+      if (a?.type === "model" && rec.isSidechain !== true) {
+        const name = str(a.identity?.marketingName) ?? (typeof a.identity?.modelId === "string" ? modelLabel(a.identity.modelId) : undefined);
+        if (name) meta.model = name;
+      }
+      return null;
+    }
     case "user":
     case "assistant":
     case "system":
@@ -89,14 +135,27 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
   const isSidechain = rec.isSidechain === true;
 
   if (role === "system") {
-    const text = str(rec.content);
+    const raw = str(rec.content);
+    const text = raw === undefined ? undefined : (commandNote(raw, meta) ?? raw);
     return text ? { uuid, ts, role, blocks: [{ type: "text", text: clip(text, MAX_TEXT) }], isSidechain } : null;
   }
 
-  const content = (rec.message as { content?: unknown } | undefined)?.content;
+  const message = rec.message as { content?: unknown; model?: unknown } | undefined;
+  const content = message?.content;
+  if (role === "assistant" && !isSidechain && typeof message?.model === "string" && !message.model.startsWith("<")) {
+    meta.model = modelLabel(message.model);
+  }
+  if (role === "user" && typeof content === "string") {
+    // Slash commands (such as /model) and their output are shown as notes, not as something the user said.
+    const note = commandNote(content, meta);
+    if (note !== undefined) {
+      return note ? { uuid, ts, role: "system", blocks: [{ type: "text", text: clip(note, MAX_TEXT) }], isSidechain } : null;
+    }
+  }
   const blocks: TranscriptBlock[] = [];
   let interrupted = false;
-  const pushText = (t: string): void => {
+  const pushText = (raw: string): void => {
+    const t = role === "user" ? unwrapPasted(raw) : raw;
     if (!t) return;
     if (INTERRUPT_RE.test(t)) interrupted = true;
     blocks.push({ type: "text", text: clip(t, MAX_TEXT) });

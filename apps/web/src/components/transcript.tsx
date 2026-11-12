@@ -2,7 +2,7 @@
 // only while the reader is at the bottom. The footer (the chat box) floats over the bottom of the
 // conversation: it stays at the bottom of the screen, and the conversation scrolls behind it, blurred.
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { AlertTriangle, ArrowDown, ChevronRight, Image as ImageIcon, Wrench } from "lucide-react";
+import { AlertTriangle, ArrowDown, ChevronRight, Image as ImageIcon, Paperclip, Wrench } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { MarkdownText } from "@/components/markdown";
@@ -51,15 +51,42 @@ function Fold({ summary, children, tone }: { summary: React.ReactNode; children:
   );
 }
 
+/** A file sent from Gasho: the daemon saved it and mentioned it on a line of its own as @path. */
+const ATTACHMENT_LINE = /^@(\S*\/gasho\/attachments\/[^/\s]+\/(\S+))$/;
+
+/** What the user typed, as typed, with the files sent from Gasho shown as chips. */
+function UserText({ text }: { text: string }) {
+  const parts: ({ kind: "text"; text: string } | { kind: "file"; name: string; path: string })[] = [];
+  for (const line of text.split("\n")) {
+    const m = ATTACHMENT_LINE.exec(line.trim());
+    const last = parts.at(-1);
+    if (m?.[1] && m[2]) parts.push({ kind: "file", path: m[1], name: m[2].replace(/^\d{8}T\d{6}-\d+-/, "") });
+    else if (last?.kind === "text") last.text += `\n${line}`;
+    else parts.push({ kind: "text", text: line });
+  }
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.kind === "file" ? (
+          <span key={i} title={p.path} className="mr-1.5 mb-1 inline-flex max-w-full items-center gap-1.5 rounded-lg bg-white/[0.06] px-2 py-1 text-xs">
+            <Paperclip className="size-3.5 shrink-0" />
+            <span className="truncate">{p.name}</span>
+          </span>
+        ) : p.text.trim() ? (
+          <p key={i} className="whitespace-pre-wrap break-words leading-relaxed">
+            {p.text.replace(/^\n+|\n+$/g, "")}
+          </p>
+        ) : null,
+      )}
+    </>
+  );
+}
+
 /** Claude's text is Markdown; what the user typed is shown as typed. */
 function BlockView({ block, markdown = false }: { block: TranscriptBlock; markdown?: boolean }) {
   switch (block.type) {
     case "text":
-      return markdown ? (
-        <MarkdownText text={block.text} />
-      ) : (
-        <p className="whitespace-pre-wrap break-words leading-relaxed">{block.text}</p>
-      );
+      return markdown ? <MarkdownText text={block.text} /> : <UserText text={block.text} />;
     case "tool_use":
       return (
         <Fold

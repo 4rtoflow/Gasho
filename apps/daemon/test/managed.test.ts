@@ -9,7 +9,11 @@ import {
   launchableFolders,
   launchArgs,
   ManagedSessions,
+  modelPickerOptions,
+  pickerMatches,
   promptBoxLines,
+  promptHolds,
+  safeFileName,
   zellijSessionName,
 } from "../src/managed.ts";
 
@@ -61,11 +65,12 @@ test("managed sessions keep their input queue in order and survive a reload", as
     a.add({ sessionId: "s1", zellijSession: "z1", pid: 1, cwd: "/x", name: "x", launchedAt: 1 });
     a.add({ sessionId: "s2", zellijSession: "z2", pid: 2, cwd: "/y", name: "y", launchedAt: 2 });
     await a.save();
-    assert.equal(a.enqueue("s1", "one"), 1);
-    assert.equal(a.enqueue("s1", "two"), 2);
-    assert.equal(a.next("s1"), "one");
-    a.unshift("s1", "one");
-    assert.deepEqual([a.next("s1"), a.next("s1"), a.next("s1")], ["one", "two", undefined]);
+    assert.equal(a.enqueue("s1", { text: "one", model: "sonnet" }), 1);
+    assert.equal(a.enqueue("s1", { text: "two" }), 2);
+    const first = a.next("s1");
+    assert.deepEqual(first, { text: "one", model: "sonnet" });
+    if (first) a.unshift("s1", first);
+    assert.deepEqual([a.next("s1"), a.next("s1"), a.next("s1")], [{ text: "one", model: "sonnet" }, { text: "two" }, undefined]);
 
     const b = new ManagedSessions(file);
     await b.load(async (m) => m.sessionId === "s2"); // s1's process is gone
@@ -137,4 +142,63 @@ test("clearPromptKeys sends one Ctrl+U and Backspace pair per line, plus one", (
   assert.equal(clearPromptKeys(3).length, 8);
   assert.equal(clearPromptKeys(0).length, 4);
   assert.ok(!clearPromptKeys(5).includes("Ctrl c"));
+});
+
+// The /model picker as Claude Code v2.1.322 draws it in a 50-column pane (descriptions wrap onto more lines).
+const PICKER = [
+  "❯ 1. 前の回答の箇条書き", // a numbered line of the conversation above the picker must not count
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
+  "   Select model",
+  "   Switch between Claude models. Your pick",
+  "     1.  Default (recommended)  Opus 5.5 · Best",
+  "                                for everyday,",
+  "     2.  Opus 5.5               For complex",
+  "     3.  Fable 5.2              For your",
+  "   ❯ 4.  Sonnet 5.5 ✔           Most efficient",
+  "     5.  Haiku 5.5              Fastest for",
+  "     ▸   More models",
+  "   ◐ Medium effort (default) ←/→ to adjust",
+  "   Enter to set as default · s to use this",
+  "   session only · Esc to cancel",
+].join("\n");
+
+test("modelPickerOptions reads the /model picker, its cursor and the current model", () => {
+  const options = modelPickerOptions(PICKER);
+  assert.deepEqual(
+    options.map((o) => o.label),
+    ["Default (recommended)", "Opus 5.5", "Fable 5.2", "Sonnet 5.5", "Haiku 5.5"],
+  );
+  assert.deepEqual(
+    options.map((o) => [o.cursor, o.current]),
+    [
+      [false, false],
+      [false, false],
+      [false, false],
+      [true, true],
+      [false, false],
+    ],
+  );
+  assert.deepEqual(modelPickerOptions("❯ 1. something\n❯ /model"), []);
+  assert.ok(pickerMatches("Default (recommended)", "default"));
+  assert.ok(pickerMatches("Haiku 5.5", "haiku"));
+  assert.ok(!pickerMatches("Opus 5.5", "sonnet"));
+});
+
+test("safeFileName keeps letters of any script and the extension, and nothing that could leave the folder", () => {
+  assert.equal(safeFileName("画面 1.png"), "画面_1.png");
+  assert.equal(safeFileName("../../etc/passwd"), "passwd");
+  assert.equal(safeFileName("..\\secret.txt"), "secret.txt");
+  assert.equal(safeFileName(".env"), "env");
+  assert.equal(safeFileName("a;b|c$(d).sh"), "a_b_c_d_.sh");
+  assert.equal(safeFileName(""), "file");
+  assert.equal(safeFileName(`${"x".repeat(150)}.pdf`).length, 100);
+  assert.ok(safeFileName(`${"x".repeat(150)}.pdf`).endsWith(".pdf"));
+});
+
+test("promptHolds tells whether the prompt box holds the text, folded or collapsed into [Pasted text]", () => {
+  assert.ok(promptHolds(screenWith("❯ これは停止の実験です。「はい」とだけ返してくだ", "  さい。"), "これは停止の実験です。「はい」とだけ返してください。"));
+  assert.ok(promptHolds(screenWith("❯ [Pasted text #2 +40 lines]"), "長い\n指示"));
+  assert.ok(!promptHolds(screenWith("❯ "), "これは"));
+  assert.ok(!promptHolds(screenWith('❯ Try "edit hub.test.ts to..."'), "これは"));
+  assert.ok(!promptHolds("no prompt box", "これは"));
 });
