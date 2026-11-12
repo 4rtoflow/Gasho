@@ -82,15 +82,45 @@ Ubuntu Server には tmux がなく、普段の `claude rc` は zellij（0.45.1�
 - `zellij action paste` で文章を貼り付けてから Enter を送ると、発言として送信された。発言と応答はスマホにも表示された
 - スマホから送った発言は、端末にも hooks にも届いた
 - Esc で割り込めた。応答が始まる前に割り込むと、送った発言が入力欄に戻った。応答の途中で割り込むと、途中までの応答と `[Request interrupted by user]` がトランスクリプトに残った。どちらの場合も Stop は届かなかった
+- 入力欄に戻った発言は、Ctrl+U と Backspace を交互に送ると消せた。Ctrl+U が画面上の1行を消し、Backspace がその前の改行を消す。長い文章を貼り付けたときは入力欄に `[Pasted text #2 +40 lines]` のようにまとめて表示され、Backspace 1回でまとめて消えた。空の入力欄に送っても何も起きなかった。Ctrl+C でも消せたが、`Press Ctrl-C again to exit` と表示され、続けて押すと Claude Code が終了するので使わない
+- 応答のテキストは、ブロックが終わるまでトランスクリプトに書かれなかった。1から2000までの数字を書かせると、応答が始まってから約31秒後にまとめて書かれた。そのため Gasho の会話の表示では、長い応答は終わるまで出てこない
 - 確認のダイアログが開いているときに文章を貼り付けて Enter を送ると、文章は捨てられ、Enter が選択中の「1. Yes」として扱われてコマンドが実行された
 - 新しいフォルダーでは、最初に端末で信頼の確認に答える必要があった
 
 zellij を操作するときは、`--session` で対象を必ず指定する。rc から起動されたセッションの環境変数には `ZELLIJ_SESSION_NAME=main` が入っていて、指定しないと普段使っている main セッションを操作してしまう。
 
+## 検証4：モデルの切り替えと添付ファイル
+
+2026年11月12日に、Gasho が起動したセッション（Claude Code 2.1.322）で確かめた。
+
+- `/model sonnet` のように名前を付けて送ると、切り替えたうえで「新しいセッションの既定」として `~/.claude/settings.json` に保存された（`Set model to Sonnet 5.5 and saved as your default for new sessions`）。この検証で既定が変わったので、`model` の項目を消して元に戻した
+- 名前を付けずに `/model` を送ると選択画面が開き、`Enter to set as default · s to use this session only · Esc to cancel` と表示された。矢印キーで移ってから「s」を押すと、そのセッションだけが切り替わり（`Set model to Haiku 5.5 for this session only`）、`settings.json` は変わらなかった
+- 発言に `@絶対パス` を書くと、送信のときに Claude Code がそのファイルを読んだ。作業フォルダーの外にあるテキストも画像も、許可を求められずに読まれた
+- 貼り付けた発言は、トランスクリプトに `<pasted_content id="…">…</pasted_content id="…">` で包まれて残る
+- スラッシュコマンドは、`<command-name>` の付いたユーザーの発言と、出力の `<local-command-stdout>` として残る。選択画面を Esc で閉じたときのように、system の記録（subtype が `local_command`）として残ることもある
+- 使ったモデルは、ターンの初めの `attachment` の記録（type が `model`）と、返答の `message.model` に残る
+- まれに満足度のアンケート（`How is Claude doing this session?` と `1: Bad 2: Fine 3: Good 0: Dismiss`）が出る。モデルを切り替えた直後に出たとき、続けて貼り付けた発言が入力欄に入らず、送られなかった
+- Node の組み込みの WebSocket は、14MB のメッセージを受け取れた
+
+## 検証5：Effort と Ultracode
+
+2026年11月12日に、Gasho が起動したセッション（Claude Code 2.1.322）で確かめた。設定ファイルの控えを取ってから試し、変わったものは元に戻した。
+
+- `/effort high` は「新しいセッションの既定として保存」になり、`~/.claude/settings.json` に `modelSettings.<モデル>.effortLevel` が加わった。Gasho からは送らない
+- `/effort ultracode on` と `/effort ultracode off` は、どちらも「このセッションだけ」で、設定ファイルは変わらなかった（`Ultracode on (this session only): …`、`Ultracode off. Effort stays high.`）
+- `/model` の選択画面では、←→ で Effort が Low・Medium（既定）・High・xHigh・Max の順に変わり、端で止まる。「s」を押すと、モデルと Effort がそのセッションだけに適用された（`Set model to Sonnet 5.5 (default) for this session only with medium effort`）。設定ファイルは変わらなかった
+- 選択画面の「Default (recommended)」が指すモデルは、時間とともに変わった（13時台の初めは Opus 5.5、30分後は Sonnet 5.5）。幅が狭いと、名前は `Default (recommend…` のように切れる
+- 会話の途中でモデルを切り替えると、`… means the full history gets re-read.` と確認され、`1. Yes, switch to Haiku 5.5` と `2. No, go back` を選ぶ画面が出た。Enter で Yes を選ぶと、そのセッションだけ切り替わった
+- 入力欄の上の `◐ medium · ultracode · /effort` は、変更のあとしばらくだけ出る。Ultracode がオンのあいだは、入力欄の上の罫線に `ultracode` と出続ける
+- 入力欄には、次の発言の候補が薄い文字で出ることがある。Ctrl+U では消えない。`zellij action dump-screen --ansi` で見ると、候補は薄い文字（SGR 2）で描かれ、打った文字（SGR 22）と見分けられる
+- Effort だけを変えて「s」を押したときも、`Set model to Haiku 5.5 for this session only with low effort` と出た
+- 選択画面の枠の上端は `▔` の線で描かれ、入力欄の罫線（`─`）とは違う。選択画面と確認は、画面のいちばん下に出る
+- 返答の記録には `"effort": "medium"` が残る。`claude agents --json` には、モデルも Effort も Ultracode も出ない
+- CLI には `--effort <level>`（low・medium・high・xhigh・max）があり、`--effort ultracode` でも Ultracode が有効になる
+
 ## 未確認の事項
 
 - hook から拒否を返したときの動き
-- 割り込みで入力欄に戻った発言を消す方法
 - Mac（launchd、zellij）での動き
 - AskUserQuestion に hook で答える方法
 - MessageDisplay が届く条件
