@@ -18,7 +18,7 @@ import type {
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
-import { ghError, listGitHub } from "./github.ts";
+import { ghError, listGitHub, viewGitHub } from "./github.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
@@ -57,7 +57,7 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.7.0";
+export const DAEMON_VERSION = "0.8.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -546,6 +546,8 @@ export class Daemon {
         return this.sendGitGraph(m);
       case "github.list.get":
         return this.sendGitHubList(m);
+      case "github.item.get":
+        return this.sendGitHubItem(m);
       case "session.launch":
       case "session.input":
       case "session.interrupt": {
@@ -637,6 +639,27 @@ export class Daemon {
       this.hub.send({ ...reply, list: await listGitHub(this.cfg.ghBin, github, m.kind) });
     } catch (e) {
       log(`gh could not list ${m.kind} of ${github.owner}/${github.name}`, e);
+      this.hub.send({ ...reply, error: ghError(e) });
+    }
+  }
+
+  /** One issue or pull request of the GitHub repository the session works in, with its conversation, read with `gh`. */
+  private async sendGitHubItem(m: Extract<HubToDaemon, { type: "github.item.get" }>): Promise<void> {
+    const reply = { type: "github.item" as const, requestId: m.requestId, sessionId: m.sessionId, repo: m.repo, kind: m.kind, number: m.number };
+    const where = await this.repoDir(m.sessionId, m.repo);
+    if ("error" in where) {
+      this.hub.send({ ...reply, error: where.error });
+      return;
+    }
+    const github = await this.githubOf(where.dir);
+    if (!github) {
+      this.hub.send({ ...reply, error: "このリポジトリは GitHub にありません（origin が GitHub のリポジトリではありません）。" });
+      return;
+    }
+    try {
+      this.hub.send({ ...reply, item: await viewGitHub(this.cfg.ghBin, github, m.kind, m.number) });
+    } catch (e) {
+      log(`gh could not read ${m.kind} #${m.number} of ${github.owner}/${github.name}`, e);
       this.hub.send({ ...reply, error: ghError(e) });
     }
   }

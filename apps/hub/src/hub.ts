@@ -31,16 +31,18 @@ export const CLOSE_INVALID_CREDENTIALS = 4001;
 export const CLOSE_REPLACED = 4002;
 export const CLOSE_UNAUTHORIZED = 4401;
 
-/** A browser's request that a working server answers: a transcript page, a branch graph or a GitHub list. */
+/** A browser's request that a working server answers: a transcript page, a branch graph, or a GitHub list or item. */
 interface PendingRequest {
-  kind: "transcript" | "graph" | "github";
+  kind: "transcript" | "graph" | "github" | "githubItem";
   client: ClientPeer;
   machine: string;
   sessionId: string;
   /** graph, github: the repository inside the session's folder, if one was asked for. */
   repo?: string;
-  /** github: issues or pull requests. */
+  /** github, githubItem: issues or pull requests. */
   list?: GitHubListKind;
+  /** githubItem: the issue's or pull request's number. */
+  number?: number;
   timer: NodeJS.Timeout;
 }
 
@@ -222,6 +224,23 @@ export class Hub {
         req.client.send({ type: "github.list", machine: id, sessionId: req.sessionId, repo: req.repo, kind: req.list, list: msg.list, error: msg.error });
         break;
       }
+      case "github.item": {
+        const req = this.pending.get(msg.requestId);
+        if (!req || req.kind !== "githubItem" || !req.list || req.number === undefined) break;
+        clearTimeout(req.timer);
+        this.pending.delete(msg.requestId);
+        req.client.send({
+          type: "github.item",
+          machine: id,
+          sessionId: req.sessionId,
+          repo: req.repo,
+          kind: req.list,
+          number: req.number,
+          item: msg.item,
+          error: msg.error,
+        });
+        break;
+      }
       case "hook": {
         const event: MachineHookEvent = { ...msg.event, machine: id };
         this.store.addEvent(event);
@@ -324,6 +343,27 @@ export class Hub {
         }, GITHUB_TIMEOUT_MS).unref();
         this.pending.set(requestId, { kind: "github", list: msg.kind, client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
         daemon.send({ type: "github.list.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind });
+        break;
+      }
+      case "github.item.get": {
+        const daemon = this.daemons.get(msg.machine);
+        const { repo, number } = msg;
+        if (!GITHUB_LISTS.has(msg.kind) || !Number.isInteger(number) || number < 1 || number > 1e9) return;
+        const reply = { type: "github.item" as const, machine: msg.machine, sessionId: msg.sessionId, repo, kind: msg.kind, number };
+        if (repo !== undefined && (typeof repo !== "string" || repo.length === 0 || repo.length > 500)) {
+          peer.send({ ...reply, error: "リポジトリの指定が正しくありません。" });
+          return;
+        }
+        if (!daemon) {
+          peer.send({ ...reply, error: "この working server はオフラインです。" });
+          return;
+        }
+        const requestId = randomUUID();
+        const timer = setTimeout(() => {
+          if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
+        }, GITHUB_TIMEOUT_MS).unref();
+        this.pending.set(requestId, { kind: "githubItem", list: msg.kind, number, client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
+        daemon.send({ type: "github.item.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind, number });
         break;
       }
       case "notification.read":
@@ -473,6 +513,8 @@ export class Hub {
       if (req.kind === "graph") req.client.send({ type: "git.graph", machine: req.machine, sessionId: req.sessionId, repo: req.repo, error });
       else if (req.kind === "github" && req.list) {
         req.client.send({ type: "github.list", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, error });
+      } else if (req.kind === "githubItem" && req.list && req.number !== undefined) {
+        req.client.send({ type: "github.item", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, number: req.number, error });
       } else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
     }
   }

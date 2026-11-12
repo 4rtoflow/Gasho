@@ -422,3 +422,22 @@ test("a GitHub list goes to the daemon and its answer back to the browser that a
   const refused = c.sent.at(-1);
   assert.ok(refused?.type === "github.list" && refused.error);
 });
+
+test("one GitHub item goes to the daemon and back; a bad number is ignored", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.8.0" });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const before = d.sent.length;
+  for (const number of [0, -1, 1.5, Number.NaN]) {
+    hub.onClientMessage(c, { type: "github.item.get", machine: machineId, sessionId: "s1", kind: "issues", number });
+  }
+  assert.equal(d.sent.length, before);
+  hub.onClientMessage(c, { type: "github.item.get", machine: machineId, sessionId: "s1", kind: "issues", number: 3, repo: "api" });
+  const asked = d.sent.at(-1);
+  assert.ok(asked?.type === "github.item.get" && asked.number === 3 && asked.repo === "api");
+  hub.onDaemonMessage(d, { type: "github.item", requestId: asked.requestId, sessionId: "s1", kind: "issues", number: 3, error: "読めません" });
+  const got = c.sent.at(-1);
+  assert.ok(got?.type === "github.item" && got.number === 3 && got.repo === "api" && got.error === "読めません");
+});

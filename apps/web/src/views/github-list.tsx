@@ -5,7 +5,8 @@ import { useEffect } from "react";
 import type { GitHubItem, GitHubListKind } from "@gasho/protocol";
 import { PANEL_BUTTON, panelRepo, RepoTabs, SidePanel } from "@/components/side-panel";
 import { relativeTime } from "@/lib/format";
-import { go } from "@/lib/route";
+import { go, hrefOf, noteOpenedFrom, type Route, type SessionPanel } from "@/lib/route";
+import { daemonAtLeast } from "@/lib/sessions";
 import { githubKey, loadGitHubList, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
@@ -47,6 +48,10 @@ export function GitHubListPanel({
   const list = g?.list;
   const github = list?.repo ?? (selected ? selected.github : s?.github);
   const noRepo = Boolean(s && (repos ? repos.length === 0 : !s.github));
+  const listPanel: SessionPanel = { kind, ...(selected ? { repo: selected.path } : {}) };
+  const listRoute: Route = { name: "session", machine, sessionId, panel: listPanel };
+  // An item opens in Gasho, in place of the list (the panel's GitHub button and the item's own still lead to GitHub).
+  const itemRoute = (number: number): Route => ({ name: "session", machine, sessionId, panel: { ...listPanel, number } });
 
   useEffect(() => {
     if (m?.connected && !noRepo) loadGitHubList(machine, sessionId, kind, selected?.path);
@@ -104,7 +109,16 @@ export function GitHubListPanel({
           ) : (
             <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border">
               {list.items.map((item) => (
-                <ItemRow key={item.number} item={item} kind={kind} now={now} />
+                // gasho-daemon 0.8 reads one item; with an older one, the item opens on GitHub.
+                <ItemRow
+                  key={item.number}
+                  item={item}
+                  kind={kind}
+                  now={now}
+                  {...(daemonAtLeast(m, 0, 8)
+                    ? { href: hrefOf(itemRoute(item.number)), onOpen: () => noteOpenedFrom(listRoute) }
+                    : { href: item.url, external: true })}
+                />
               ))}
             </ul>
           ))}
@@ -117,13 +131,33 @@ export function GitHubListPanel({
   );
 }
 
-function ItemRow({ item, kind, now }: { item: GitHubItem; kind: GitHubListKind; now: number }) {
+function ItemRow({
+  item,
+  kind,
+  now,
+  href,
+  onOpen,
+  external = false,
+}: {
+  item: GitHubItem;
+  kind: GitHubListKind;
+  now: number;
+  href: string;
+  onOpen?: () => void;
+  /** A page on GitHub, opened in a new tab. */
+  external?: boolean;
+}) {
   const Icon = kind === "issues" ? CircleDot : item.draft ? GitPullRequestDraft : GitPullRequest;
   const review = item.review ? REVIEW[item.review] : undefined;
   const updated = Date.parse(item.updatedAt);
   return (
     <li>
-      <a href={item.url} target="_blank" rel="noreferrer" className="flex gap-2.5 px-3 py-2.5 hover:bg-surface-raised">
+      <a
+        href={href}
+        onClick={onOpen}
+        {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
+        className="flex gap-2.5 px-3 py-2.5 hover:bg-surface-raised"
+      >
         <Icon
           aria-label={kind === "issues" ? "Issue" : item.draft ? "下書きの Pull request" : "Pull request"}
           className={cn("mt-0.5 size-4 shrink-0", item.draft ? "text-muted-foreground" : "text-emerald-400")}

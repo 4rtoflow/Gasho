@@ -10,6 +10,7 @@ import { notificationShown, shownSessions } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { DevicesView } from "@/views/devices";
+import { GitHubItemPanel } from "@/views/github-item";
 import { GitHubListPanel } from "@/views/github-list";
 import { GraphPanel } from "@/views/graph";
 import { HomeView } from "@/views/home";
@@ -37,11 +38,22 @@ function Brand() {
 function PanelView({ machine, sessionId, panel, docked }: { machine: string; sessionId: string; panel: SessionPanel; docked: boolean }) {
   // Back to the session, replacing the panel in the history.
   const close = () => go({ name: "session", machine, sessionId }, { replace: true });
-  return panel.kind === "graph" ? (
-    <GraphPanel machine={machine} sessionId={sessionId} repo={panel.repo} docked={docked} onClose={close} />
-  ) : (
-    <GitHubListPanel machine={machine} sessionId={sessionId} kind={panel.kind} repo={panel.repo} docked={docked} onClose={close} />
-  );
+  if (panel.kind === "graph") return <GraphPanel machine={machine} sessionId={sessionId} repo={panel.repo} docked={docked} onClose={close} />;
+  if (panel.number !== undefined) {
+    return (
+      <GitHubItemPanel
+        key={`${panel.kind}/${panel.number}`}
+        machine={machine}
+        sessionId={sessionId}
+        kind={panel.kind}
+        number={panel.number}
+        repo={panel.repo}
+        docked={docked}
+        onClose={close}
+      />
+    );
+  }
+  return <GitHubListPanel machine={machine} sessionId={sessionId} kind={panel.kind} repo={panel.repo} docked={docked} onClose={close} />;
 }
 
 function Connection({ connected, deviceName }: { connected: boolean; deviceName?: string }) {

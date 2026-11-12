@@ -6,6 +6,7 @@ import type {
   DeviceInfo,
   GashoNotification,
   GitGraph,
+  GitHubItemDetail,
   GitHubList,
   GitHubListKind,
   HubToClient,
@@ -46,6 +47,14 @@ export interface GitHubListState {
   at?: number;
 }
 
+/** One issue or pull request with its conversation. */
+export interface GitHubItemState {
+  loading: boolean;
+  item?: GitHubItemDetail;
+  error?: string;
+  at?: number;
+}
+
 export type AuthState = "checking" | "registered" | "unregistered" | "unreachable";
 
 export interface State {
@@ -60,6 +69,8 @@ export interface State {
   graphs: Record<string, GraphState>;
   /** Keyed by githubKey(machine, sessionId, kind, repo). */
   githubLists: Record<string, GitHubListState>;
+  /** Keyed by githubItemKey(machine, sessionId, kind, number, repo). */
+  githubItems: Record<string, GitHubItemState>;
 }
 
 const PAGE_SIZE = 80;
@@ -72,8 +83,10 @@ export const graphKey = (machine: string, sessionId: string, repo?: string): str
 /** A GitHub list per session, kind and, in a folder of several repositories, per repository. */
 export const githubKey = (machine: string, sessionId: string, kind: GitHubListKind, repo?: string): string =>
   `${machine}\u0000${sessionId}\u0000${kind}\u0000${repo ?? ""}`;
+export const githubItemKey = (machine: string, sessionId: string, kind: GitHubListKind, number: number, repo?: string): string =>
+  `${machine}\u0000${sessionId}\u0000${kind}\u0000${number}\u0000${repo ?? ""}`;
 
-const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {}, githubLists: {} };
+const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {}, githubLists: {}, githubItems: {} };
 let state: State = { auth: "checking", ...EMPTY };
 const listeners = new Set<() => void>();
 
@@ -92,6 +105,10 @@ function setGraph(key: string, g: GraphState): void {
 
 function setGitHubList(key: string, g: GitHubListState): void {
   update({ githubLists: { ...state.githubLists, [key]: g } });
+}
+
+function setGitHubItem(key: string, g: GitHubItemState): void {
+  update({ githubItems: { ...state.githubItems, [key]: g } });
 }
 
 let socket: WebSocket | undefined;
@@ -144,6 +161,12 @@ function connect(): void {
       const [machine, sessionId, kind, repo] = key.split("\u0000");
       if (g.loading && machine && sessionId && (kind === "issues" || kind === "pulls")) {
         send({ type: "github.list.get", machine, sessionId, kind, repo: repo || undefined });
+      }
+    }
+    for (const [key, g] of Object.entries(state.githubItems)) {
+      const [machine, sessionId, kind, number, repo] = key.split("\u0000");
+      if (g.loading && machine && sessionId && (kind === "issues" || kind === "pulls")) {
+        send({ type: "github.item.get", machine, sessionId, kind, number: Number(number), repo: repo || undefined });
       }
     }
   };
@@ -219,7 +242,8 @@ function handle(m: HubToClient): void {
       const transcripts = Object.fromEntries(Object.entries(state.transcripts).filter(([k]) => !k.startsWith(prefix)));
       const graphs = Object.fromEntries(Object.entries(state.graphs).filter(([k]) => !k.startsWith(prefix)));
       const githubLists = Object.fromEntries(Object.entries(state.githubLists).filter(([k]) => !k.startsWith(prefix)));
-      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs, githubLists });
+      const githubItems = Object.fromEntries(Object.entries(state.githubItems).filter(([k]) => !k.startsWith(prefix)));
+      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs, githubLists, githubItems });
       break;
     }
     case "transcript.page": {
@@ -280,6 +304,12 @@ function handle(m: HubToClient): void {
       setGitHubList(key, m.list ? { loading: false, list: m.list, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
       break;
     }
+    case "github.item": {
+      const key = githubItemKey(m.machine, m.sessionId, m.kind, m.number, m.repo);
+      const cur = state.githubItems[key];
+      setGitHubItem(key, m.item ? { loading: false, item: m.item, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
+      break;
+    }
   }
 }
 
@@ -307,6 +337,19 @@ export function loadGitHubList(machine: string, sessionId: string, kind: GitHubL
   }
   setGitHubList(key, { ...cur, loading: true, error: undefined });
   send({ type: "github.list.get", machine, sessionId, kind, repo });
+}
+
+/** Reads one issue or pull request of the session's GitHub repository (or of `repo` inside its folder) again. */
+export function loadGitHubItem(machine: string, sessionId: string, kind: GitHubListKind, number: number, repo?: string): void {
+  const key = githubItemKey(machine, sessionId, kind, number, repo);
+  const cur = state.githubItems[key];
+  if (cur?.loading) return;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    setGitHubItem(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
+    return;
+  }
+  setGitHubItem(key, { ...cur, loading: true, error: undefined });
+  send({ type: "github.item.get", machine, sessionId, kind, number, repo });
 }
 
 function requestPage(machine: string, sessionId: string, before: number | undefined): void {

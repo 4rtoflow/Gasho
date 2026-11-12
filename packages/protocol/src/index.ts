@@ -244,6 +244,63 @@ export interface GitHubList {
   truncated: boolean;
 }
 
+/** A comment on an issue or pull request. Bodies are GitHub Markdown. */
+export interface GitHubComment {
+  author?: string;
+  /** ISO 8601 */
+  createdAt: string;
+  body: string;
+  url?: string;
+  /** Hidden on GitHub (spam, off-topic, …); its body is not sent. */
+  minimized?: boolean;
+}
+
+/** A review of a pull request. */
+export interface GitHubReview {
+  author?: string;
+  /** ISO 8601 */
+  submittedAt: string;
+  state: "approved" | "changes_requested" | "commented" | "dismissed" | "pending";
+  body: string;
+}
+
+/** A check or status of a pull request's latest commit (CI). */
+export interface GitHubCheck {
+  name: string;
+  state: "success" | "failure" | "pending" | "skipped" | "neutral" | "cancelled";
+  url?: string;
+}
+
+/** A file a pull request changes. */
+export interface GitHubFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/** One issue or pull request with its text and conversation, as gasho-daemon read it with `gh`. */
+export interface GitHubItemDetail extends GitHubItem {
+  kind: GitHubListKind;
+  state: "open" | "closed" | "merged";
+  /** Issues closed: whether as done or as not planned. */
+  stateReason?: "completed" | "not_planned";
+  closedAt?: string;
+  mergedAt?: string;
+  assignees: string[];
+  body: string;
+  /** Oldest first; when there are many, the latest ones (`commentsLeftOut` says how many older ones were left out). */
+  comments: GitHubComment[];
+  commentsLeftOut?: number;
+  /** Pull requests only. */
+  reviews?: GitHubReview[];
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  files?: GitHubFile[];
+  commits?: number;
+  checks?: GitHubCheck[];
+}
+
 /** A page of transcript entries. `start` is the index of entries[0]; `total` counts all entries. */
 export interface TranscriptPage {
   entries: TranscriptEntry[];
@@ -277,6 +334,16 @@ export type DaemonToHub =
       kind: GitHubListKind;
       list?: GitHubList;
       error?: string;
+    }
+  | {
+      type: "github.item";
+      requestId: string;
+      sessionId: string;
+      repo?: string;
+      kind: GitHubListKind;
+      number: number;
+      item?: GitHubItemDetail;
+      error?: string;
     };
 
 // gasho-hub -> gasho-daemon
@@ -285,6 +352,7 @@ export type HubToDaemon =
   | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number }
   | { type: "git.graph.get"; requestId: string; sessionId: string; repo?: string }
   | { type: "github.list.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind }
+  | { type: "github.item.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
   | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
@@ -312,6 +380,16 @@ export type HubToClient =
       kind: GitHubListKind;
       list?: GitHubList;
       error?: string;
+    }
+  | {
+      type: "github.item";
+      machine: string;
+      sessionId: string;
+      repo?: string;
+      kind: GitHubListKind;
+      number: number;
+      item?: GitHubItemDetail;
+      error?: string;
     };
 
 // browser -> gasho-hub
@@ -321,6 +399,8 @@ export type ClientToHub =
   | { type: "git.graph.get"; machine: string; sessionId: string; repo?: string }
   /** The open issues or pull requests of the session's GitHub repository (or of `repo` inside its folder). */
   | { type: "github.list.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind }
+  /** One issue or pull request of that repository, with its text and conversation. */
+  | { type: "github.item.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
   | { type: "notification.read"; ids: string[] }
   | ({ requestId: string; machine: string } & SessionCommand);
 
