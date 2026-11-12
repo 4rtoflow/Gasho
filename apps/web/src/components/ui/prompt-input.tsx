@@ -316,7 +316,7 @@ function ModelPicker({
         }}
         className={`inline-flex h-10 items-center gap-1.5 rounded-xl pl-3 pr-2 text-[13px] font-medium sm:h-9 ${softBtn} ${focusRing} disabled:pointer-events-none disabled:opacity-40`}
       >
-        <span className="max-w-[9.5rem] truncate">{current?.name}</span>
+        <span className="max-w-[7rem] truncate sm:max-w-[9.5rem]">{current?.name}</span>
         <Ico d={P.chevron} className={cx("h-3.5 w-3.5 transition-transform duration-200", open && "rotate-180")} sw={2} />
       </button>
 
@@ -391,6 +391,8 @@ function ModelPicker({
 /* ========================================================================== */
 
 const TEXT = "text-[16px] leading-6 sm:text-[15px]"; // 16px on phones stops iOS zooming into the field
+/** Fades the right end of the toolbar while more tools are scrolled out of view there. */
+const TOOLS_FADE = "linear-gradient(to right, black calc(100% - 1.5rem), transparent)";
 const PAD_X = "px-3";
 const PAD_Y = "py-2";
 
@@ -437,6 +439,26 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const [modelId, setModelId] = useState(defaultModel ?? models[0]?.id ?? "");
   const activeModelId = model ?? modelId;
   const currentModel = models.find((m) => m.id === activeModelId) ?? models[0] ?? null;
+
+  // Whether tools are hidden past the right end of the toolbar (it scrolls sideways on a phone).
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const [toolsMore, setToolsMore] = useState(false);
+  useEffect(() => {
+    const el = toolsRef.current;
+    if (!el) return;
+    const update = () => setToolsMore(el.scrollWidth - el.scrollLeft - el.clientWidth > 1);
+    update();
+    const resized = new ResizeObserver(update);
+    resized.observe(el);
+    const changed = new MutationObserver(update);
+    changed.observe(el, { childList: true, subtree: true, characterData: true });
+    el.addEventListener("scroll", update, { passive: true });
+    return () => {
+      resized.disconnect();
+      changed.disconnect();
+      el.removeEventListener("scroll", update);
+    };
+  }, []);
 
   const [finePointer, setFinePointer] = useState(true);
   const [modKey, setModKey] = useState<string | null>(null);
@@ -782,8 +804,13 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
 
         {/* toolbar */}
         <div className="mt-1 flex items-center justify-between gap-2">
-          {/* Scrolls sideways when the tools do not fit (a phone): nothing is squeezed or pushed under the send button. */}
-          <div className="scrollbar-none -my-0.5 flex min-w-0 items-center gap-0.5 overflow-x-auto py-0.5">
+          {/* Scrolls sideways when the tools do not fit (a phone): nothing is squeezed or pushed under the send button.
+              The right edge fades while more tools are hidden there. */}
+          <div
+            ref={toolsRef}
+            className="scrollbar-none -my-0.5 flex min-w-0 items-center gap-0.5 overflow-x-auto py-0.5"
+            style={toolsMore ? { maskImage: TOOLS_FADE, WebkitMaskImage: TOOLS_FADE } : undefined}
+          >
             {allowAttachments && (
               <>
                 <input

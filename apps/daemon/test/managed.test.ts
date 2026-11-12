@@ -24,6 +24,7 @@ import {
   refusedCommand,
   safeFileName,
   statusLine,
+  surveyOpen,
   switchedForSession,
   switchQuestion,
   typedInBox,
@@ -367,7 +368,67 @@ test("commands that would change the defaults of every new session are refused",
   for (const text of ["/model", "/model sonnet", "  /model\nopus", "/MODEL haiku", "/effort", "/effort high", "/effort ultracode", "/effort ultracode on please"]) {
     assert.ok(refusedCommand(text), text);
   }
-  for (const text of ["/effort ultracode on", "/effort ultracode off", " /effort ultracode on ", "/exit", "/models の説明をして", "model を変えて", "please /model"]) {
+  for (const text of ["/effort ultracode on", "/effort ultracode off", " /effort ultracode on ", "/exit", "/models の説明をして", "model を変えて", "please /model", "/model-review を実行して", "/effort-estimate この課題", "/model:fast"]) {
     assert.equal(refusedCommand(text), undefined, text);
   }
+});
+
+test("Claude Code's cursor on the first character of a dim suggestion is not typed text", () => {
+  // Without the terminal's own cursor, the first character is drawn reversed and the rest dim.
+  const box = (inner: string) => [`${"─".repeat(50)}`, `❯ ${inner}`, "─".repeat(50), "  ⏵⏵ auto mode on (shift+tab to cycle)"].join("\n");
+  assert.equal(typedInBox(readScreen(box("\x1b[7m「\x1b[27m\x1b[2mはい」とだけ返してください。\x1b[22m"))), "");
+  assert.equal(typedInBox(readScreen(box('\x1b[7mT\x1b[27m\x1b[2mry "edit hub.test.ts to..."\x1b[22m'))), "");
+  // A reversed character inside typed text (the cursor moved back) is typed text.
+  assert.equal(typedInBox(readScreen(box("ab\x1b[7mc\x1b[27md"))), "abcd");
+  assert.equal(typedInBox(readScreen(box("abc\x1b[7m \x1b[27m"))), "abc");
+});
+
+test("with the prompt box at the bottom, words in the box or the conversation do not count as a dialog", () => {
+  // The user's own message names a permission dialog; Claude's last reply asks the same.
+  const own = screenWith("❯ 「Do you want to proceed?」と聞かれたら 1 を選んで");
+  assert.ok(!dialogOpen(own));
+  assert.ok(promptHolds(plainScreen(own), "「Do you want to proceed?」と聞かれたら 1 を選んで"));
+  const reply = screenWith("❯ ").replace("● はい", "● Removing them is irreversible. Do you want to proceed?\n  Or trust this folder first.");
+  assert.ok(!dialogOpen(reply));
+  assert.equal(typedInBox(plainScreen(reply)), "");
+  // A real permission dialog has no prompt box below it.
+  const dialog = [" ▐▛███▛█   Claude Code v2.1.322", "● Bash(rm -rf build)", " Do you want to proceed?", " ❯ 1. Yes", "   2. No", ""].join("\n");
+  assert.ok(dialogOpen(dialog));
+  assert.equal(typedInBox(plainScreen(dialog)), undefined);
+});
+
+test("a text starting with \"!\" puts the box in shell mode, and the box is still read", () => {
+  const shell = screenWith("! git status");
+  assert.deepEqual(promptBoxLines(shell), ["! git status"]);
+  assert.ok(promptHolds(plainScreen(shell), "!git status"));
+  assert.ok(promptHolds(plainScreen(shell), "! git status"));
+});
+
+test("the survey counts only right above the prompt box, and only with its choices", () => {
+  const survey = screenWith("❯ ").replace("● はい", "● はい\n● How is Claude doing this session? (optional)\n  1: Bad    2: Fine   3: Good   0: Dismiss");
+  assert.ok(surveyOpen(survey));
+  assert.ok(!dialogOpen(survey));
+  // Quoted in the conversation, with more below it.
+  const quoted = screenWith("❯ ").replace("● はい", "● 「How is Claude doing this session?」と「1: Bad 2: Fine 3: Good 0: Dismiss」が出ます。\n✻ Churned for 1s");
+  assert.ok(!surveyOpen(quoted));
+  assert.ok(!surveyOpen("● How is Claude doing this session? (optional)\n  1: Bad    2: Fine   3: Good   0: Dismiss"));
+});
+
+test("the question is judged by its own lines: \"hook\" in the conversation above does not make it a hook's question", () => {
+  const question = (conversation: string, subtitle: string) =>
+    [
+      conversation,
+      "   Switch model?",
+      `   ${subtitle}`,
+      "   This conversation is cached for the current",
+      "   model. Switching to Haiku 5.5 means the full",
+      "   history gets re-read.",
+      "   ❯ 1. Yes, switch to Haiku 5.5",
+      "     2. No, go back",
+    ].join("\n");
+  assert.deepEqual(switchQuestion(question("● Stop の hook を settings.json に登録しました。", "Your next response will be slower and use more tokens")), {
+    onYes: true,
+    aboutCache: true,
+  });
+  assert.deepEqual(switchQuestion(question("● はい", "A PreModelSwitch hook asked you to confirm")), { onYes: true, aboutCache: false });
 });

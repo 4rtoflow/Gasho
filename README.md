@@ -87,7 +87,7 @@ hooks を入れなくても、セッションの一覧と会話の表示は使�
 - 入力欄で、モデル（既定・Opus 5.5 など、Claude Code の選択画面と同じ名前）、Effort（Low〜Max）、Ultracode を選んで送ると、送る前にそのセッションだけ切り替える。全体の既定は変えない。会話の途中でモデルを変えると、次の返答では履歴を新しいモデルで読み直すので、時間とトークンが多くかかる
 - モデルの名前は、daemon が Claude Code の `/model` の選択画面から読んで覚える。覚えていないか24時間たったときは、待機中のいちばん新しい Gasho のセッションで選択画面を開いて閉じるので、その会話に `/model` の記録が残る
 - 入力欄に `/model` や `/effort high` のように書いて送ることはできない。これらは、すべての新しいセッションの既定も変えてしまうため。`/effort ultracode on` と `off` は送れる
-- Effort と Ultracode の切り替えには、その working server の gasho-daemon が 0.6.0 以上である必要がある。古い gasho-daemon の working server では、これらの操作は出ない
+- Effort と Ultracode の切り替えには、その working server の gasho-daemon が 0.6.0 以上である必要がある。0.5 の gasho-daemon ではモデルの切り替えと添付だけ、それより前のものでは文字の入力だけになり、扱えない操作は出ない
 - クリップのボタン、ドラッグ、貼り付けでファイルを添付できる（1回に5個、合わせて10MB まで）。ファイルは working server の `~/.local/share/gasho/attachments/` に保存され、Claude が読む。セッションが終わると消える
 - `/exit` を送るか公式アプリで終了すると、daemon が zellij のセッションも閉じる
 - `claude rc` が起動したセッションには、外から入力する公式の手段がないので、Gasho からは入力できない。入力欄の下の「公式アプリで開く」から操作する

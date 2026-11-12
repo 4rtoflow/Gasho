@@ -14,6 +14,7 @@ import type {
   SessionModel,
   SessionRepo,
   SwitchField,
+  TranscriptEntry,
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
@@ -43,7 +44,7 @@ import {
   safeFileName,
   type Screen,
   statusLine,
-  SURVEY_RE,
+  surveyOpen,
   switchedForSession,
   switchQuestion,
   TRUST_PROMPT_RE,
@@ -77,6 +78,8 @@ const RETRY_MS = 5000;
 const LATE_PICKER_WAIT_MS = 10_000;
 /** A session is used to read the model names only once it has run this long (Claude Code has finished starting). */
 const PROBE_MIN_AGE_MS = 30_000;
+/** After a look at the model names whose "/model" was not taken in time, how long to watch for the picker it opens. */
+const LATE_PICKER_WATCH_MS = 5 * 60_000;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** How long the model names read from the /model picker are trusted before an idle session is asked again. */
 const MODELS_MAX_AGE_MS = 24 * 3600_000;
@@ -92,14 +95,25 @@ interface Tracked {
   sawWithoutTranscript?: boolean;
 }
 
-/** What happened to the switches asked for with an input. */
+/** What happened to the switches asked for with an input (`id`: the request of the input that was handled). */
 interface InputOutcome {
+  id?: string;
   warnings: string[];
   unapplied: SwitchField[];
 }
 
 /** See Daemon.typeInput. */
 type TypeResult = "sent" | "not-typed" | "unsure";
+
+/**
+ * Claude Code did not show that it took the Enter of a command ("/model", "/effort ultracode …"). It may still take
+ * it, so nothing else is typed now (keys typed behind it could land in what it opens); the input is tried again later.
+ */
+class EnterNotTaken extends Error {
+  constructor(command: string) {
+    super(`Claude Code did not take the Enter of ${command} yet`);
+  }
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -125,9 +139,17 @@ export class Daemon {
   private models: { at: number; options: ModelOption[] } | undefined;
   /** No look at the /model picker just for the model names before this time. */
   private nextModelsProbe = 0;
+  /** Sessions where a /model picker may still open from a look at the model names, and until when to watch them. */
+  private latePicker = new Map<string, number>();
+  /** The user's messages Claude Code recorded lately, per session: to tell whether an Enter it took late went through. */
+  private prompts = new Map<string, { at: number; text: string }[]>();
 
-  constructor(cfg: DaemonConfig) {
+  /** How long the prompt box may take to let go of a text after Enter (see typeInput). */
+  private enterWaitMs: number;
+
+  constructor(cfg: DaemonConfig, opts: { enterWaitMs?: number } = {}) {
     this.cfg = cfg;
+    this.enterWaitMs = opts.enterWaitMs ?? ENTER_WAIT_MS;
     this.zellij = new Zellij(cleanEnv());
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
     this.hub = new HubClient({
@@ -237,6 +259,7 @@ export class Daemon {
     for (const m of this.managed.all()) {
       if (seen.has(m.sessionId) || isAlive(m.pid)) continue;
       this.managed.remove(m.sessionId);
+      for (const map of [this.settleUntil, this.latePicker, this.prompts]) map.delete(m.sessionId);
       await this.zellij.kill(m.zellijSession);
       await fsp.rm(this.attachmentsOf(m.sessionId), { recursive: true, force: true });
       log(`session ${m.name} ended; closed zellij session ${m.zellijSession}`);
@@ -409,6 +432,7 @@ export class Daemon {
       }
       const ultracode = promptRuleUltracode(screen);
       if (ultracode !== undefined) t.info.ultracode = ultracode;
+      await this.closeProbePicker(m, screen);
     }
     const stale = !this.models || Date.now() - this.models.at > MODELS_MAX_AGE_MS;
     if (!stale || Date.now() < this.nextModelsProbe) return;
@@ -428,6 +452,29 @@ export class Daemon {
   }
 
   /**
+   * Closes a /model picker that a look at the model names opened late (see probeModelsIn), while it is watched for.
+   * A picker opened by someone at the session's terminal is left alone after that.
+   */
+  private async closeProbePicker(m: ManagedSession, screen: string): Promise<void> {
+    const until = this.latePicker.get(m.sessionId);
+    if (until === undefined) return;
+    if (Date.now() > until) {
+      this.latePicker.delete(m.sessionId);
+      return;
+    }
+    if (modelPickerOptions(screen).length === 0 && !switchQuestion(screen)) return;
+    this.latePicker.delete(m.sessionId);
+    this.flushing.add(m.sessionId);
+    try {
+      await this.closePicker(m.zellijSession);
+    } catch (e) {
+      log(`could not close the /model picker in ${m.name}`, e);
+    } finally {
+      this.flushing.delete(m.sessionId);
+    }
+  }
+
+  /**
    * Reads the model names in a session's /model picker (opened and closed again); nothing else types meanwhile. Not
    * while someone is typing in the session's terminal (their text would be erased). After a failure, the next try
    * waits as long as the names are trusted: a picker that could not be read once is likely to stay so.
@@ -439,10 +486,12 @@ export class Daemon {
     try {
       if ((await this.currentStatus(m.pid)) !== "idle") return;
       if (typedInBox(await this.zellij.screen(m.zellijSession)) !== "") return;
-      if (!(await this.probeModels(m.zellijSession))) {
-        this.nextModelsProbe = Date.now() + MODELS_MAX_AGE_MS;
-        log(`could not read the model names in ${m.name}; trying again in a day`);
-      }
+      const result = await this.probeModels(m.zellijSession);
+      if (result === "read") return;
+      this.nextModelsProbe = Date.now() + MODELS_MAX_AGE_MS;
+      log(`could not read the model names in ${m.name}; trying again in a day`);
+      // The picker may open later still; it is closed when it does (see readManagedScreens).
+      if (result === "unsure") this.latePicker.set(m.sessionId, Date.now() + LATE_PICKER_WATCH_MS);
     } catch (e) {
       this.nextModelsProbe = Date.now() + MODELS_MAX_AGE_MS;
       log(`could not read the model names in ${m.name}`, e);
@@ -460,6 +509,7 @@ export class Daemon {
         if (!t.tail) continue;
         const entries = await t.tail.poll(t.meta);
         if (entries.length === 0) continue;
+        this.notePrompts(t.info.sessionId, entries);
         this.hub.send({ type: "transcript.append", sessionId: t.info.sessionId, entries });
         this.applyMeta(t);
         changed = true;
@@ -468,6 +518,23 @@ export class Daemon {
     } finally {
       this.polling = false;
     }
+  }
+
+  /** Keeps the last user messages of a session (see `prompts`). */
+  private notePrompts(sessionId: string, entries: TranscriptEntry[]): void {
+    const list = this.prompts.get(sessionId) ?? [];
+    for (const e of entries) {
+      if (e.role !== "user" || e.isSidechain) continue;
+      const text = e.blocks.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n");
+      if (text) list.push({ at: Date.now(), text });
+    }
+    this.prompts.set(sessionId, list.slice(-20));
+  }
+
+  /** Whether Claude Code recorded `text` as a user message since `since` (ms). */
+  private promptTaken(sessionId: string, text: string, since: number): boolean {
+    const head = text.replace(/^\s*!/, "").replace(/\s+/g, "").slice(0, 24);
+    return (this.prompts.get(sessionId) ?? []).some((p) => p.at >= since && p.text.replace(/\s+/g, "").includes(head));
   }
 
   private async onHubMessage(m: HubToDaemon): Promise<void> {
@@ -611,6 +678,7 @@ export class Daemon {
       message = [body, paths.map((p) => `@${p}`).join("\n")].filter(Boolean).join("\n\n");
     }
     this.managed.enqueue(sessionId, {
+      id: m.requestId,
       text: message,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
@@ -619,7 +687,9 @@ export class Daemon {
     let outcome: InputOutcome | undefined;
     let failed: string | undefined;
     try {
-      outcome = await this.flushInput(sessionId);
+      // The queue may have held earlier inputs: what happened to those is not this request's to report.
+      const flushed = await this.flushInput(sessionId);
+      if (flushed?.id === m.requestId) outcome = flushed;
     } catch (e) {
       // The input is back on the queue and is sent later: saying that it failed would invite sending it again.
       log(`could not send the input to ${sessionId} yet`, e);
@@ -681,19 +751,41 @@ export class Daemon {
         return;
       }
       this.settleUntil.delete(sessionId);
-      if ((await this.currentStatus(m.pid)) !== "idle") return;
+      if ((await this.currentStatus(m.pid)) !== "idle") {
+        // Busy after an Enter that came back "unsure": Claude Code took it.
+        const head = this.managed.peek(sessionId);
+        if (head?.entered) head.seenBusy = true;
+        return;
+      }
       const screen = (await this.zellij.screen(m.zellijSession)).plain;
-      if (atBottom(screen, PERMISSION_PROMPT_RE) || atBottom(screen, TRUST_PROMPT_RE)) return;
-      // A /model picker (or its question) still open, e.g. from an Enter that Claude Code took late: close it first.
-      // Esc changes nothing there.
+      // A /model picker (or its question) still open, e.g. from an Enter that Claude Code took late: close it first
+      // (Esc changes nothing there). Any other dialog, such as a permission request, is the person's to answer.
       if (modelPickerOptions(screen).length > 0 || switchQuestion(screen)) await this.closePicker(m.zellijSession);
+      else if (dialogOpen(screen)) return;
       const item = this.managed.next(sessionId);
       if (item === undefined) return;
-      const out: InputOutcome = { warnings: [], unapplied: [] };
+      const out: InputOutcome = { ...(item.id ? { id: item.id } : {}), warnings: [], unapplied: [] };
+      const later = (ms: number, why: string) => {
+        this.settleUntil.set(sessionId, Date.now() + ms);
+        this.scheduleRefresh(ms + 100);
+        log(`${m.name}: ${why}`);
+      };
+      const t = this.tracked.get(sessionId);
+      if (item.entered) {
+        // Taken since the Enter: by its transcript when it is followed (the box can hold the text again after a stop),
+        // or else by the session having been busy.
+        if (t?.tail) await this.pollTails();
+        if (t?.tail ? this.promptTaken(sessionId, item.text, item.enteredAt ?? 0) : item.seenBusy) {
+          log(`${m.name}: the input whose Enter was late has been taken`);
+          this.emitSessions();
+          return out;
+        }
+      }
       let typed: TypeResult;
+      const enteredAt = Date.now();
       try {
         if (!item.entered) {
-          const t = this.tracked.get(sessionId);
+          // Compared with the session's state first, so what an earlier try switched is not switched again.
           const model = item.model && !this.sameModel(t?.info.model, item.model) ? item.model : undefined;
           const effort = item.effort && item.effort !== t?.info.effort ? item.effort : undefined;
           if (model || effort) await this.switchModel(m.zellijSession, model, effort, t, out);
@@ -704,22 +796,26 @@ export class Daemon {
         typed = await this.typeInput(m.zellijSession, item.text, item.entered);
       } catch (e) {
         this.managed.unshift(sessionId, item);
-        throw e;
+        if (!(e instanceof EnterNotTaken)) throw e;
+        later(UNSURE_RETRY_MS, `${e.message}; trying the input again in ${UNSURE_RETRY_MS / 1000}s`);
+        out.warnings.push(`Claude Code がすぐに反応しなかったので、${UNSURE_RETRY_MS / 1000} 秒後にやり直します。`);
+        this.emitSessions();
+        return out;
       }
+      // Kept on a retry: the item and its Enter stay as they were.
+      const base = { ...(item.id ? { id: item.id } : {}), text: item.text };
+      const entered = item.entered ? { entered: true, enteredAt: item.enteredAt ?? enteredAt, ...(item.seenBusy ? { seenBusy: true } : {}) } : {};
       if (typed === "not-typed") {
-        // Model, effort and ultracode are switched already; only the text waits for the next try.
-        this.managed.unshift(sessionId, { text: item.text });
-        this.settleUntil.set(sessionId, Date.now() + RETRY_MS);
-        this.scheduleRefresh(RETRY_MS + 100);
-        log(`could not type into ${m.name}; trying again later`);
+        // Model, effort and ultracode are switched already; only the text waits for the next try. A text whose Enter
+        // was pressed before stays marked so: it must never be pasted again.
+        this.managed.unshift(sessionId, { ...base, ...entered });
+        later(RETRY_MS, "could not type the input; trying again later");
         out.warnings.push("入力欄に入れられませんでした。少ししてから送り直します。");
       } else if (typed === "unsure") {
         // Enter was pressed, but the box still held the text: Claude Code may take it late. It is never typed again;
-        // a later look presses Enter only if the box still holds it.
-        this.managed.unshift(sessionId, { text: item.text, entered: true });
-        this.settleUntil.set(sessionId, Date.now() + UNSURE_RETRY_MS);
-        this.scheduleRefresh(UNSURE_RETRY_MS + 100);
-        log(`${m.name} has not taken the input yet; looking again in ${UNSURE_RETRY_MS / 1000}s`);
+        // a later look drops it if it was taken, and presses Enter only if the box still holds it.
+        this.managed.unshift(sessionId, { ...base, entered: true, enteredAt: item.enteredAt ?? enteredAt });
+        later(UNSURE_RETRY_MS, `the input was not taken yet; looking again in ${UNSURE_RETRY_MS / 1000}s`);
         out.warnings.push(`送ったことを画面で確かめられませんでした。${UNSURE_RETRY_MS / 1000} 秒後に入力欄を見て、まだ残っていれば送ります。`);
       } else {
         this.scheduleRefresh(500);
@@ -733,15 +829,15 @@ export class Daemon {
 
   /**
    * Types `text` into Claude Code's prompt box and presses Enter once, checking each step on the screen:
-   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; a feedback survey is
-   *   dismissed ("0");
-   * - the box is emptied first (Claude Code may have put a stopped prompt back);
+   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; the feedback survey above
+   *   the box is dismissed ("0");
+   * - the box is emptied first (Claude Code may have put a stopped prompt back, or a key may have gone into it);
    * - the text must be in the box before Enter, and the box must let go of it after Enter.
    * Enter is never pressed twice for one paste: if Claude Code takes an Enter late, a second one could land in what
    * the first one opened (Enter in the /model picker saves the default model for every session). With `entered`
    * (an earlier call returned "unsure"), nothing is typed: Enter is pressed again only if the box still holds the text.
-   * Returns "sent", "not-typed" (nothing was sent; try again later), or "unsure" (Enter was pressed, but the box
-   * still holds the text).
+   * Returns "sent", "not-typed" (nothing was sent; try again later), or "unsure" (Enter may have been pressed, but the
+   * box still holds the text).
    */
   private async typeInput(session: string, text: string, entered = false): Promise<TypeResult> {
     const look = () => this.zellij.screen(session).catch(() => undefined);
@@ -754,21 +850,33 @@ export class Daemon {
       return undefined;
     };
     const enter = async (): Promise<TypeResult> => {
-      await this.zellij.keys(session, "Enter");
+      try {
+        await this.zellij.keys(session, "Enter");
+      } catch (e) {
+        // The key may have reached the pane before the call failed.
+        log("pressing Enter failed", e);
+        return "unsure";
+      }
       // Taken: the box lets go of the text (or a picker, such as /model's, takes its place).
-      return (await waitFor((s) => !promptHolds(s, text), ENTER_WAIT_MS)) ? "sent" : "unsure";
+      return (await waitFor((s) => !promptHolds(s, text), this.enterWaitMs)) ? "sent" : "unsure";
     };
-    let now = await look();
-    if (now && atBottom(now.plain, SURVEY_RE)) {
-      await this.zellij.keys(session, "0");
-      now = (await waitFor((s) => !atBottom(s.plain, SURVEY_RE), 1500)) ?? now;
-    }
+    const clear = (s: Screen) => this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(s.plain)?.length ?? 1));
     // Right after a picker or a command, Claude Code is still redrawing; wait for the prompt box.
-    const ready = now && typedInBox(now) !== undefined ? now : await waitFor((s) => typedInBox(s) !== undefined, 3000);
+    let ready = await waitFor((s) => typedInBox(s) !== undefined, 3000);
     if (!ready) return "not-typed";
-    if (entered) return promptHolds(ready, text) ? enter() : "sent";
+    if (entered) {
+      // Taken after all if the box no longer holds the text. Otherwise press Enter, unless the survey has the keys.
+      if (!promptHolds(ready, text)) return "sent";
+      return surveyOpen(ready.plain) ? "not-typed" : enter();
+    }
+    if (surveyOpen(ready.plain)) {
+      await this.zellij.keys(session, "0");
+      // Decide on what the screen shows now: had the survey not taken the "0", it is in the box.
+      ready = await waitFor((s) => !surveyOpen(s.plain) && typedInBox(s) !== undefined, 1500);
+      if (!ready) return "not-typed";
+    }
     if (typedInBox(ready)) {
-      await this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(ready.plain)?.length ?? 1));
+      await clear(ready);
       if (!(await waitFor((s) => typedInBox(s) === "", 1500))) return "not-typed";
     }
     await this.zellij.paste(session, text);
@@ -776,7 +884,7 @@ export class Daemon {
     // "never typed" (a redraw can drop a paste).
     if (!(await waitFor((s) => promptHolds(s, text), 2000))) {
       const s = await look();
-      if (s && typedInBox(s)) await this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(s.plain)?.length ?? 1));
+      if (s && typedInBox(s)) await clear(s);
       return "not-typed";
     }
     return enter();
@@ -821,7 +929,8 @@ export class Daemon {
    * Switches the model and/or the effort level for this session only, through Claude Code's /model picker: the
    * cursor is moved to the model (it starts on the current one), ←/→ step the effort level, and "s" applies both to
    * this session only. Enter would save them as the default for every new session, so Enter is never pressed while
-   * the picker is open. What could not be switched goes into `out`; throws when the picker cannot be closed.
+   * the picker is open. What could not be switched goes into `out`. Throws EnterNotTaken when Claude Code did not
+   * take the Enter of "/model", and an Error when the picker cannot be closed.
    */
   private async switchModel(
     session: string,
@@ -842,10 +951,8 @@ export class Daemon {
     };
     const switchesBefore = t?.meta.sessionSwitches ?? 0;
     const typed = await this.typeInput(session, "/model");
-    if (typed !== "sent") {
-      if (typed === "unsure") await this.closeLatePicker(session);
-      return kept("モデルの選択画面を開けませんでした。");
-    }
+    if (typed === "unsure") throw new EnterNotTaken("/model");
+    if (typed === "not-typed") return kept("モデルの選択画面を開けませんでした。");
     const opened = await this.waitForScreen(session, (r) => r.options.length > 0);
     if (!opened) return giveUp("モデルの選択画面を開けませんでした。");
     await this.rememberModels(opened.screen);
@@ -862,18 +969,26 @@ export class Daemon {
       // Effort only: "s" applies the model under the cursor too, so it must be the one the session uses (✔).
       return giveUp("選択画面で、いまのモデルが見つかりませんでした。");
     }
+    // The effort level the picker must show when "s" is pressed (undefined: the picker shows none).
+    let level: EffortLevel | undefined;
     if (effort) {
       const r = await this.stepEffort(session, effort);
-      if (r !== "set") {
-        const why = `Effort を ${EFFORT_NAMES[effort]} にできませんでした${r === "unsupported" ? "（このモデルでは選べません）" : ""}。`;
-        if (r === "lost" || !model) return giveUp(why);
+      level = r.level;
+      if (r.outcome !== "set") {
+        const why = `Effort を ${EFFORT_NAMES[effort]} にできませんでした${r.outcome === "unsupported" ? "（このモデルでは選べません）" : ""}。`;
+        if (r.outcome === "lost" || !model) return giveUp(why);
         // The level is as it was; the model is still switched.
         out.warnings.push(`${why}モデルだけ切り替えます。`);
         out.unapplied.push("effort");
       }
     }
-    // Right before "s": the cursor must still be on the row to apply.
-    if (!(await this.waitForScreen(session, (r) => r.options[target]?.cursor === true))) return giveUp("モデルを選べませんでした。");
+    // Right before "s": the cursor must still be on the row to apply, and the picker must show the level to apply (an
+    // arrow key taken late would have changed it).
+    const ready = await this.waitForScreen(
+      session,
+      (r) => r.options[target]?.cursor === true && (level === undefined || pickerEffort(r.screen) === level),
+    );
+    if (!ready) return giveUp("モデルを選べませんでした。");
     await this.zellij.keys(session, "s");
     // In a conversation Claude Code has cached, switching asks first, because the whole history is read again. The
     // switch was asked for in Gasho, so the answer is "Yes" (still for this session only). Any other question with
@@ -911,10 +1026,14 @@ export class Daemon {
   /**
    * Steps the /model picker's effort level to `to` with ←/→, one press at a time, reading the picker after each: a
    * model may lack some levels, and the picker then skips them. When `to` cannot be reached, the level is put back.
-   * "set": done; "unsupported": the model does not have `to` (put back as it was); "unread": the picker shows no
-   * effort level (nothing pressed); "lost": the level could not be put back.
+   * `outcome` — "set": done; "unsupported": the model does not have `to` (put back as it was); "unread": the picker
+   * shows no effort level (nothing pressed); "lost": the level could not be put back. `level`: what the picker shows
+   * at the end, when known.
    */
-  private async stepEffort(session: string, to: EffortLevel): Promise<"set" | "unsupported" | "unread" | "lost"> {
+  private async stepEffort(
+    session: string,
+    to: EffortLevel,
+  ): Promise<{ outcome: "set" | "unsupported" | "unread" | "lost"; level?: EffortLevel }> {
     const at = (e: EffortLevel) => EFFORT_LEVELS.indexOf(e);
     const walk = async (from: EffortLevel, goal: EffortLevel): Promise<EffortLevel> => {
       let now = from;
@@ -937,20 +1056,26 @@ export class Daemon {
       return now;
     };
     const before = pickerEffort((await this.waitForScreen(session, () => true))?.screen ?? "");
-    if (!before) return "unread";
+    if (!before) return { outcome: "unread" };
     const reached = await walk(before, to);
-    if (reached === to) return "set";
-    if (reached === before) return "unsupported";
-    return (await walk(reached, before)) === before ? "unsupported" : "lost";
+    if (reached === to) return { outcome: "set", level: to };
+    if (reached === before) return { outcome: "unsupported", level: before };
+    const back = await walk(reached, before);
+    return back === before ? { outcome: "unsupported", level: before } : { outcome: "lost" };
   }
 
-  /** Turns ultracode on or off for this session only (`/effort ultracode on|off`; the effort level stays). */
+  /**
+   * Turns ultracode on or off for this session only (`/effort ultracode on|off`; the effort level stays). Throws
+   * EnterNotTaken when Claude Code did not take the command's Enter.
+   */
   private async setUltracode(session: string, on: boolean, out: InputOutcome): Promise<void> {
     const failed = () => {
       out.warnings.push(`Ultracode を${on ? "オン" : "オフ"}にできませんでした。`);
       out.unapplied.push("ultracode");
     };
-    if ((await this.typeInput(session, `/effort ultracode ${on ? "on" : "off"}`)) !== "sent") return failed();
+    const typed = await this.typeInput(session, `/effort ultracode ${on ? "on" : "off"}`);
+    if (typed === "unsure") throw new EnterNotTaken("/effort ultracode");
+    if (typed === "not-typed") return failed();
     // The mark in the rule above the prompt box must show the new state twice in a row: a frame being redrawn can
     // lack the rule's label for a moment.
     let seen = 0;
@@ -963,24 +1088,29 @@ export class Daemon {
 
   /**
    * Opens the /model picker only to read the model names, and closes it again without changing anything (Esc).
-   * Returns whether the names were read.
+   * "unsure": Claude Code did not take the Enter of "/model" in time, and may still open the picker.
    */
-  private async probeModels(session: string): Promise<boolean> {
+  private async probeModels(session: string): Promise<"read" | "not-read" | "unsure"> {
     const typed = await this.typeInput(session, "/model");
-    if (typed !== "sent") {
-      if (typed === "unsure") await this.closeLatePicker(session);
-      return false;
+    if (typed === "not-typed") return "not-read";
+    if (typed === "unsure") {
+      await this.closeLatePicker(session);
+      return "unsure";
     }
     const opened = await this.waitForScreen(session, (r) => r.options.length > 0);
     const read = opened ? await this.rememberModels(opened.screen) : false;
     await this.closePicker(session);
-    return read;
+    return read ? "read" : "not-read";
   }
 
   private async interrupt(sessionId: string): Promise<CommandResult> {
     const m = this.managed.get(sessionId);
     if (!m) return { ok: false, error: "このセッションは Gasho から止められません。公式アプリで止めてください。" };
     if ((await this.currentStatus(m.pid)) !== "busy") return { ok: false, error: "作業中ではありません。" };
+    // An input whose Enter came back "unsure" has been taken if the session is busy: it must not be sent again when
+    // Claude Code puts the stopped text back into the box.
+    const head = this.managed.peek(sessionId);
+    if (head?.entered) head.seenBusy = true;
     await this.zellij.keys(m.zellijSession, "Esc");
     this.settleUntil.set(sessionId, Date.now() + INTERRUPT_SETTLE_MS);
     this.scheduleRefresh(500);

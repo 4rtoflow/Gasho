@@ -2,7 +2,7 @@
 // `actions`). What is picked here is switched (for this session only) when the next message is sent.
 import { Check, ChevronDown, Gauge, Workflow } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
-import { useId } from "react";
+import { useId, useRef, useState } from "react";
 import type { EffortLevel } from "@gasho/protocol";
 import { cn } from "@/lib/utils";
 
@@ -15,9 +15,9 @@ export const EFFORTS: { id: EffortLevel; name: string; description: string }[] =
   { id: "max", name: "Max", description: "いちばんじっくり考える" },
 ];
 
-// The same look as the model picker button of EasyUI's PromptInput.
+// The same look as the model picker button of EasyUI's PromptInput (a little narrower on a phone).
 const BUTTON =
-  "relative inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2.5 text-[13px] font-medium text-neutral-500 transition-[color,background-color] duration-150 [-webkit-tap-highlight-color:transparent] outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:pointer-events-none disabled:opacity-40 sm:h-9 [@media(hover:hover)]:hover:bg-white/[0.07] [@media(hover:hover)]:hover:text-neutral-100";
+  "relative inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl px-2 text-[13px] sm:px-2.5 font-medium text-neutral-500 transition-[color,background-color] duration-150 [-webkit-tap-highlight-color:transparent] outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:pointer-events-none disabled:opacity-40 sm:h-9 [@media(hover:hover)]:hover:bg-white/[0.07] [@media(hover:hover)]:hover:text-neutral-100";
 
 /** A dot on a control whose choice differs from what the session uses now: it is switched when sending. */
 function PendingDot() {
@@ -39,13 +39,25 @@ export function EffortPicker({
   const selected = EFFORTS.find((e) => e.id === value);
   const pending = value !== undefined && value !== current;
   const titleId = useId();
+  const [open, setOpen] = useState(false);
+  // A touch opens the menu on a tap, not when the finger lands: swiping the toolbar sideways must only scroll it.
+  const touch = useRef(false);
   return (
     // Not modal: a modal menu would lock the page's scrolling under the floating chat box.
-    <DropdownMenu.Root modal={false}>
+    <DropdownMenu.Root modal={false} open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
         <button
           type="button"
           disabled={disabled}
+          onPointerDown={(e) => {
+            touch.current = e.pointerType !== "mouse";
+            // Keeps Radix from opening the menu now.
+            if (touch.current) e.preventDefault();
+          }}
+          onClick={() => {
+            if (touch.current) setOpen((o) => !o);
+            touch.current = false;
+          }}
           aria-label={`Effort：${selected?.name ?? "不明"}${pending ? "（送るときに切り替えます）" : ""}`}
           title={pending ? "送るときに切り替えます" : "Effort"}
           className={cn(BUTTON, "data-[state=open]:bg-white/[0.07] data-[state=open]:text-neutral-100")}

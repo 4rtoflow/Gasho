@@ -52,8 +52,15 @@ const MAX_INPUT = 20_000;
 const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]);
-/** What a gasho-daemon that does not say (older than 0.6.0) can do with an input. */
-export const LEGACY_FEATURES: readonly InputFeature[] = ["model", "files"];
+
+/**
+ * What a gasho-daemon that does not list its features (older than 0.6.0) can do with an input: 0.5 switches the model
+ * and carries files; older ones only type the text.
+ */
+export function legacyFeatures(daemonVersion: string | undefined): InputFeature[] {
+  const [major = 0, minor = 0] = (daemonVersion ?? "").split(".").map((n) => Number.parseInt(n, 10) || 0);
+  return major > 0 || minor >= 5 ? ["model", "files"] : [];
+}
 /** Files sent with one input: how many, and their size in all. */
 export const MAX_FILES = 5;
 export const MAX_FILES_BYTES = 10 * 1024 * 1024;
@@ -87,10 +94,10 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       if (cmd.effort !== undefined && !EFFORTS.has(cmd.effort)) return "Effort の指定が正しくありません。";
       if (cmd.ultracode !== undefined && typeof cmd.ultracode !== "boolean") return "Ultracode の指定が正しくありません。";
       // These change Claude Code's defaults for every new session; the chat box switches them for this session.
-      if (/^\s*\/model\b/i.test(cmd.text)) {
+      if (/^\s*\/model(?=\s|$)/i.test(cmd.text)) {
         return "モデルは、入力欄のモデルの選択で切り替えてください。/model で切り替えると、これから始めるすべてのセッションの既定のモデルも変わります。";
       }
-      if (/^\s*\/effort\b/i.test(cmd.text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(cmd.text)) {
+      if (/^\s*\/effort(?=\s|$)/i.test(cmd.text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(cmd.text)) {
         return "Effort は、入力欄の Effort のボタンで切り替えてください。/effort で切り替えると、これから始めるすべてのセッションの既定の Effort も変わります（/effort ultracode on と off は、このセッションだけなので送れます）。";
       }
       if (files.length > MAX_FILES) return `添付できるファイルは ${MAX_FILES} 個までです。`;
@@ -336,7 +343,8 @@ export class Hub {
   /** An input that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
     if (cmd.type !== "session.input") return undefined;
-    const features = this.machines.get(machine)?.features ?? LEGACY_FEATURES;
+    const m = this.machines.get(machine);
+    const features = m?.features ?? legacyFeatures(m?.daemonVersion);
     const missing = [
       cmd.model !== undefined && !features.includes("model") && "モデル",
       cmd.effort !== undefined && !features.includes("effort") && "Effort",

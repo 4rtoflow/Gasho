@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HubToClient, HubToDaemon, SessionInfo } from "@gasho/protocol";
-import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, MAX_FILES_BYTES, validateCommand } from "../src/hub.ts";
+import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, legacyFeatures, MAX_FILES_BYTES, validateCommand } from "../src/hub.ts";
 import { notificationFor } from "../src/notify.ts";
 import { Store } from "../src/store.ts";
 
@@ -328,6 +328,9 @@ test("effort and ultracode of inputs are checked, and machines carry the model n
   assert.match(validateCommand({ ...ok, text: " /effort high" }) ?? "", /Effort のボタン/);
   assert.equal(validateCommand({ ...ok, text: "/effort ultracode on" }), undefined);
   assert.equal(validateCommand({ ...ok, text: "/models について教えて" }), undefined);
+  assert.equal(validateCommand({ ...ok, text: "/model-review を実行して" }), undefined);
+  assert.equal(validateCommand({ ...ok, text: "/effort-estimate この課題" }), undefined);
+  assert.match(validateCommand({ ...ok, text: "/model" }) ?? "", /モデルの選択/);
 
   const { hub, machineId, machineToken, browserId } = setup();
   const d = fakePeer<HubToDaemon>();
@@ -377,4 +380,9 @@ test("a gasho-daemon that does not list its features gets no effort or ultracode
   // What 0.5.0 could do still goes through.
   hub.onClientMessage(c, { type: "session.input", requestId: "ok", machine: machineId, sessionId: "s1", text: "見て", model: "opus" });
   assert.equal(d.sent.at(-1)?.type, "session.input");
+  // Older ones only type the text.
+  assert.deepEqual(legacyFeatures("0.5.0"), ["model", "files"]);
+  assert.deepEqual(legacyFeatures("0.4.0"), []);
+  assert.deepEqual(legacyFeatures(undefined), []);
+  assert.deepEqual(legacyFeatures("1.0.0"), ["model", "files"]);
 });

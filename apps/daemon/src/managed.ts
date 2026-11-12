@@ -16,13 +16,13 @@ const execFileP = promisify(execFile);
 export const PANE = "terminal_0";
 export const TRUST_PROMPT_RE = /trust this folder|Quick safety check/i;
 export const PERMISSION_PROMPT_RE = /Do you want to proceed\?/;
-/** Claude Code's occasional feedback survey ("1: Bad 2: Fine 3: Good 0: Dismiss"); "0" dismisses it. */
-export const SURVEY_RE = /How is Claude doing this session\?/;
 
 /**
  * A screen of the pane, read from `zellij action dump-screen --ansi`. `plain` has every character. `typed` leaves out
  * what is drawn dim (SGR 2): in the prompt box, that is Claude Code's suggestion for the next message and its
- * placeholder, which nobody typed. Both keep every line break, so their lines match.
+ * placeholder, which nobody typed. Unless the terminal's own cursor is used, Claude Code draws its cursor on the first
+ * character of these in reverse video (SGR 7) instead of dim; a single reversed character followed by dim text is left
+ * out too. Both keep every line break, so their lines match.
  */
 export interface Screen {
   plain: string;
@@ -37,10 +37,23 @@ export function readScreen(ansi: string): Screen {
   let plain = "";
   let typed = "";
   let dim = false;
+  let inverse = false;
+  // A reversed character held back until it is known whether dim text follows it (then it is Claude Code's cursor).
+  let cursor = "";
   let at = 0;
   const text = (s: string) => {
+    if (!s) return;
     plain += s;
-    typed += dim ? s.replace(/[^\n]/g, "") : s;
+    if (dim) {
+      typed += s.replace(/[^\n]/g, "");
+      cursor = "";
+    } else if (inverse && Array.from(s).length === 1 && s !== "\n") {
+      typed += cursor;
+      cursor = s;
+    } else {
+      typed += cursor + s;
+      cursor = "";
+    }
   };
   for (const m of ansi.matchAll(ESCAPE_RE)) {
     const index = m.index ?? 0;
@@ -54,12 +67,17 @@ export function readScreen(ansi: string): Screen {
       // 38, 48 and 58 set a colour; the numbers after them are its value, not attributes ("38;5;n", "38;2;r;g;b").
       if (n === 38 || n === 48 || n === 58) {
         if (sub.length === 0) i += params[i + 1] === "5" ? 2 : 4;
-      } else if (n === 0 || n === 22) dim = false;
+      } else if (n === 0) {
+        dim = false;
+        inverse = false;
+      } else if (n === 22) dim = false;
       else if (n === 2) dim = true;
+      else if (n === 7) inverse = true;
+      else if (n === 27) inverse = false;
     }
   }
   text(ansi.slice(at));
-  return { plain, typed };
+  return { plain, typed: typed + cursor };
 }
 
 /** A screen read from plain text, where nothing is dim (for screens that need no more). */
@@ -97,13 +115,18 @@ export function switchQuestion(screen: string): { onYes: boolean; aboutCache: bo
   const no = all.findLastIndex((l) => /^\s*(?:❯\s*)?2\.\s+No, go back\b/.test(l));
   // The choices, then at most a line or two of key help.
   if (yes < 0 || no <= yes || no - yes > 2 || all.length - no > 3) return undefined;
+  // The question's own lines: from its title ("Switch model?", "Change effort level?") down to the choices. Without a
+  // title, the few lines above the choices; the conversation above them must not decide.
+  const from = Math.max(0, yes - 10);
+  const title = all.slice(from, yes).findLastIndex((l) => /^\s*(?:Switch model|Change effort level)\?\s*$/.test(l));
   const text = all
-    .slice(Math.max(0, yes - 10), yes)
+    .slice(title >= 0 ? from + title : Math.max(0, yes - 6), yes)
     .join(" ")
     .replace(/\s+/g, " ");
   return {
     onYes: /^\s*❯/.test(all[yes] ?? ""),
-    aboutCache: /conversation is cached/i.test(text) && /history gets re-read/i.test(text) && !/\bhook\b/i.test(text),
+    aboutCache:
+      /conversation is cached/i.test(text) && /history gets re-read/i.test(text) && !/PreModelSwitch|hook asked you to confirm/i.test(text),
   };
 }
 
@@ -114,12 +137,40 @@ export function switchedForSession(screen: string): boolean {
   return i >= 0 && /for this session only/.test(flat.slice(i));
 }
 
-/** The prompt box: the last two horizontal rules on the screen, the first one followed by a line starting with "❯". */
+/**
+ * The prompt box: the last two horizontal rules on the screen, the first one followed by a line that starts with "❯"
+ * (or "!" when a text starting with "!" has put the box in shell mode).
+ */
 function promptBox(lines: string[]): { top: number; bottom: number } | undefined {
   const rules = lines.flatMap((l, i) => (/^─{8,}/.test(l) ? [i] : []));
   const [top, bottom] = rules.slice(-2);
-  if (top === undefined || bottom === undefined || !lines[top + 1]?.startsWith("❯")) return undefined;
+  if (top === undefined || bottom === undefined || !/^[❯!]/.test(lines[top + 1] ?? "")) return undefined;
   return { top, bottom };
+}
+
+/** At most this many lines (mode, hints, a status line) follow the prompt box when nothing else is open. */
+const FOOTER_LINES = 4;
+
+/**
+ * Whether the prompt box is at the bottom of the screen, with only Claude Code's footer below it. Claude Code hides
+ * the box while a picker, question or dialog has the keys, so then none of them is open, whatever the conversation
+ * above says.
+ */
+function promptBoxAtBottom(lines: string[]): boolean {
+  const box = promptBox(lines);
+  return box !== undefined && lines.slice(box.bottom + 1).filter(Boolean).length <= FOOTER_LINES;
+}
+
+/**
+ * Claude Code's occasional feedback survey, drawn right above the prompt box ("● How is Claude doing this session?
+ * (optional)" / "1: Bad 2: Fine 3: Good 0: Dismiss"). It takes the keys while it is shown; "0" dismisses it.
+ */
+export function surveyOpen(screen: string): boolean {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  if (!box) return false;
+  const above = lines.slice(0, box.top).filter(Boolean).slice(-2);
+  return /How is Claude doing this session\?/.test(above[0] ?? "") && /\b0:\s*Dismiss\b/.test(above[1] ?? "");
 }
 
 /** The lines of Claude Code's prompt box. Undefined when the screen does not show the prompt box. */
@@ -134,6 +185,7 @@ export function promptBoxLines(screen: string): string[] | undefined {
  * question before a switch, a permission dialog or the trust dialog.
  */
 export function dialogOpen(screen: string): boolean {
+  if (promptBoxAtBottom(screenLines(screen))) return false;
   return (
     modelPickerOptions(screen).length > 0 ||
     switchQuestion(screen) !== undefined ||
@@ -155,7 +207,7 @@ export function typedInBox(s: Screen): string | undefined {
     .slice(box.top + 1, box.bottom)
     .join("")
     .replace(/\s+/g, "")
-    .replace(/^❯/, "");
+    .replace(/^[❯!]/, "");
 }
 
 /**
@@ -166,7 +218,8 @@ export function promptHolds(s: Screen, text: string): boolean {
   const inBox = typedInBox(s);
   if (!inBox) return false;
   if (/\[Pastedtext#\d+/.test(inBox)) return true;
-  const head = text.replace(/\s+/g, "").slice(0, 12);
+  // A text starting with "!" puts the box in shell mode, and Claude Code drops the "!" from it.
+  const head = text.replace(/^\s*!/, "").replace(/\s+/g, "").slice(0, 12);
   return head.length > 0 && inBox.includes(head);
 }
 
@@ -182,15 +235,21 @@ export function clearPromptKeys(lines: number): string[] {
 
 /** An input waiting to be typed, and what to switch first (for this session only). */
 export interface QueuedInput {
+  /** The request that asked for it, so its outcome goes back to that request only. */
+  id?: string;
   text: string;
   model?: SessionModel;
   effort?: EffortLevel;
   ultracode?: boolean;
   /**
-   * Enter was pressed for this text, but the prompt box still held it when Gasho stopped waiting. The next try
-   * presses Enter only if the box still holds the text, and never types it again (that would send it twice).
+   * Enter was pressed for this text (at `enteredAt`), but the prompt box still held it when Gasho stopped waiting.
+   * The text is never typed again (that could send it twice). A later try drops it if Claude Code has taken it
+   * since, and presses Enter only if the box still holds it.
    */
   entered?: boolean;
+  enteredAt?: number;
+  /** The session was seen busy since Enter was pressed: Claude Code took it (used when its transcript is not read). */
+  seenBusy?: boolean;
 }
 
 /**
@@ -199,10 +258,10 @@ export interface QueuedInput {
  * session instead. Returns the reason, or undefined when the text can be sent.
  */
 export function refusedCommand(text: string): string | undefined {
-  if (/^\s*\/model\b/i.test(text)) {
+  if (/^\s*\/model(?=\s|$)/i.test(text)) {
     return "モデルは、入力欄のモデルの選択で切り替えてください。/model で切り替えると、これから始めるすべてのセッションの既定のモデルも変わります。";
   }
-  if (/^\s*\/effort\b/i.test(text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(text)) {
+  if (/^\s*\/effort(?=\s|$)/i.test(text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(text)) {
     return "Effort は、入力欄の Effort のボタンで切り替えてください。/effort で切り替えると、これから始めるすべてのセッションの既定の Effort も変わります（/effort ultracode on と off は、このセッションだけなので送れます）。";
   }
   return undefined;
@@ -512,6 +571,11 @@ export class ManagedSessions {
 
   pending(sessionId: string): number {
     return this.queues.get(sessionId)?.length ?? 0;
+  }
+
+  /** The input that is sent next, without taking it off the queue. */
+  peek(sessionId: string): QueuedInput | undefined {
+    return this.queues.get(sessionId)?.[0];
   }
 }
 

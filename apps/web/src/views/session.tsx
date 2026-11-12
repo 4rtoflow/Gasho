@@ -179,41 +179,64 @@ const MODELS: { id: SessionModel; name: string; description: string }[] = [
   { id: "haiku", name: "Haiku", description: "短い質問に、いちばん速く答える" },
 ];
 
-/** The option for a model the picker does not list by that name (say "Opus 4.6"): picking it switches nothing. */
-const OTHER_MODEL = "other";
+/**
+ * The first option when the session's model is not one of the picker's: a model the picker does not list by that
+ * name (say "Opus 4.6"), or a model not known yet (no reply so far). Picking it switches nothing.
+ */
+const KEEP_MODEL = "keep";
 /**
  * How long after the working server read the picker the name of the model that the default stands for is shown
- * ("既定（Sonnet 5.5）"): the default can move to another model, the other names hardly change.
+ * ("既定（Sonnet 5.5）"): the default can move to another model, the other names hardly change. After an hour, the
+ * option says when it was read.
  */
 const DEFAULT_NAME_MAX_AGE_MS = 24 * 3600_000;
-/** What a gasho-daemon that does not say (older than 0.6.0) can do with an input. */
-const LEGACY_FEATURES: readonly InputFeature[] = ["model", "files"];
+const DEFAULT_NAME_AGE_NOTE_MS = 3600_000;
+
+/**
+ * What a gasho-daemon that does not list its features (older than 0.6.0) can do with an input: 0.5 switches the model
+ * and carries files; older ones only type the text.
+ */
+function legacyFeatures(daemonVersion: string | undefined): InputFeature[] {
+  const [major = 0, minor = 0] = (daemonVersion ?? "").split(".").map((n) => Number.parseInt(n, 10) || 0);
+  return major > 0 || minor >= 5 ? ["model", "files"] : [];
+}
 
 /**
  * The picker's options with the names the working server read ("既定（Sonnet 5.5）", "Opus 5.5"). The session's
- * model and the picked one are always among them; a model the picker does not list comes first, under its own name.
+ * model and the picked one are always among them; a model that is not one of the picker's comes first.
  */
 function modelOptions(
   machine: MachineInfo,
-  current: SessionModel | typeof OTHER_MODEL | undefined,
+  current: SessionModel | typeof KEEP_MODEL,
   label: string | undefined,
   picked?: SessionModel,
 ): PromptModel[] {
+  const now = Date.now();
   const named = new Map(machine.models?.map((m) => [m.id, m.name]));
-  const fresh = machine.modelsAt !== undefined && Date.now() - machine.modelsAt < DEFAULT_NAME_MAX_AGE_MS;
+  // The session's own name for the default ("Sonnet 5.5 (default)") is the surest; the picker's is from when it was read.
+  const ownDefault = current === "default" ? label?.replace(/\s*\(default\)\s*$/i, "").trim() : undefined;
+  const readAt = machine.modelsAt;
+  const fresh = readAt !== undefined && now - readAt < DEFAULT_NAME_MAX_AGE_MS;
   const options: PromptModel[] = MODELS.filter((m) => !machine.models || named.has(m.id) || m.id === current || m.id === picked).map(
     (m) => {
       const name = named.get(m.id);
-      return {
-        id: m.id,
-        name: m.id === "default" ? (name && fresh ? `既定（${name}）` : m.name) : (name ?? m.name),
-        description: m.description,
-        ...(m.id === current ? { badge: "いま" } : {}),
-      };
+      let shown = name ?? m.name;
+      let description = m.description;
+      if (m.id === "default") {
+        shown = ownDefault ? `既定（${ownDefault}）` : name && fresh ? `既定（${name}）` : m.name;
+        if (!ownDefault && name && fresh && readAt !== undefined && now - readAt > DEFAULT_NAME_AGE_NOTE_MS) {
+          description = `${m.description}（${relativeTime(readAt, now)}に確認）`;
+        }
+      }
+      return { id: m.id, name: shown, description, ...(m.id === current ? { badge: "いま" } : {}) };
     },
   );
-  if (current === OTHER_MODEL && label) {
-    options.unshift({ id: OTHER_MODEL, name: label, description: "このセッションがいま使っているモデル", badge: "いま" });
+  if (current === KEEP_MODEL) {
+    options.unshift(
+      label
+        ? { id: KEEP_MODEL, name: label, description: "このセッションがいま使っているモデル", badge: "いま" }
+        : { id: KEEP_MODEL, name: "モデル（未確認）", description: "最初の返答のあとで分かります。選び直さなければ、そのまま送ります" },
+    );
   }
   return options;
 }
@@ -222,18 +245,18 @@ const MAX_FILES_BYTES = 10 * 1024 * 1024;
 
 /**
  * Which of the picker's models the session uses, from Claude Code's name for it: "Sonnet 5.5 (default)" (its name
- * after picking the default) is the default, and other names must equal a name the picker gives ("Opus 5.5"); a
- * session on a model the picker does not list ("Opus 4.6") is OTHER_MODEL. Without the picker's names, the family
- * ("opus") is the best guess.
+ * after picking the default) is the default, and other names must equal a name the picker gives ("Opus 5.5"). A
+ * session on a model the picker does not list ("Opus 4.6"), or whose model is not known yet, is KEEP_MODEL. Without
+ * the picker's names, the family ("opus") is the best guess.
  */
-function currentModel(machine: MachineInfo, label: string | undefined): SessionModel | typeof OTHER_MODEL | undefined {
-  if (!label) return undefined;
+function currentModel(machine: MachineInfo, label: string | undefined): SessionModel | typeof KEEP_MODEL {
+  if (!label) return KEEP_MODEL;
   if (/\(default\)/i.test(label)) return "default";
   const name = label.replace(/\s*\(.*\)\s*$/, "").trim().toLowerCase();
   if (machine.models) {
-    return machine.models.find((m) => m.id !== "default" && m.name.toLowerCase() === name)?.id ?? OTHER_MODEL;
+    return machine.models.find((m) => m.id !== "default" && m.name.toLowerCase() === name)?.id ?? KEEP_MODEL;
   }
-  return /^(opus|fable|sonnet|haiku)\b/.exec(name)?.[1] as SessionModel | undefined;
+  return (/^(opus|fable|sonnet|haiku)\b/.exec(name)?.[1] as SessionModel | undefined) ?? KEEP_MODEL;
 }
 
 function toBase64(file: File): Promise<string> {
@@ -254,7 +277,7 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
   const [pickedUltracode, setPickedUltracode] = useState<boolean>();
   const current = currentModel(machine, s.model);
   const ultracode = Boolean(s.ultracode);
-  const features = machine.features ?? LEGACY_FEATURES;
+  const features = machine.features ?? legacyFeatures(machine.daemonVersion);
   // Once the session runs with what was picked, follow the session again.
   useEffect(() => {
     if (picked && picked === current) setPicked(undefined);
@@ -274,7 +297,7 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
           onSend={() => undefined}
           disabled
           models={modelOptions(machine, current, s.model)}
-          model={current ?? "default"}
+          model={current}
           placeholder="Gasho からは入力できません"
           hint={false}
         />
@@ -316,9 +339,8 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
             throw new Error(message);
           };
           if (files.reduce((n, f) => n + f.size, 0) > MAX_FILES_BYTES) fail("添付できるのは、合わせて 10MB までです。");
-          // Switch only what was picked and differs from what the session uses. A session whose model is not known
-          // yet (no reply so far) started on the default.
-          const switchTo = picked && picked !== (current ?? "default") ? picked : undefined;
+          // Switch only what was picked and differs from what the session uses (any pick, while its model is not known).
+          const switchTo = picked && picked !== current ? picked : undefined;
           const effort = pickedEffort && pickedEffort !== s.effort ? pickedEffort : undefined;
           const ultra = pickedUltracode !== undefined && pickedUltracode !== ultracode ? pickedUltracode : undefined;
           const encoded = await Promise.all(files.map(async (f) => ({ name: f.name, data: await toBase64(f) })));
@@ -339,10 +361,11 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
           if (!r.ok) fail(r.error ?? "送れませんでした。");
           if (r.warning) setWarning(r.warning);
           // What could not be switched stays as the session has it: drop the pick, so the control shows that again.
+          // A pick changed while this was being sent is for the next message, and stays.
           for (const field of r.unapplied ?? []) {
-            if (field === "model") setPicked(undefined);
-            else if (field === "effort") setPickedEffort(undefined);
-            else setPickedUltracode(undefined);
+            if (field === "model") setPicked((p) => (p === switchTo ? undefined : p));
+            else if (field === "effort") setPickedEffort((p) => (p === effort ? undefined : p));
+            else setPickedUltracode((p) => (p === ultra ? undefined : p));
           }
         }}
         // While Claude is working, the send button turns into a stop button (Esc also stops).
@@ -350,8 +373,8 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
         onStop={() => void stop()}
         disabled={offline}
         models={features.includes("model") ? modelOptions(machine, current, s.model, picked) : []}
-        model={picked ?? current ?? "default"}
-        onModelChange={(id) => setPicked(id === OTHER_MODEL ? undefined : (id as SessionModel))}
+        model={picked ?? current}
+        onModelChange={(id) => setPicked(id === KEEP_MODEL ? undefined : (id as SessionModel))}
         actions={
           <>
             {features.includes("effort") && (
