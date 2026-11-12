@@ -224,3 +224,43 @@ test("session commands are refused when invalid or when the working server is of
   r = c.sent.at(-1);
   assert.ok(r?.type === "command.result" && r.requestId === "d" && !r.result.ok);
 });
+
+test("git.graph.get is relayed to the working server and the graph goes back to the asking browser only", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.3.0" });
+  const asking = fakePeer<HubToClient>(browserId);
+  const other = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(asking);
+  hub.onClientConnect(other);
+  hub.onClientMessage(asking, { type: "git.graph.get", machine: machineId, sessionId: "s1" });
+  const req = d.sent.at(-1);
+  assert.ok(req?.type === "git.graph.get");
+  assert.equal(req.sessionId, "s1");
+  // An answer of the wrong kind for this request is ignored.
+  hub.onDaemonMessage(d, { type: "transcript.page", requestId: req.requestId, sessionId: "s1", entries: [], start: 0, total: 0 });
+  assert.ok(!asking.sent.some((m) => m.type === "transcript.page"));
+  const graph = { root: "/home/rg/repos/Bobert", head: "main", branches: [], commits: [], truncated: false };
+  hub.onDaemonMessage(d, { type: "git.graph", requestId: req.requestId, sessionId: "s1", graph });
+  const got = asking.sent.at(-1);
+  assert.ok(got?.type === "git.graph");
+  assert.equal(got.machine, machineId);
+  assert.deepEqual(got.graph, graph);
+  assert.ok(!other.sent.some((m) => m.type === "git.graph"));
+});
+
+test("git.graph.get fails when the working server is offline or disconnects", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1" });
+  const offline = c.sent.at(-1);
+  assert.ok(offline?.type === "git.graph" && offline.error && !offline.graph);
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.3.0" });
+  hub.onClientMessage(c, { type: "git.graph.get", machine: machineId, sessionId: "s1" });
+  hub.onDaemonClose(d);
+  const failed = c.sent.filter((m) => m.type === "git.graph").at(-1);
+  assert.ok(failed?.type === "git.graph" && failed.error && !failed.graph);
+});

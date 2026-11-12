@@ -5,6 +5,7 @@ import type {
   CommandResult,
   DeviceInfo,
   GashoNotification,
+  GitGraph,
   HubToClient,
   MachineHookEvent,
   MachineInfo,
@@ -25,6 +26,15 @@ export interface TranscriptState {
   error?: string;
 }
 
+/** The branch graph of a session's repository. */
+export interface GraphState {
+  loading: boolean;
+  graph?: GitGraph;
+  error?: string;
+  /** When the graph was read. */
+  at?: number;
+}
+
 export type AuthState = "checking" | "registered" | "unregistered" | "unreachable";
 
 export interface State {
@@ -35,6 +45,8 @@ export interface State {
   notifications: GashoNotification[];
   events: MachineHookEvent[];
   transcripts: Record<string, TranscriptState>;
+  /** Keyed like transcripts: transcriptKey(machine, sessionId). */
+  graphs: Record<string, GraphState>;
 }
 
 const PAGE_SIZE = 80;
@@ -43,7 +55,7 @@ const MAX_NOTIFICATIONS = 200;
 
 export const transcriptKey = (machine: string, sessionId: string): string => `${machine}\u0000${sessionId}`;
 
-const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {} };
+const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {} };
 let state: State = { auth: "checking", ...EMPTY };
 const listeners = new Set<() => void>();
 
@@ -54,6 +66,10 @@ function update(next: Partial<State>): void {
 
 function setTranscript(key: string, t: TranscriptState): void {
   update({ transcripts: { ...state.transcripts, [key]: t } });
+}
+
+function setGraph(key: string, g: GraphState): void {
+  update({ graphs: { ...state.graphs, [key]: g } });
 }
 
 let socket: WebSocket | undefined;
@@ -96,6 +112,11 @@ function connect(): void {
     for (const key of Object.keys(state.transcripts)) {
       const [machine, sessionId] = key.split("\u0000");
       if (machine && sessionId) requestPage(machine, sessionId, undefined);
+    }
+    // Requests sent just before the connection dropped are lost; ask again.
+    for (const [key, g] of Object.entries(state.graphs)) {
+      const [machine, sessionId] = key.split("\u0000");
+      if (g.loading && machine && sessionId) send({ type: "git.graph.get", machine, sessionId });
     }
   };
   ws.onmessage = (ev) => {
@@ -168,7 +189,8 @@ function handle(m: HubToClient): void {
     case "machine.removed": {
       const prefix = transcriptKey(m.id, "");
       const transcripts = Object.fromEntries(Object.entries(state.transcripts).filter(([k]) => !k.startsWith(prefix)));
-      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts });
+      const graphs = Object.fromEntries(Object.entries(state.graphs).filter(([k]) => !k.startsWith(prefix)));
+      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs });
       break;
     }
     case "transcript.page": {
@@ -215,7 +237,27 @@ function handle(m: HubToClient): void {
       pendingCommands.get(m.requestId)?.(m.result);
       pendingCommands.delete(m.requestId);
       break;
+    case "git.graph": {
+      const key = transcriptKey(m.machine, m.sessionId);
+      const cur = state.graphs[key];
+      // On an error, keep showing the graph read before, with the error.
+      setGraph(key, m.graph ? { loading: false, graph: m.graph, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
+      break;
+    }
   }
+}
+
+/** Reads the branch graph of the session's repository again. */
+export function loadGraph(machine: string, sessionId: string): void {
+  const key = transcriptKey(machine, sessionId);
+  const cur = state.graphs[key];
+  if (cur?.loading) return;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    setGraph(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
+    return;
+  }
+  setGraph(key, { ...cur, loading: true, error: undefined });
+  send({ type: "git.graph.get", machine, sessionId });
 }
 
 function requestPage(machine: string, sessionId: string, before: number | undefined): void {

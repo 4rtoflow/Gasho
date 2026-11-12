@@ -145,6 +145,52 @@ export interface PairingCode {
   expiresAt: number;
 }
 
+/** A branch or tag that points at a commit. */
+export interface GitRef {
+  name: string;
+  kind: "local" | "remote" | "tag";
+}
+
+export interface GitCommit {
+  hash: string;
+  parents: string[];
+  subject: string;
+  author: string;
+  /** Commit time, ms since the epoch. */
+  at: number;
+  refs: GitRef[];
+}
+
+export interface GitBranch {
+  /** "main" for a local branch, "origin/main" for a remote one. */
+  name: string;
+  remote: boolean;
+  hash: string;
+  upstream?: string;
+  /** Commits on the branch that its upstream does not have (not pushed yet), and the other way round. */
+  ahead?: number;
+  behind?: number;
+  /** The upstream branch was deleted. */
+  upstreamGone?: boolean;
+}
+
+/** Branches and recent history of the repository a session works in. */
+export interface GitGraph {
+  /** Top folder of the repository (or of the worktree). */
+  root: string;
+  /** Checked-out branch; undefined when HEAD is detached. */
+  head?: string;
+  headHash?: string;
+  branches: GitBranch[];
+  /** Newest first, children before their parents. */
+  commits: GitCommit[];
+  /** More commits exist than were sent. */
+  truncated: boolean;
+  /** Uncommitted changes in the session's folder. */
+  changes?: { staged: number; unstaged: number; untracked: number };
+  github?: GitHubRepo;
+}
+
 /** A page of transcript entries. `start` is the index of entries[0]; `total` counts all entries. */
 export interface TranscriptPage {
   entries: TranscriptEntry[];
@@ -161,12 +207,14 @@ export type DaemonToHub =
   | ({ type: "transcript.page"; requestId: string; sessionId: string } & TranscriptPage)
   | { type: "hook"; event: HookEvent }
   | { type: "capabilities"; canLaunch: boolean; folders: string[] }
-  | { type: "command.result"; requestId: string; result: CommandResult };
+  | { type: "command.result"; requestId: string; result: CommandResult }
+  | { type: "git.graph"; requestId: string; sessionId: string; graph?: GitGraph; error?: string };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
   | { type: "welcome" }
   | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number }
+  | { type: "git.graph.get"; requestId: string; sessionId: string }
   | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
@@ -184,11 +232,13 @@ export type HubToClient =
   | { type: "notification"; notification: GashoNotification }
   | { type: "notification.read"; ids: string[] }
   | { type: "event"; event: MachineHookEvent }
-  | { type: "command.result"; requestId: string; machine: string; result: CommandResult };
+  | { type: "command.result"; requestId: string; machine: string; result: CommandResult }
+  | { type: "git.graph"; machine: string; sessionId: string; graph?: GitGraph; error?: string };
 
 // browser -> gasho-hub
 export type ClientToHub =
   | { type: "transcript.get"; machine: string; sessionId: string; before?: number; limit: number }
+  | { type: "git.graph.get"; machine: string; sessionId: string }
   | { type: "notification.read"; ids: string[] }
   | ({ requestId: string; machine: string } & SessionCommand);
 

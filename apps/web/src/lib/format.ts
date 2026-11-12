@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionStatus } from "@gasho/protocol";
+import type { GitHubRepo, SessionInfo, SessionStatus } from "@gasho/protocol";
 import type { BadgeTone } from "@/components/ui/badge";
 
 const rtf = new Intl.RelativeTimeFormat("ja", { numeric: "auto" });
@@ -64,4 +64,13 @@ export function branchLabel(s: SessionInfo): string | undefined {
 
 export function formatCost(usd: number | undefined): string | undefined {
   return usd === undefined ? undefined : `$${usd.toFixed(2)}`;
+}
+
+/** A branch on GitHub. Each path segment is encoded, so "feat/x" stays a path like GitHub's own links. */
+export function githubTreeUrl(repo: GitHubRepo, branch: string): string {
+  return `${repo.url}/tree/${branch.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+export function githubCommitUrl(repo: GitHubRepo, hash: string): string {
+  return `${repo.url}/commit/${encodeURIComponent(hash)}`;
 }

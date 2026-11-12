@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { CommandResult, GitHubRepo, HubToDaemon, SessionInfo } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
-import { githubRepoOf } from "./git.ts";
+import { githubRepoOf, readGitGraph } from "./git.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
@@ -24,7 +24,7 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.2.0";
+export const DAEMON_VERSION = "0.3.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
@@ -280,6 +280,8 @@ export class Daemon {
     switch (m.type) {
       case "transcript.get":
         return this.sendTranscriptPage(m);
+      case "git.graph.get":
+        return this.sendGitGraph(m);
       case "session.launch":
       case "session.input":
       case "session.interrupt": {
@@ -318,6 +320,26 @@ export class Daemon {
       this.hub.send({ ...reply, entries: entries.slice(start, end), start, total });
     } catch (e) {
       this.hub.send({ ...reply, entries: [], start: 0, total: 0, error: String(e) });
+    }
+  }
+
+  /** Branches and history of the repository the session works in. Only for sessions this daemon tracks. */
+  private async sendGitGraph(m: Extract<HubToDaemon, { type: "git.graph.get" }>): Promise<void> {
+    const reply = { type: "git.graph" as const, requestId: m.requestId, sessionId: m.sessionId };
+    const t = this.tracked.get(m.sessionId);
+    if (!t) {
+      this.hub.send({ ...reply, error: "このセッションは見つかりません。" });
+      return;
+    }
+    try {
+      const [graph, github] = await Promise.all([readGitGraph(t.info.cwd), this.githubOf(t.info.cwd)]);
+      this.hub.send({ ...reply, graph: github ? { ...graph, github } : graph });
+    } catch (e) {
+      const text = e instanceof Error ? e.message : String(e);
+      const error = /not a git repository/i.test(text)
+        ? "このフォルダーは Git のリポジトリではありません。"
+        : `Git の情報を読めませんでした：${text.split("\n")[0]}`;
+      this.hub.send({ ...reply, error });
     }
   }
 

@@ -29,7 +29,9 @@ export const CLOSE_INVALID_CREDENTIALS = 4001;
 export const CLOSE_REPLACED = 4002;
 export const CLOSE_UNAUTHORIZED = 4401;
 
+/** A browser's request that a working server answers: a transcript page or a branch graph. */
 interface PendingRequest {
+  kind: "transcript" | "graph";
   client: ClientPeer;
   machine: string;
   sessionId: string;
@@ -134,11 +136,19 @@ export class Hub {
       }
       case "transcript.page": {
         const req = this.pending.get(msg.requestId);
-        if (!req) break;
+        if (!req || req.kind !== "transcript") break;
         clearTimeout(req.timer);
         this.pending.delete(msg.requestId);
         const { type: _type, requestId: _requestId, ...page } = msg;
         req.client.send({ type: "transcript.page", machine: id, ...page });
+        break;
+      }
+      case "git.graph": {
+        const req = this.pending.get(msg.requestId);
+        if (!req || req.kind !== "graph") break;
+        clearTimeout(req.timer);
+        this.pending.delete(msg.requestId);
+        req.client.send({ type: "git.graph", machine: id, sessionId: msg.sessionId, graph: msg.graph, error: msg.error });
         break;
       }
       case "hook": {
@@ -197,9 +207,24 @@ export class Hub {
         const timer = setTimeout(() => {
           if (this.pending.delete(requestId)) peer.send({ ...reply, error: "timed out" });
         }, REQUEST_TIMEOUT_MS);
-        this.pending.set(requestId, { client: peer, machine: msg.machine, sessionId: msg.sessionId, timer });
+        this.pending.set(requestId, { kind: "transcript", client: peer, machine: msg.machine, sessionId: msg.sessionId, timer });
         const limit = Math.min(Math.max(1, msg.limit), 500);
         daemon.send({ type: "transcript.get", requestId, sessionId: msg.sessionId, before: msg.before, limit });
+        break;
+      }
+      case "git.graph.get": {
+        const daemon = this.daemons.get(msg.machine);
+        const reply = { type: "git.graph" as const, machine: msg.machine, sessionId: msg.sessionId };
+        if (!daemon) {
+          peer.send({ ...reply, error: "この working server はオフラインです。" });
+          return;
+        }
+        const requestId = randomUUID();
+        const timer = setTimeout(() => {
+          if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
+        }, REQUEST_TIMEOUT_MS);
+        this.pending.set(requestId, { kind: "graph", client: peer, machine: msg.machine, sessionId: msg.sessionId, timer });
+        daemon.send({ type: "git.graph.get", requestId, sessionId: msg.sessionId });
         break;
       }
       case "notification.read":
@@ -315,7 +340,8 @@ export class Hub {
       if (!match(req)) continue;
       clearTimeout(req.timer);
       this.pending.delete(id);
-      req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
+      if (req.kind === "graph") req.client.send({ type: "git.graph", machine: req.machine, sessionId: req.sessionId, error });
+      else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
     }
   }
 
