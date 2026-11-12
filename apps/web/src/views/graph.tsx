@@ -1,9 +1,10 @@
 // Branch graph of the repository a session works in: its branches and the latest commits of all of them.
-import { ArrowLeft, ExternalLink, GitBranch, RefreshCw } from "lucide-react";
+import { ArrowLeft, ChevronRight, Cloud, ExternalLink, GitBranch, RefreshCw } from "lucide-react";
 import { useEffect } from "react";
 import type { GitBranch as Branch, GitGraph } from "@gasho/protocol";
 import { CommitGraph } from "@/components/commit-graph";
 import { githubTreeUrl, sessionLabel } from "@/lib/format";
+import { useFlag } from "@/lib/flag";
 import { go } from "@/lib/route";
 import { loadGraph, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
@@ -98,8 +99,7 @@ export function GraphView({ machine, sessionId }: { machine: string; sessionId: 
             {graph.commits.length === 0 ? (
               <p className="text-sm text-muted-foreground">コミットはまだありません。</p>
             ) : (
-              // Long subjects scroll sideways inside this box, not the whole page.
-              <div className="overflow-x-auto overscroll-x-contain rounded-xl border border-border py-1">
+              <div className="overflow-hidden rounded-xl border border-border py-1">
                 <CommitGraph graph={graph} now={now} />
               </div>
             )}
@@ -128,42 +128,51 @@ function githubBranchUrl(graph: GitGraph, b: Branch): string | undefined {
   return githubTreeUrl(graph.github, remoteName.slice("origin/".length));
 }
 
+/** Local branches first (the checked-out one at the top), then remote branches that no local branch tracks. */
 function BranchList({ graph }: { graph: GitGraph }) {
+  const [open, setOpen] = useFlag("gasho.branchList", true);
   const local = graph.branches
     .filter((b) => !b.remote)
     .sort((a, b) => Number(b.name === graph.head) - Number(a.name === graph.head) || a.name.localeCompare(b.name));
   const tracked = new Set(local.map((b) => b.upstream).filter(Boolean));
-  const remoteOnly = graph.branches.filter((b) => b.remote && !tracked.has(b.name));
+  const remoteOnly = graph.branches.filter((b) => b.remote && !tracked.has(b.name)).sort((a, b) => a.name.localeCompare(b.name));
+  const branches = [...local, ...remoteOnly];
 
   return (
     <section className="space-y-2">
-      <h2 className="text-sm font-medium">ブランチ（{local.length}）</h2>
-      <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border">
-        {local.map((b) => (
-          <BranchRow key={b.name} branch={b} head={b.name === graph.head} url={githubBranchUrl(graph, b)} />
-        ))}
-      </ul>
-      {remoteOnly.length > 0 && (
-        <details className="group text-sm">
-          <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-            リモートにだけあるブランチ（{remoteOnly.length}）
-          </summary>
-          <ul className="mt-2 divide-y divide-border overflow-hidden rounded-xl border border-border">
-            {remoteOnly.map((b) => (
-              <BranchRow key={b.name} branch={b} head={false} url={githubBranchUrl(graph, b)} />
-            ))}
-          </ul>
-        </details>
+      <h2>
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="inline-flex items-center gap-1 text-sm font-medium hover:text-foreground"
+        >
+          <ChevronRight className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-90")} />
+          ブランチ（{branches.length}）
+        </button>
+      </h2>
+      {open && (
+        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border">
+          {branches.map((b) => (
+            <BranchRow key={`${b.remote ? "r" : "l"}:${b.name}`} branch={b} head={!b.remote && b.name === graph.head} url={githubBranchUrl(graph, b)} />
+          ))}
+        </ul>
       )}
     </section>
   );
 }
 
 function BranchRow({ branch: b, head, url }: { branch: Branch; head: boolean; url?: string }) {
+  const Icon = b.remote ? Cloud : GitBranch;
   return (
     <li className={cn("flex items-center gap-2 px-3 py-2 text-[13px]", head && "bg-emerald-500/[0.07]")}>
-      <GitBranch className={cn("size-3.5 shrink-0", head ? "text-emerald-400" : "text-muted-foreground")} />
-      <span className="min-w-0 truncate font-mono">{b.name}</span>
+      <Icon
+        aria-label={b.remote ? "リモートのブランチ" : "ローカルのブランチ"}
+        className={cn("size-3.5 shrink-0", head ? "text-emerald-400" : b.remote ? "text-sky-300" : "text-muted-foreground")}
+      />
+      <span className="min-w-0 truncate font-mono" title={b.name}>
+        {b.name}
+      </span>
       {head && <span className="shrink-0 rounded-md bg-emerald-500/15 px-1.5 text-[11px] text-emerald-300">チェックアウト中</span>}
       <span className="ml-auto flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
         {!b.remote && <UpstreamState branch={b} />}

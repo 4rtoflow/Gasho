@@ -141,3 +141,10 @@
     @apply font-sans;
     }
 }
+/* Scrolls without showing a scrollbar (the commit rows of the branch graph). */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

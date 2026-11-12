@@ -1,6 +1,6 @@
-// The commit graph of a repository: one table row per commit, newest first, with its lane lines drawn in SVG.
-// Nothing is cut short: subjects and branch names stay on one line in full, and the table scrolls sideways
-// inside its box. The lanes column stays at the left edge while scrolling.
+// The commit graph of a repository: one row per commit, newest first, with its lane lines drawn in SVG.
+// Nothing is cut short: the branch names and the subject of each row stay on one line in full, and each row
+// scrolls sideways on its own, without a scrollbar. Its right edge fades out to show that there is more.
 import { Cloud, Tag } from "lucide-react";
 import { useMemo } from "react";
 import type { GitCommit, GitGraph, GitHubRepo, GitRef } from "@gasho/protocol";
@@ -15,8 +15,8 @@ const COLORS = ["#60a5fa", "#34d399", "#f472b6", "#fbbf24", "#a78bfa", "#22d3ee"
 const color = (lane: number) => COLORS[lane % COLORS.length];
 const x = (lane: number) => PAD + LANE / 2 + lane * LANE;
 const MID = ROW / 2;
-/** The checked-out commit's tint, also painted over the opaque background of the pinned lanes cell. */
-const HEAD_TINT = "rgb(16 185 129 / 0.07)";
+/** Fades the last 1.5rem of a row's text; the text ends with the same padding, so its end is clear when scrolled. */
+const FADE = "linear-gradient(to right, black calc(100% - 1.5rem), transparent)";
 
 export function CommitGraph({ graph, now }: { graph: GitGraph; now: number }) {
   const { rows, width } = useMemo(() => layoutGraph(graph.commits), [graph.commits]);
@@ -26,45 +26,46 @@ export function CommitGraph({ graph, now }: { graph: GitGraph; now: number }) {
   );
   const svgWidth = PAD * 2 + width * LANE;
   return (
-    <table aria-label="コミットの履歴" className="w-max min-w-full text-[13px]">
-      <tbody>
-        {graph.commits.map((c, i) => {
-          const row = rows[i];
-          if (!row) return null;
-          const isHead = c.hash === graph.headHash;
-          return (
-            <tr key={c.hash} style={{ height: ROW, backgroundColor: isHead ? HEAD_TINT : undefined }}>
-              <td
-                className="sticky left-0 z-10 bg-background p-0"
-                style={isHead ? { backgroundImage: `linear-gradient(${HEAD_TINT}, ${HEAD_TINT})` } : undefined}
-              >
-                <Lanes row={row} width={svgWidth} head={isHead} merge={c.parents.length > 1} />
-              </td>
-              <td className="w-full whitespace-nowrap py-0 pr-6 pl-1">
-                <span className="flex items-center gap-1.5">
-                  <Refs commit={c} head={isHead} headBranch={graph.head} upstreams={upstreams} />
-                  <span>{c.subject}</span>
-                </span>
-              </td>
-              <td className="whitespace-nowrap py-0 pr-4 text-xs text-muted-foreground">{c.author}</td>
-              <td className="whitespace-nowrap py-0 pr-4 text-right text-xs text-muted-foreground" title={new Date(c.at).toLocaleString("ja-JP")}>
-                {relativeTime(c.at, now)}
-              </td>
-              <td className="whitespace-nowrap py-0 pr-3">
-                <ShortHash hash={c.hash} github={graph.github} />
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <ol aria-label="コミットの履歴" className="text-[13px]">
+      {graph.commits.map((c, i) => {
+        const row = rows[i];
+        if (!row) return null;
+        const isHead = c.hash === graph.headHash;
+        return (
+          <li key={c.hash} className={cn("flex items-center pr-3", isHead && "bg-emerald-500/[0.07]")} style={{ height: ROW }}>
+            <Lanes row={row} width={svgWidth} head={isHead} merge={c.parents.length > 1} />
+            <div
+              className="scrollbar-none min-w-0 flex-1 overflow-x-auto overscroll-x-contain"
+              style={{ maskImage: FADE, WebkitMaskImage: FADE }}
+            >
+              <div className="flex w-max items-center gap-1.5 pr-6 pl-1">
+                <Refs commit={c} head={isHead} headBranch={graph.head} upstreams={upstreams} />
+                <span className="whitespace-nowrap">{c.subject}</span>
+                {/* On narrow screens the author and the commit number follow the subject instead of having columns. */}
+                <span className="whitespace-nowrap pl-2 text-xs text-muted-foreground lg:hidden">{c.author}</span>
+                <ShortHash hash={c.hash} github={graph.github} className="sm:hidden" />
+              </div>
+            </div>
+            <span className="hidden w-32 shrink-0 truncate pl-3 text-xs text-muted-foreground lg:block" title={c.author}>
+              {c.author}
+            </span>
+            <span className="w-16 shrink-0 text-right text-xs text-muted-foreground" title={new Date(c.at).toLocaleString("ja-JP")}>
+              {relativeTime(c.at, now)}
+            </span>
+            <span className="hidden w-16 shrink-0 text-right sm:block">
+              <ShortHash hash={c.hash} github={graph.github} />
+            </span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
 function Lanes({ row, width, head, merge }: { row: GraphRow; width: number; head: boolean; merge: boolean }) {
   const col = x(row.col);
   return (
-    <svg width={width} height={ROW} className="block" aria-hidden>
+    <svg width={width} height={ROW} className="block shrink-0" aria-hidden>
       <g fill="none" strokeWidth={2} strokeLinecap="round">
         {row.through.map((i) => (
           <line key={`t${i}`} x1={x(i)} y1={0} x2={x(i)} y2={ROW} stroke={color(i)} />
@@ -181,9 +182,9 @@ function RefBadge({
   );
 }
 
-function ShortHash({ hash, github }: { hash: string; github?: GitHubRepo }) {
+function ShortHash({ hash, github, className }: { hash: string; github?: GitHubRepo; className?: string }) {
   const short = hash.slice(0, 7);
-  const cls = "font-mono text-xs text-muted-foreground";
+  const cls = cn("font-mono text-xs text-muted-foreground", className);
   return github ? (
     <a href={githubCommitUrl(github, hash)} target="_blank" rel="noreferrer" title="GitHub でコミットを開く" className={cn(cls, "hover:text-foreground hover:underline")}>
       {short}
