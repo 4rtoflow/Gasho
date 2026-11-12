@@ -185,7 +185,7 @@ hook の `onFailure` は既定のままにする。こうすると、gasho-daemo
 | 画面 | 内容 | 主な部品 |
 |---|---|---|
 | ホーム | working server とセッションの一覧、承認待ち、通知 | Data Table、Badge、Notification Stack |
-| セッション | 会話の履歴と、Agent への入力欄。Claude の返答は Markdown として表示する。作業中は送信ボタンが停止ボタンに変わる。ツールやイベントのタブは置かない | 自作の会話の表示、Prompt Input、AI Response のコードブロック |
+| セッション | 会話の履歴と、Agent への入力欄。入力欄は画面の下に浮かせ、会話はその後ろへスクロールする。Claude の返答は Markdown として表示する。作業中は送信ボタンが停止ボタンに変わる。ツールやイベントのタブは置かない | 自作の会話の表示、Prompt Input、AI Response のコードブロック |
 | リポジトリ | ブランチツリー、worktree、Issues、PRs、Actions | Animated Tabs、Data Table、自作の SVG |
 | 端末 | 登録した端末の一覧、登録コードの発行 | Data Table、Badge |
 | 登録 | 登録していないブラウザに出す、登録コードの入力 | 自作 |

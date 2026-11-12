@@ -109,31 +109,34 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
         </div>
       </header>
       <div className="min-h-0 flex-1">
-        <Transcript key={`${machine}/${sessionId}`} state={t} onLoadOlder={() => loadTranscript(machine, sessionId, true)} />
+        <Transcript
+          key={`${machine}/${sessionId}`}
+          state={t}
+          onLoadOlder={() => loadTranscript(machine, sessionId, true)}
+          footer={<Composer machine={m} session={s} />}
+        />
       </div>
-      <Composer machine={m} session={s} />
     </div>
   );
 }
 
+/** The chat box. It floats over the bottom of the conversation (see the footer of Transcript). */
 function Composer({ machine, session: s }: { machine: MachineInfo; session: SessionInfo }) {
   const [error, setError] = useState<string>();
   const url = claudeUrl(s);
 
   if (!s.managed) {
     return (
-      <div className="shrink-0 border-t border-border px-4 py-3 md:px-6">
-        <div className="mx-auto max-w-3xl space-y-2">
-          <PromptInput onSend={() => undefined} disabled models={[]} allowAttachments={false} placeholder="このセッションには、Gasho からは入力できません" hint={false} />
-          <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <span>claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。</span>
-            {url && (
-              <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-foreground/80 hover:text-foreground">
-                公式アプリで開く <ExternalLink className="size-3" />
-              </a>
-            )}
-          </p>
-        </div>
+      <div className="pb-3">
+        <PromptInput onSend={() => undefined} disabled models={[]} allowAttachments={false} placeholder="Gasho からは入力できません" hint={false} />
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 text-xs text-muted-foreground">
+          <span>claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。</span>
+          {url && (
+            <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-foreground/80 hover:text-foreground">
+              公式アプリで開く <ExternalLink className="size-3" />
+            </a>
+          )}
+        </p>
       </div>
     );
   }
@@ -154,32 +157,30 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
   };
 
   return (
-    <div className="shrink-0 border-t border-border px-4 py-3 md:px-6">
-      <div className="mx-auto max-w-3xl space-y-1.5">
-        <PromptInput
-          onSend={async ({ text }) => {
-            setError(undefined);
-            const r = await sendCommand(machine.id, { type: "session.input", sessionId: s.sessionId, text });
-            if (!r.ok) {
-              setError(r.error);
-              throw new Error(r.error);
-            }
-          }}
-          // While Claude is working, the send button turns into a stop button (Esc also stops).
-          streaming={busy}
-          onStop={() => void stop()}
-          disabled={offline}
-          models={[]}
-          allowAttachments={false}
-          maxLength={20_000}
-          placeholder="Agent への指示を入力…"
-          safeArea
-          hint={false}
-        />
-        {(status || error) && (
-          <p className={error ? "text-xs text-red-400" : "text-xs text-muted-foreground"}>{error ?? status}</p>
-        )}
-      </div>
+    <div className="pb-3">
+      <PromptInput
+        onSend={async ({ text }) => {
+          setError(undefined);
+          const r = await sendCommand(machine.id, { type: "session.input", sessionId: s.sessionId, text });
+          if (!r.ok) {
+            setError(r.error);
+            throw new Error(r.error);
+          }
+        }}
+        // While Claude is working, the send button turns into a stop button (Esc also stops).
+        streaming={busy}
+        onStop={() => void stop()}
+        disabled={offline}
+        models={[]}
+        allowAttachments={false}
+        maxLength={20_000}
+        placeholder="Agent への指示を入力…"
+        safeArea
+        hint={false}
+      />
+      {(status || error) && (
+        <p className={error ? "px-3 text-xs text-red-400" : "px-3 text-xs text-muted-foreground"}>{error ?? status}</p>
+      )}
     </div>
   );
 }

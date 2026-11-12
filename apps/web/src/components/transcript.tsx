@@ -1,7 +1,8 @@
-// Read-only conversation view. Keeps the scroll position when older pages are prepended
-// and follows new entries only while the reader is at the bottom.
+// Conversation view. Keeps the scroll position when older pages are prepended and follows new entries
+// only while the reader is at the bottom. The footer (the chat box) floats over the bottom of the
+// conversation: it stays at the bottom of the screen, and the conversation scrolls behind it.
 import { AlertTriangle, ChevronRight, Image as ImageIcon, Wrench } from "lucide-react";
-import { useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { MarkdownText } from "@/components/markdown";
 import { clockTime } from "@/lib/format";
@@ -128,8 +129,17 @@ function EntryView({ entry }: { entry: TranscriptEntry }) {
   );
 }
 
-export function Transcript({ state, onLoadOlder }: { state: TranscriptState | undefined; onLoadOlder: () => void }) {
+export function Transcript({
+  state,
+  onLoadOlder,
+  footer,
+}: {
+  state: TranscriptState | undefined;
+  onLoadOlder: () => void;
+  footer?: ReactNode;
+}) {
   const scroller = useRef<HTMLDivElement>(null);
+  const footerBox = useRef<HTMLDivElement>(null);
   const prev = useRef<{ first?: string; count: number; height: number }>({ count: 0, height: 0 });
   const atBottom = useRef(true);
   const entries = state?.entries ?? [];
@@ -149,33 +159,56 @@ export function Transcript({ state, onLoadOlder }: { state: TranscriptState | un
     prev.current = { first, count: entries.length, height: el.scrollHeight };
   }, [entries]);
 
+  // The chat box grows with its text and status line. While at the bottom, keep the newest entry above it.
+  const hasFooter = footer !== undefined;
+  useEffect(() => {
+    const el = scroller.current;
+    const box = footerBox.current;
+    if (!el || !box) return;
+    const observer = new ResizeObserver(() => {
+      if (atBottom.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, [hasFooter]);
+
   return (
     <div
       ref={scroller}
-      className="h-full overflow-y-auto px-4 py-4 md:px-6"
+      className="h-full overflow-y-auto"
       onScroll={(e) => {
         const el = e.currentTarget;
         atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
       }}
     >
-      <div className="mx-auto flex max-w-3xl flex-col gap-4">
-        {state && state.start > 0 && (
-          <button
-            type="button"
-            onClick={onLoadOlder}
-            disabled={state.loading}
-            className="self-center rounded-full border border-border px-3 py-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-          >
-            {state.loading ? "読み込み中…" : `前の会話を読み込む（残り ${state.start} 件）`}
-          </button>
-        )}
-        {state?.error && <p className="text-center text-sm text-red-400">会話を読み込めませんでした：{state.error}</p>}
-        {!state || (state.loading && entries.length === 0) ? (
-          <p className="text-center text-sm text-muted-foreground">読み込み中…</p>
-        ) : entries.length === 0 && !state.error ? (
-          <p className="text-center text-sm text-muted-foreground">まだ会話がありません</p>
-        ) : (
-          entries.map((e, i) => <EntryView key={e.uuid || `i${state.start + i}`} entry={e} />)
+      <div className="flex min-h-full flex-col">
+        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 pt-4 pb-10 md:px-6">
+          {state && state.start > 0 && (
+            <button
+              type="button"
+              onClick={onLoadOlder}
+              disabled={state.loading}
+              className="self-center rounded-full border border-border px-3 py-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+            >
+              {state.loading ? "読み込み中…" : `前の会話を読み込む（残り ${state.start} 件）`}
+            </button>
+          )}
+          {state?.error && <p className="text-center text-sm text-red-400">会話を読み込めませんでした：{state.error}</p>}
+          {!state || (state.loading && entries.length === 0) ? (
+            <p className="text-center text-sm text-muted-foreground">読み込み中…</p>
+          ) : entries.length === 0 && !state.error ? (
+            <p className="text-center text-sm text-muted-foreground">まだ会話がありません</p>
+          ) : (
+            entries.map((e, i) => <EntryView key={e.uuid || `i${state.start + i}`} entry={e} />)
+          )}
+        </div>
+        {hasFooter && (
+          // Opaque behind the chat box, so nothing shows through it. The conversation fades out in the strip
+          // above it, which lets clicks through. The bottom padding of the list keeps the newest entry clear of it.
+          <div ref={footerBox} className="sticky bottom-0 z-10 bg-background px-4 md:px-6">
+            <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-full h-8 bg-linear-to-t from-background to-transparent" />
+            <div className="mx-auto max-w-3xl">{footer}</div>
+          </div>
         )}
       </div>
     </div>
