@@ -10,6 +10,8 @@ export interface DaemonConfig {
   hookSecret: string | undefined;
   claudeDir: string;
   claudeBin: string;
+  /** The GitHub CLI, used with its own login to list a repository's issues and pull requests. */
+  ghBin: string;
   pollIntervalMs: number;
   /** Where the daemon keeps its own files (managed sessions); next to the registration. */
   stateDir: string;
@@ -26,6 +28,7 @@ export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.
     hookSecret: env.GASHO_HOOK_SECRET || undefined,
     claudeDir: env.GASHO_CLAUDE_DIR ?? path.join(os.homedir(), ".claude"),
     claudeBin: env.GASHO_CLAUDE_BIN ?? "claude",
+    ghBin: env.GASHO_GH_BIN ?? "gh",
     pollIntervalMs: Number(env.GASHO_POLL_MS ?? 3000),
     stateDir: path.dirname(credentialsPath(env)),
     attachmentsDir: path.join(env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "gasho", "attachments"),

@@ -4,20 +4,44 @@ import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
-import { go, useRoute } from "@/lib/route";
+import { DESKTOP, useMediaQuery } from "@/lib/media";
+import { go, useRoute, type SessionPanel } from "@/lib/route";
+import { notificationShown, shownSessions } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { DevicesView } from "@/views/devices";
-import { GraphView } from "@/views/graph";
+import { GitHubListPanel } from "@/views/github-list";
+import { GraphPanel } from "@/views/graph";
 import { HomeView } from "@/views/home";
 import { PairView } from "@/views/pair";
 import { SessionView } from "@/views/session";
 
 const SEP = "\u001f";
 
+/** Gasho's logo: 🙏 (合掌, gasshō). The collapsed sidebar shows the logo alone. */
+export const LOGO = "🙏";
+
 function Brand() {
   const { collapsed } = useSidebar();
-  return <div className="px-2.5 text-base font-semibold tracking-tight">{collapsed ? "G" : "Gasho"}</div>;
+  return (
+    <div className="flex items-center gap-2 px-2.5 text-base font-semibold tracking-tight">
+      <span aria-hidden className="font-emoji text-lg leading-none">
+        {LOGO}
+      </span>
+      {!collapsed && <span>Gasho</span>}
+    </div>
+  );
+}
+
+/** A panel of a session (see SidePanel): beside it on a computer (`docked`), in its place on a phone. */
+function PanelView({ machine, sessionId, panel, docked }: { machine: string; sessionId: string; panel: SessionPanel; docked: boolean }) {
+  // Back to the session, replacing the panel in the history.
+  const close = () => go({ name: "session", machine, sessionId }, { replace: true });
+  return panel.kind === "graph" ? (
+    <GraphPanel machine={machine} sessionId={sessionId} repo={panel.repo} docked={docked} onClose={close} />
+  ) : (
+    <GitHubListPanel machine={machine} sessionId={sessionId} kind={panel.kind} repo={panel.repo} docked={docked} onClose={close} />
+  );
 }
 
 function Connection({ connected, deviceName }: { connected: boolean; deviceName?: string }) {
@@ -46,12 +70,13 @@ export function App() {
   const route = useRoute();
   const { auth, me, machines, notifications, connected } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const desktop = useMediaQuery(DESKTOP);
 
   if (auth === "checking") return <Centered>読み込み中…</Centered>;
   if (auth === "unreachable") return <Centered>Gasho サーバーにつながりません。再試行しています…</Centered>;
   if (auth === "unregistered") return <PairView />;
 
-  const unread = notifications.filter((n) => !n.read).length;
+  const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
   const sections: SidebarSection[] = [
     {
       items: [
@@ -61,7 +86,7 @@ export function App() {
     },
     ...machines.map((m) => ({
       title: m.connected ? m.name : `${m.name}（オフライン）`,
-      items: m.sessions.map((s) => ({
+      items: shownSessions(m).map((s) => ({
         id: [m.id, s.sessionId].join(SEP),
         label: sessionLabel(s),
         icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
@@ -69,7 +94,8 @@ export function App() {
       })),
     })),
   ];
-  const activeId = route.name === "session" || route.name === "graph" ? [route.machine, route.sessionId].join(SEP) : route.name;
+  const activeId = route.name === "session" ? [route.machine, route.sessionId].join(SEP) : route.name;
+  const panel = route.name === "session" ? route.panel : undefined;
 
   return (
     <div className="flex h-dvh overflow-hidden bg-background text-foreground">
@@ -89,21 +115,33 @@ export function App() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3 md:hidden">
           <SidebarTrigger onClick={() => setMobileOpen(true)} />
-          <span className="font-semibold">Gasho</span>
+          <span className="flex items-center gap-1.5 font-semibold">
+            <span aria-hidden className="font-emoji">
+              {LOGO}
+            </span>
+            Gasho
+          </span>
           {/* The connection shows in the sidebar's footer; here only while it is down. */}
           {!connected && <span className="ml-auto text-xs text-red-400">再接続中…</span>}
-          {route.name === "session" && <SessionHeaderToggle className={cn("-mr-1", connected && "ml-auto")} />}
+          {route.name === "session" && !panel && <SessionHeaderToggle className={cn("-mr-1", connected && "ml-auto")} />}
         </header>
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          {route.name === "home" && <HomeView />}
-          {route.name === "devices" && <DevicesView />}
-          {route.name === "session" && (
-            <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} />
+        <div className="flex min-h-0 flex-1">
+          <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+            {route.name === "home" && <HomeView />}
+            {route.name === "devices" && <DevicesView />}
+            {route.name === "session" && (desktop || !panel) && (
+              <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} panel={panel} />
+            )}
+            {route.name === "session" && !desktop && panel && (
+              <PanelView machine={route.machine} sessionId={route.sessionId} panel={panel} docked={false} />
+            )}
+          </main>
+          {route.name === "session" && desktop && panel && (
+            <aside className="w-[clamp(380px,40vw,620px)] shrink-0 border-l border-border bg-background">
+              <PanelView machine={route.machine} sessionId={route.sessionId} panel={panel} docked />
+            </aside>
           )}
-          {route.name === "graph" && (
-            <GraphView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} repo={route.repo} />
-          )}
-        </main>
+        </div>
       </div>
     </div>
   );

@@ -1,83 +1,85 @@
-// Branch graph of the repository a session works in: its branches and the latest commits of all of them.
-import { ArrowLeft, ChevronRight, Cloud, ExternalLink, GitBranch, RefreshCw } from "lucide-react";
+// Branch graph of the repository a session works in: its branches and the latest commits of all of them. A panel of
+// the session (see SidePanel).
+import { ChevronRight, Cloud, ExternalLink, GitBranch, RefreshCw } from "lucide-react";
 import { useEffect } from "react";
-import type { GitBranch as Branch, GitGraph, SessionRepo } from "@gasho/protocol";
+import type { GitBranch as Branch, GitGraph } from "@gasho/protocol";
 import { CommitGraph } from "@/components/commit-graph";
-import { githubTreeUrl, sessionLabel } from "@/lib/format";
+import { PANEL_BUTTON, panelRepo, RepoTabs, SidePanel } from "@/components/side-panel";
+import { githubTreeUrl } from "@/lib/format";
 import { useFlag } from "@/lib/flag";
 import { go } from "@/lib/route";
 import { graphKey, loadGraph, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 
-export function GraphView({ machine, sessionId, repo }: { machine: string; sessionId: string; repo?: string }) {
+export function GraphPanel({
+  machine,
+  sessionId,
+  repo,
+  docked,
+  onClose,
+}: {
+  machine: string;
+  sessionId: string;
+  repo?: string;
+  docked: boolean;
+  onClose: () => void;
+}) {
   const { machines, graphs } = useAppState();
   const now = useNow(60_000);
   const m = machines.find((x) => x.id === machine);
   const s = m?.sessions.find((x) => x.sessionId === sessionId);
   // In a folder that holds repositories, show the one picked in the tabs (the first one by default).
-  const repos = s?.repos;
-  const selected = repos ? (repos.find((r) => r.path === repo) ?? repos[0])?.path : undefined;
-  const g = graphs[graphKey(machine, sessionId, selected)];
+  const { repos, selected } = s ? panelRepo(s, repo) : {};
+  const g = graphs[graphKey(machine, sessionId, selected?.path)];
   const graph = g?.graph;
 
   useEffect(() => {
-    if (m?.connected) loadGraph(machine, sessionId, selected);
-  }, [machine, sessionId, selected, m?.connected]);
-
-  const back = (
-    <button
-      type="button"
-      onClick={() => go({ name: "session", machine, sessionId })}
-      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-    >
-      <ArrowLeft className="size-3.5" />
-      セッションに戻る
-    </button>
-  );
+    if (m?.connected) loadGraph(machine, sessionId, selected?.path);
+  }, [machine, sessionId, selected?.path, m?.connected]);
 
   if (!m || !s) {
     return (
-      <div className="mx-auto max-w-3xl p-6 text-sm text-muted-foreground">
-        {back}
-        <p className="mt-4">このセッションは見つかりません。終了したか、{m?.name ?? "この working server"} の gasho-daemon が接続していません。</p>
-      </div>
+      <SidePanel title="ブランチグラフ" docked={docked} onClose={onClose}>
+        <p className="text-sm text-muted-foreground">このセッションは見つかりません。終了したか、{m?.name ?? "この working server"} の gasho-daemon が接続していません。</p>
+      </SidePanel>
     );
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-5 px-4 py-4 md:px-6">
-      <header className="space-y-2">
-        {back}
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h1 className="text-lg font-semibold tracking-tight">ブランチグラフ</h1>
-            <p className="truncate text-xs text-muted-foreground">
-              {sessionLabel(s)} · {m.name} · {graph?.root ?? s.cwd}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {graph?.github && (
-              <a
-                href={graph.github.url}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-xs hover:border-border-hover"
-              >
-                GitHub で開く <ExternalLink className="size-3.5" />
-              </a>
-            )}
-            <button
-              type="button"
-              onClick={() => loadGraph(machine, sessionId, selected)}
-              disabled={g?.loading || !m.connected}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-xs hover:border-border-hover disabled:opacity-50"
-            >
-              <RefreshCw className={cn("size-3.5", g?.loading && "animate-spin")} />
-              再読み込み
-            </button>
-          </div>
-        </div>
+    <SidePanel
+      title="ブランチグラフ"
+      subtitle={graph?.root ?? s.cwd}
+      docked={docked}
+      onClose={onClose}
+      actions={
+        <>
+          {graph?.github && (
+            <a href={graph.github.url} target="_blank" rel="noreferrer" className={PANEL_BUTTON}>
+              GitHub <ExternalLink className="size-3.5" />
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={() => loadGraph(machine, sessionId, selected?.path)}
+            disabled={g?.loading || !m.connected}
+            aria-label="再読み込み"
+            title="再読み込み"
+            className={PANEL_BUTTON}
+          >
+            <RefreshCw className={cn("size-3.5", g?.loading && "animate-spin")} />
+          </button>
+        </>
+      }
+    >
+      {repos && repos.length >= 2 && selected && (
+        <RepoTabs
+          repos={repos}
+          selected={selected.path}
+          onSelect={(path) => go({ name: "session", machine, sessionId, panel: { kind: "graph", repo: path } }, { replace: true })}
+        />
+      )}
+      <div className="space-y-5">
         {graph && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1">
@@ -88,63 +90,27 @@ export function GraphView({ machine, sessionId, repo }: { machine: string; sessi
             {g?.at && <span>{new Date(g.at).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })} に読み込み</span>}
           </div>
         )}
-      </header>
-
-      {repos && repos.length >= 2 && selected && (
-        <RepoTabs
-          repos={repos}
-          selected={selected}
-          onSelect={(path) => go({ name: "graph", machine, sessionId, repo: path }, { replace: true })}
-        />
-      )}
-
-      {!m.connected && <p className="text-sm text-muted-foreground">{m.name} はオフラインです。</p>}
-      {g?.error && <p className="text-sm text-red-400">{g.error}</p>}
-      {!graph && g?.loading && <p className="text-sm text-muted-foreground">読み込み中…</p>}
-
-      {graph && (
-        <>
-          <BranchList graph={graph} />
-          <section className="space-y-2">
-            <h2 className="text-sm font-medium">コミット</h2>
-            {graph.commits.length === 0 ? (
-              <p className="text-sm text-muted-foreground">コミットはまだありません。</p>
-            ) : (
-              <div className="overflow-hidden rounded-xl border border-border py-1">
-                <CommitGraph graph={graph} now={now} />
-              </div>
-            )}
-            {graph.truncated && <p className="text-xs text-muted-foreground">新しいものから {graph.commits.length} 件を表示しています。</p>}
-          </section>
-        </>
-      )}
-    </div>
-  );
-}
-
-/** One tab per repository inside the session's folder; the commit graph and the branches follow the tab. */
-function RepoTabs({ repos, selected, onSelect }: { repos: SessionRepo[]; selected: string; onSelect: (path: string) => void }) {
-  return (
-    <div role="tablist" aria-label="リポジトリ" className="scrollbar-none -mx-4 flex gap-1 overflow-x-auto border-b border-border px-4 md:-mx-6 md:px-6">
-      {repos.map((r) => {
-        const on = r.path === selected;
-        return (
-          <button
-            key={r.path}
-            type="button"
-            role="tab"
-            aria-selected={on}
-            onClick={() => onSelect(r.path)}
-            className={cn(
-              "-mb-px shrink-0 border-b-2 px-3 py-2 text-sm whitespace-nowrap transition-colors",
-              on ? "border-foreground text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
-            )}
-          >
-            {r.path}
-          </button>
-        );
-      })}
-    </div>
+        {!m.connected && <p className="text-sm text-muted-foreground">{m.name} はオフラインです。</p>}
+        {g?.error && <p className="text-sm text-red-400">{g.error}</p>}
+        {!graph && g?.loading && <p className="text-sm text-muted-foreground">読み込み中…</p>}
+        {graph && (
+          <>
+            <BranchList graph={graph} />
+            <section className="space-y-2">
+              <h3 className="text-sm font-medium">コミット</h3>
+              {graph.commits.length === 0 ? (
+                <p className="text-sm text-muted-foreground">コミットはまだありません。</p>
+              ) : (
+                <div className="overflow-hidden rounded-xl border border-border py-1">
+                  <CommitGraph graph={graph} now={now} />
+                </div>
+              )}
+              {graph.truncated && <p className="text-xs text-muted-foreground">新しいものから {graph.commits.length} 件を表示しています。</p>}
+            </section>
+          </>
+        )}
+      </div>
+    </SidePanel>
   );
 }
 
@@ -177,7 +143,7 @@ function BranchList({ graph }: { graph: GitGraph }) {
 
   return (
     <section className="space-y-2">
-      <h2>
+      <h3>
         <button
           type="button"
           onClick={() => setOpen(!open)}
@@ -187,7 +153,7 @@ function BranchList({ graph }: { graph: GitGraph }) {
           <ChevronRight className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-90")} />
           ブランチ（{branches.length}）
         </button>
-      </h2>
+      </h3>
       {open && (
         <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border">
           {branches.map((b) => (

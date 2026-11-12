@@ -18,6 +18,7 @@ import type {
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
+import { ghError, listGitHub } from "./github.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
@@ -56,7 +57,7 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.6.0";
+export const DAEMON_VERSION = "0.7.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -543,6 +544,8 @@ export class Daemon {
         return this.sendTranscriptPage(m);
       case "git.graph.get":
         return this.sendGitGraph(m);
+      case "github.list.get":
+        return this.sendGitHubList(m);
       case "session.launch":
       case "session.input":
       case "session.interrupt": {
@@ -584,24 +587,27 @@ export class Daemon {
     }
   }
 
-  /** Branches and history of the repository the session works in. Only for sessions this daemon tracks. */
+  /**
+   * The folder of a session's repository: its own folder, or `repo` inside it. Only sessions this daemon tracks, and
+   * only a repository it found inside the folder, never a path the browser made up.
+   */
+  private async repoDir(sessionId: string, repo: string | undefined): Promise<{ dir: string } | { error: string }> {
+    const t = this.tracked.get(sessionId);
+    if (!t) return { error: "このセッションは見つかりません。" };
+    if (repo === undefined) return { dir: t.info.cwd };
+    const found = (await this.reposOf(t.info.cwd))?.find((r) => r.path === repo);
+    return found ? { dir: path.join(t.info.cwd, found.path) } : { error: "このリポジトリは見つかりません。" };
+  }
+
+  /** Branches and history of the repository the session works in. */
   private async sendGitGraph(m: Extract<HubToDaemon, { type: "git.graph.get" }>): Promise<void> {
     const reply = { type: "git.graph" as const, requestId: m.requestId, sessionId: m.sessionId, repo: m.repo };
-    const t = this.tracked.get(m.sessionId);
-    if (!t) {
-      this.hub.send({ ...reply, error: "このセッションは見つかりません。" });
+    const where = await this.repoDir(m.sessionId, m.repo);
+    if ("error" in where) {
+      this.hub.send({ ...reply, error: where.error });
       return;
     }
-    let dir = t.info.cwd;
-    if (m.repo !== undefined) {
-      // Only a repository this daemon found inside the session's folder; never a path the browser made up.
-      const repo = (await this.reposOf(t.info.cwd))?.find((r) => r.path === m.repo);
-      if (!repo) {
-        this.hub.send({ ...reply, error: "このリポジトリは見つかりません。" });
-        return;
-      }
-      dir = path.join(t.info.cwd, repo.path);
-    }
+    const dir = where.dir;
     try {
       const [graph, github] = await Promise.all([readGitGraph(dir), this.githubOf(dir)]);
       this.hub.send({ ...reply, graph: github ? { ...graph, github } : graph });
@@ -611,6 +617,27 @@ export class Daemon {
         ? "このフォルダーは Git のリポジトリではありません。"
         : `Git の情報を読めませんでした：${text.split("\n")[0]}`;
       this.hub.send({ ...reply, error });
+    }
+  }
+
+  /** The open issues or pull requests of the GitHub repository the session works in, read with `gh`. */
+  private async sendGitHubList(m: Extract<HubToDaemon, { type: "github.list.get" }>): Promise<void> {
+    const reply = { type: "github.list" as const, requestId: m.requestId, sessionId: m.sessionId, repo: m.repo, kind: m.kind };
+    const where = await this.repoDir(m.sessionId, m.repo);
+    if ("error" in where) {
+      this.hub.send({ ...reply, error: where.error });
+      return;
+    }
+    const github = await this.githubOf(where.dir);
+    if (!github) {
+      this.hub.send({ ...reply, error: "このリポジトリは GitHub にありません（origin が GitHub のリポジトリではありません）。" });
+      return;
+    }
+    try {
+      this.hub.send({ ...reply, list: await listGitHub(this.cfg.ghBin, github, m.kind) });
+    } catch (e) {
+      log(`gh could not list ${m.kind} of ${github.owner}/${github.name}`, e);
+      this.hub.send({ ...reply, error: ghError(e) });
     }
   }
 

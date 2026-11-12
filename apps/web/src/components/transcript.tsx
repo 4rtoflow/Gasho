@@ -3,7 +3,7 @@
 // conversation: it stays at the bottom of the screen, and the conversation scrolls behind it, blurred.
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AlertTriangle, ArrowDown, ChevronRight, Image as ImageIcon, Paperclip, Wrench } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { MarkdownText } from "@/components/markdown";
 import { clockTime } from "@/lib/format";
@@ -32,22 +32,62 @@ function pretty(input: string): string {
 /** The blur behind the chat box starts 2.5rem above it and is at full strength 1rem into it. */
 const BLUR_MASK = "linear-gradient(to bottom, transparent, black 3.5rem)";
 
-function Fold({ summary, children, tone }: { summary: React.ReactNode; children: React.ReactNode; tone?: "error" }) {
+type ToolResult = Extract<TranscriptBlock, { type: "tool_result" }>;
+
+/**
+ * The results of the tool calls in the loaded part of the conversation, by the id of the call. A result is shown
+ * inside its call's fold; one whose call is not loaded (an older page) is shown on its own.
+ */
+const ToolResults = createContext<{ of: (id: string | undefined) => ToolResult | undefined; called: (id: string | undefined) => boolean }>({
+  of: () => undefined,
+  called: () => false,
+});
+
+/** A fold of the conversation (a tool call), closed by default. Its parts are labelled, each scrolls on its own. */
+function Fold({ summary, parts }: { summary: ReactNode; parts: { label: string; text: string; tone?: "error" }[] }) {
   return (
     <details className="group rounded-lg border border-border/60 bg-surface/60 text-xs">
-      <summary
-        className={cn(
-          "flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden",
-          tone === "error" && "text-red-400 hover:text-red-300",
-        )}
-      >
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
         <ChevronRight className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
         {summary}
       </summary>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all border-t border-border/60 px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/80">
-        {children}
-      </pre>
+      {parts.map((p) => (
+        <div key={p.label} className="border-t border-border/60">
+          <div className={cn("px-3 pt-2 text-[10.5px] text-muted-foreground", p.tone === "error" && "text-red-400")}>{p.label}</div>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all px-3 pt-1 pb-2 font-mono text-[11px] leading-relaxed text-foreground/80">
+            {p.text}
+          </pre>
+        </div>
+      ))}
     </details>
+  );
+}
+
+/** What a result says about itself in a fold: "結果（1,234 文字）" or "エラー（…）". */
+function resultLabel(r: ToolResult): string {
+  return `${r.isError ? "エラー" : "結果"}（${r.content.length.toLocaleString()} 文字）`;
+}
+
+/** A tool call and, once it has come, its result, in one fold. */
+function ToolFold({ block }: { block: Extract<TranscriptBlock, { type: "tool_use" }> }) {
+  const result = useContext(ToolResults).of(block.id);
+  return (
+    <Fold
+      summary={
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <Wrench className={cn("size-3.5 shrink-0", result?.isError && "text-red-400")} />
+          <span className="shrink-0 font-mono font-medium text-foreground/90">{block.name}</span>
+          <span className="truncate font-mono">{block.summary ?? toolSummary(block.input)}</span>
+          {result?.isError && <span className="ml-auto shrink-0 text-red-400">エラー</span>}
+        </span>
+      }
+      parts={[
+        { label: "入力", text: pretty(block.input) },
+        result
+          ? { label: resultLabel(result), text: result.content || "（出力なし）", ...(result.isError ? { tone: "error" as const } : {}) }
+          : { label: "結果", text: "（まだありません）" },
+      ]}
+    />
   );
 }
 
@@ -88,32 +128,10 @@ function BlockView({ block, markdown = false }: { block: TranscriptBlock; markdo
     case "text":
       return markdown ? <MarkdownText text={block.text} /> : <UserText text={block.text} />;
     case "tool_use":
-      return (
-        <Fold
-          summary={
-            <span className="flex min-w-0 items-center gap-2">
-              <Wrench className="size-3.5 shrink-0" />
-              <span className="shrink-0 font-mono font-medium text-foreground/90">{block.name}</span>
-              <span className="truncate font-mono">{block.summary ?? toolSummary(block.input)}</span>
-            </span>
-          }
-        >
-          {pretty(block.input)}
-        </Fold>
-      );
+      return <ToolFold block={block} />;
     case "tool_result":
-      return (
-        <Fold
-          tone={block.isError ? "error" : undefined}
-          summary={
-            <span>
-              {block.isError ? "エラー" : "結果"}（{block.content.length.toLocaleString()} 文字）
-            </span>
-          }
-        >
-          {block.content || "（出力なし）"}
-        </Fold>
-      );
+      // Shown inside its call's fold; on its own only while the call is not loaded.
+      return <OrphanResult block={block} />;
     case "image":
       return (
         <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
@@ -124,7 +142,25 @@ function BlockView({ block, markdown = false }: { block: TranscriptBlock; markdo
   }
 }
 
+/** A result whose call is not in the loaded part of the conversation, in the same kind of fold as a call. */
+function OrphanResult({ block }: { block: ToolResult }) {
+  const results = useContext(ToolResults);
+  if (results.called(block.toolUseId)) return null;
+  return (
+    <Fold
+      summary={
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <Wrench className={cn("size-3.5 shrink-0", block.isError && "text-red-400")} />
+          <span className={cn("truncate", block.isError && "text-red-400")}>{resultLabel(block)}</span>
+        </span>
+      }
+      parts={[{ label: resultLabel(block), text: block.content || "（出力なし）", ...(block.isError ? { tone: "error" as const } : {}) }]}
+    />
+  );
+}
+
 function EntryView({ entry }: { entry: TranscriptEntry }) {
+  const results = useContext(ToolResults);
   const time = clockTime(entry.ts);
   if (entry.interrupted) {
     return (
@@ -138,6 +174,8 @@ function EntryView({ entry }: { entry: TranscriptEntry }) {
     return <div className="text-xs italic text-muted-foreground">{entry.blocks.map((b, i) => <BlockView key={i} block={b} />)}</div>;
   }
   const onlyResults = entry.blocks.every((b) => b.type === "tool_result");
+  // Results that are all shown inside their calls' folds leave nothing to show here.
+  if (onlyResults && entry.blocks.every((b) => b.type === "tool_result" && results.called(b.toolUseId))) return null;
   if (entry.role === "user" && !onlyResults) {
     return (
       <div className="flex justify-end">
@@ -176,6 +214,20 @@ export function Transcript({
   const prev = useRef<{ first?: string; count: number; height: number }>({ count: 0, height: 0 });
   const atBottom = useRef(true);
   const entries = state?.entries ?? [];
+  const toolResults = useMemo(() => {
+    const calls = new Set<string>();
+    const results = new Map<string, ToolResult>();
+    for (const e of entries) {
+      for (const b of e.blocks) {
+        if (b.type === "tool_use" && b.id) calls.add(b.id);
+        else if (b.type === "tool_result" && b.toolUseId) results.set(b.toolUseId, b);
+      }
+    }
+    return {
+      of: (id: string | undefined) => (id ? results.get(id) : undefined),
+      called: (id: string | undefined) => Boolean(id && calls.has(id)),
+    };
+  }, [entries]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -233,7 +285,11 @@ export function Transcript({
           ) : entries.length === 0 && !state.error ? (
             <p className="text-center text-sm text-muted-foreground">まだ会話がありません</p>
           ) : (
-            entries.map((e, i) => <EntryView key={e.uuid || `i${state.start + i}`} entry={e} />)
+            <ToolResults.Provider value={toolResults}>
+              {entries.map((e, i) => (
+                <EntryView key={e.uuid || `i${state.start + i}`} entry={e} />
+              ))}
+            </ToolResults.Provider>
           )}
         </div>
         {hasFooter && (

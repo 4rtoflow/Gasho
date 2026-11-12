@@ -6,6 +6,7 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { NotificationStack, type NotificationItem } from "@/components/ui/notification-stack";
 import { branchLabel, claudeUrl, relativeTime, repoLabel, sessionLabel, waitingLabel } from "@/lib/format";
 import { go } from "@/lib/route";
+import { notificationShown, shownSessions } from "@/lib/sessions";
 import { markRead, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { LaunchPanel } from "@/views/launch";
@@ -40,12 +41,12 @@ export function HomeView() {
   const rows = useMemo<Row[]>(
     () =>
       machines.flatMap((m) =>
-        m.sessions.map((s) => ({ id: `${m.id}/${s.sessionId}`, machine: m.id, machineName: m.name, online: m.connected, s })),
+        shownSessions(m).map((s) => ({ id: `${m.id}/${s.sessionId}`, machine: m.id, machineName: m.name, online: m.connected, s })),
       ),
     [machines],
   );
   const waiting = rows.filter((r) => r.online && r.s.status === "waiting");
-  const unread = notifications.filter((n) => !n.read);
+  const unread = notifications.filter((n) => !n.read && notificationShown(n, machines));
 
   const columns = useMemo<DataTableColumn<Row>[]>(
     () => [
@@ -59,14 +60,7 @@ export function HomeView() {
           const branch = branchLabel(r.s);
           return (
             <div className="min-w-0">
-              <div className="flex min-w-0 items-center gap-1.5">
-                <span className="truncate font-medium">{sessionLabel(r.s)}</span>
-                {r.s.managed && (
-                  <span className="shrink-0 rounded border border-emerald-500/40 px-1 text-[10px] text-emerald-400" title="Gasho が起動したセッション。Gasho から入力できます">
-                    入力可
-                  </span>
-                )}
-              </div>
+              <div className="truncate font-medium">{sessionLabel(r.s)}</div>
               <div className="truncate text-xs text-neutral-500">
                 {repoLabel(r.s)}
                 {branch && ` · ${branch}`}
@@ -186,7 +180,7 @@ export function HomeView() {
             cardBreakpoint={560}
             pageSize={50}
             ariaLabel="セッション一覧"
-            emptyState={<p className="text-sm text-neutral-500">セッションはまだありません。gasho-daemon が接続するとここに出ます。</p>}
+            emptyState={<p className="text-sm text-neutral-500">Gasho から起動したセッションはまだありません。「新しいセッション」から起動できます。</p>}
           />
         </section>
         <aside>

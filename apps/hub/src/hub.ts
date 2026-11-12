@@ -5,6 +5,7 @@ import type {
   CommandResult,
   DaemonToHub,
   DeviceInfo,
+  GitHubListKind,
   HubToClient,
   HubToDaemon,
   InputFeature,
@@ -30,18 +31,23 @@ export const CLOSE_INVALID_CREDENTIALS = 4001;
 export const CLOSE_REPLACED = 4002;
 export const CLOSE_UNAUTHORIZED = 4401;
 
-/** A browser's request that a working server answers: a transcript page or a branch graph. */
+/** A browser's request that a working server answers: a transcript page, a branch graph or a GitHub list. */
 interface PendingRequest {
-  kind: "transcript" | "graph";
+  kind: "transcript" | "graph" | "github";
   client: ClientPeer;
   machine: string;
   sessionId: string;
-  /** graph: the repository inside the session's folder, if one was asked for. */
+  /** graph, github: the repository inside the session's folder, if one was asked for. */
   repo?: string;
+  /** github: issues or pull requests. */
+  list?: GitHubListKind;
   timer: NodeJS.Timeout;
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/** gasho-daemon asks GitHub with `gh`, which can take a while. */
+const GITHUB_TIMEOUT_MS = 25_000;
+const GITHUB_LISTS = new Set<GitHubListKind>(["issues", "pulls"]);
 const LAUNCH_TIMEOUT_MS = 45_000;
 /**
  * An input may wait for Claude Code to switch the model, the effort level and ultracode before it is typed, each
@@ -208,11 +214,21 @@ export class Hub {
         req.client.send({ type: "git.graph", machine: id, sessionId: msg.sessionId, repo: req.repo, graph: msg.graph, error: msg.error });
         break;
       }
+      case "github.list": {
+        const req = this.pending.get(msg.requestId);
+        if (!req || req.kind !== "github" || !req.list) break;
+        clearTimeout(req.timer);
+        this.pending.delete(msg.requestId);
+        req.client.send({ type: "github.list", machine: id, sessionId: req.sessionId, repo: req.repo, kind: req.list, list: msg.list, error: msg.error });
+        break;
+      }
       case "hook": {
         const event: MachineHookEvent = { ...msg.event, machine: id };
         this.store.addEvent(event);
         this.broadcast({ type: "event", event });
         const session = m.sessions.find((s) => s.sessionId === event.sessionId);
+        // Gasho shows only the sessions it started; one known to be started elsewhere gets no notification.
+        if (session && !session.managed) break;
         const n = notificationFor(id, event, session, randomUUID());
         if (n) {
           this.store.addNotification(n);
@@ -287,6 +303,27 @@ export class Hub {
         }, REQUEST_TIMEOUT_MS).unref();
         this.pending.set(requestId, { kind: "graph", client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
         daemon.send({ type: "git.graph.get", requestId, sessionId: msg.sessionId, repo });
+        break;
+      }
+      case "github.list.get": {
+        const daemon = this.daemons.get(msg.machine);
+        const repo = msg.repo;
+        if (!GITHUB_LISTS.has(msg.kind)) return;
+        const reply = { type: "github.list" as const, machine: msg.machine, sessionId: msg.sessionId, repo, kind: msg.kind };
+        if (repo !== undefined && (typeof repo !== "string" || repo.length === 0 || repo.length > 500)) {
+          peer.send({ ...reply, error: "リポジトリの指定が正しくありません。" });
+          return;
+        }
+        if (!daemon) {
+          peer.send({ ...reply, error: "この working server はオフラインです。" });
+          return;
+        }
+        const requestId = randomUUID();
+        const timer = setTimeout(() => {
+          if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
+        }, GITHUB_TIMEOUT_MS).unref();
+        this.pending.set(requestId, { kind: "github", list: msg.kind, client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
+        daemon.send({ type: "github.list.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind });
         break;
       }
       case "notification.read":
@@ -434,7 +471,9 @@ export class Hub {
       clearTimeout(req.timer);
       this.pending.delete(id);
       if (req.kind === "graph") req.client.send({ type: "git.graph", machine: req.machine, sessionId: req.sessionId, repo: req.repo, error });
-      else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
+      else if (req.kind === "github" && req.list) {
+        req.client.send({ type: "github.list", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, error });
+      } else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
     }
   }
 

@@ -36,6 +36,7 @@ const session: SessionInfo = {
   status: "idle",
   rcMode: "server",
   prLinks: [],
+  managed: true,
 };
 
 test("a daemon with a wrong token, or with a browser's id, is closed", () => {
@@ -385,4 +386,39 @@ test("a gasho-daemon that does not list its features gets no effort or ultracode
   assert.deepEqual(legacyFeatures("0.4.0"), []);
   assert.deepEqual(legacyFeatures(undefined), []);
   assert.deepEqual(legacyFeatures("1.0.0"), ["model", "files"]);
+});
+
+test("a session started elsewhere gets no notification; one not known yet still does", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.7.0" });
+  hub.onDaemonMessage(d, { type: "sessions", sessions: [{ ...session, sessionId: "rc", managed: false }] });
+  hub.onDaemonMessage(d, { type: "hook", event: { sessionId: "rc", event: "Stop", at: 1000 } });
+  assert.equal(c.sent.filter((m) => m.type === "notification").length, 0);
+  hub.onDaemonMessage(d, { type: "hook", event: { sessionId: "new", event: "Stop", at: 1001 } });
+  assert.equal(c.sent.filter((m) => m.type === "notification").length, 1);
+});
+
+test("a GitHub list goes to the daemon and its answer back to the browser that asked", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.7.0" });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  hub.onClientMessage(c, { type: "github.list.get", machine: machineId, sessionId: "s1", kind: "pulls" });
+  const asked = d.sent.at(-1);
+  assert.ok(asked?.type === "github.list.get" && asked.kind === "pulls");
+  const repo = { owner: "4rtoflow", name: "Gasho", url: "https://github.com/4rtoflow/Gasho" };
+  hub.onDaemonMessage(d, { type: "github.list", requestId: asked.requestId, sessionId: "s1", kind: "pulls", list: { repo, kind: "pulls", items: [], truncated: false } });
+  const got = c.sent.at(-1);
+  assert.ok(got?.type === "github.list" && got.kind === "pulls" && got.list?.repo.name === "Gasho" && got.machine === machineId);
+  // An unknown kind is ignored; a bad repo is refused.
+  const before = d.sent.length;
+  hub.onClientMessage(c, { type: "github.list.get", machine: machineId, sessionId: "s1", kind: "wiki" as never });
+  hub.onClientMessage(c, { type: "github.list.get", machine: machineId, sessionId: "s1", kind: "issues", repo: "" });
+  assert.equal(d.sent.length, before);
+  const refused = c.sent.at(-1);
+  assert.ok(refused?.type === "github.list" && refused.error);
 });

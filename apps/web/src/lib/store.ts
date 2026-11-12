@@ -6,6 +6,8 @@ import type {
   DeviceInfo,
   GashoNotification,
   GitGraph,
+  GitHubList,
+  GitHubListKind,
   HubToClient,
   MachineHookEvent,
   MachineInfo,
@@ -35,6 +37,15 @@ export interface GraphState {
   at?: number;
 }
 
+/** The open issues or pull requests of a session's GitHub repository. */
+export interface GitHubListState {
+  loading: boolean;
+  list?: GitHubList;
+  error?: string;
+  /** When the list was read. */
+  at?: number;
+}
+
 export type AuthState = "checking" | "registered" | "unregistered" | "unreachable";
 
 export interface State {
@@ -47,6 +58,8 @@ export interface State {
   transcripts: Record<string, TranscriptState>;
   /** Keyed by graphKey(machine, sessionId, repo). */
   graphs: Record<string, GraphState>;
+  /** Keyed by githubKey(machine, sessionId, kind, repo). */
+  githubLists: Record<string, GitHubListState>;
 }
 
 const PAGE_SIZE = 80;
@@ -56,8 +69,11 @@ const MAX_NOTIFICATIONS = 200;
 export const transcriptKey = (machine: string, sessionId: string): string => `${machine}\u0000${sessionId}`;
 /** A branch graph per session and, in a folder of several repositories, per repository. */
 export const graphKey = (machine: string, sessionId: string, repo?: string): string => `${machine}\u0000${sessionId}\u0000${repo ?? ""}`;
+/** A GitHub list per session, kind and, in a folder of several repositories, per repository. */
+export const githubKey = (machine: string, sessionId: string, kind: GitHubListKind, repo?: string): string =>
+  `${machine}\u0000${sessionId}\u0000${kind}\u0000${repo ?? ""}`;
 
-const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {} };
+const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {}, githubLists: {} };
 let state: State = { auth: "checking", ...EMPTY };
 const listeners = new Set<() => void>();
 
@@ -72,6 +88,10 @@ function setTranscript(key: string, t: TranscriptState): void {
 
 function setGraph(key: string, g: GraphState): void {
   update({ graphs: { ...state.graphs, [key]: g } });
+}
+
+function setGitHubList(key: string, g: GitHubListState): void {
+  update({ githubLists: { ...state.githubLists, [key]: g } });
 }
 
 let socket: WebSocket | undefined;
@@ -119,6 +139,12 @@ function connect(): void {
     for (const [key, g] of Object.entries(state.graphs)) {
       const [machine, sessionId, repo] = key.split("\u0000");
       if (g.loading && machine && sessionId) send({ type: "git.graph.get", machine, sessionId, repo: repo || undefined });
+    }
+    for (const [key, g] of Object.entries(state.githubLists)) {
+      const [machine, sessionId, kind, repo] = key.split("\u0000");
+      if (g.loading && machine && sessionId && (kind === "issues" || kind === "pulls")) {
+        send({ type: "github.list.get", machine, sessionId, kind, repo: repo || undefined });
+      }
     }
   };
   ws.onmessage = (ev) => {
@@ -192,7 +218,8 @@ function handle(m: HubToClient): void {
       const prefix = transcriptKey(m.id, "");
       const transcripts = Object.fromEntries(Object.entries(state.transcripts).filter(([k]) => !k.startsWith(prefix)));
       const graphs = Object.fromEntries(Object.entries(state.graphs).filter(([k]) => !k.startsWith(prefix)));
-      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs });
+      const githubLists = Object.fromEntries(Object.entries(state.githubLists).filter(([k]) => !k.startsWith(prefix)));
+      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs, githubLists });
       break;
     }
     case "transcript.page": {
@@ -246,6 +273,13 @@ function handle(m: HubToClient): void {
       setGraph(key, m.graph ? { loading: false, graph: m.graph, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
       break;
     }
+    case "github.list": {
+      const key = githubKey(m.machine, m.sessionId, m.kind, m.repo);
+      const cur = state.githubLists[key];
+      // On an error, keep showing the list read before, with the error.
+      setGitHubList(key, m.list ? { loading: false, list: m.list, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
+      break;
+    }
   }
 }
 
@@ -260,6 +294,19 @@ export function loadGraph(machine: string, sessionId: string, repo?: string): vo
   }
   setGraph(key, { ...cur, loading: true, error: undefined });
   send({ type: "git.graph.get", machine, sessionId, repo });
+}
+
+/** Reads the open issues or pull requests of the session's GitHub repository (or of `repo` inside its folder) again. */
+export function loadGitHubList(machine: string, sessionId: string, kind: GitHubListKind, repo?: string): void {
+  const key = githubKey(machine, sessionId, kind, repo);
+  const cur = state.githubLists[key];
+  if (cur?.loading) return;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    setGitHubList(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
+    return;
+  }
+  setGitHubList(key, { ...cur, loading: true, error: undefined });
+  send({ type: "github.list.get", machine, sessionId, kind, repo });
 }
 
 function requestPage(machine: string, sessionId: string, before: number | undefined): void {

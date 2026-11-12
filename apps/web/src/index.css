@@ -148,6 +148,10 @@
     @apply font-sans;
     }
 }
+/* An emoji drawn with the device's color emoji font (the logo, 🙏), not the text font. */
+@utility font-emoji {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
 /* Scrolls without showing a scrollbar (the commit rows of the branch graph). */
 @utility scrollbar-none {
   scrollbar-width: none;

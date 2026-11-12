@@ -1,6 +1,7 @@
 // The commit graph of a repository: one row per commit, newest first, with its lane lines drawn in SVG.
 // Nothing is cut short: the branch names and the subject of each row stay on one line in full, and each row
 // scrolls sideways on its own, without a scrollbar. Its right edge fades out to show that there is more.
+// The columns follow the width of the panel it is in (a container query), not the screen's.
 import { Cloud, Tag } from "lucide-react";
 import { useMemo } from "react";
 import type { GitCommit, GitGraph, GitHubRepo, GitRef } from "@gasho/protocol";
@@ -41,18 +42,18 @@ export function CommitGraph({ graph, now }: { graph: GitGraph; now: number }) {
               <div className="flex w-max items-center gap-1.5 pr-6 pl-1">
                 <Refs commit={c} head={isHead} headBranch={graph.head} upstreams={upstreams} />
                 <span className="whitespace-nowrap">{c.subject}</span>
-                {/* On narrow screens the author and the commit number follow the subject instead of having columns. */}
-                <span className="whitespace-nowrap pl-2 text-xs text-muted-foreground lg:hidden">{c.author}</span>
-                <ShortHash hash={c.hash} github={graph.github} className="sm:hidden" />
+                {/* In a narrow panel the author and the commit number follow the subject instead of having columns. */}
+                <span className="whitespace-nowrap pl-2 text-xs text-muted-foreground @3xl:hidden">{c.author}</span>
+                <ShortHash hash={c.hash} github={graph.github} className="@md:hidden" />
               </div>
             </div>
-            <span className="hidden w-32 shrink-0 truncate pl-3 text-xs text-muted-foreground lg:block" title={c.author}>
+            <span className="hidden w-32 shrink-0 truncate pl-3 text-xs text-muted-foreground @3xl:block" title={c.author}>
               {c.author}
             </span>
             <span className="w-16 shrink-0 text-right text-xs text-muted-foreground" title={new Date(c.at).toLocaleString("ja-JP")}>
               {relativeTime(c.at, now)}
             </span>
-            <span className="hidden w-16 shrink-0 text-right sm:block">
+            <span className="hidden w-16 shrink-0 text-right @md:block">
               <ShortHash hash={c.hash} github={graph.github} />
             </span>
           </li>

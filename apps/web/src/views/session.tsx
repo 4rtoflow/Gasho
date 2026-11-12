@@ -1,5 +1,5 @@
-import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowLeft, CircleDot, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { EffortLevel, InputFeature, MachineInfo, SessionInfo, SessionModel } from "@gasho/protocol";
 import { RepoPicker } from "@/components/repo-picker";
 import { EffortPicker, UltracodeToggle } from "@/components/session-controls";
@@ -17,32 +17,44 @@ import {
   sessionLabel,
   waitingLabel,
 } from "@/lib/format";
-import { go } from "@/lib/route";
-import { useSessionHeaderShown } from "@/lib/session-header";
+import { go, type SessionPanel } from "@/lib/route";
+import { closeSessionHeaderOnPhone, useSessionHeaderShown } from "@/lib/session-header";
+import { daemonAtLeast } from "@/lib/sessions";
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 
-export function SessionView({ machine, sessionId }: { machine: string; sessionId: string }) {
+/** `panel`: the panel open beside the session (a computer), if any; its link in the header shows as open. */
+export function SessionView({ machine, sessionId, panel }: { machine: string; sessionId: string; panel?: SessionPanel }) {
   const { machines, transcripts } = useAppState();
   const now = useNow();
   const headerShown = useSessionHeaderShown();
   const m = machines.find((x) => x.id === machine);
   const s = m?.sessions.find((x) => x.sessionId === sessionId);
   const t = transcripts[transcriptKey(machine, sessionId)];
+  // Gasho shows only the sessions it started.
+  const shown = s?.managed === true;
 
   useEffect(() => {
-    if (m?.connected) loadTranscript(machine, sessionId);
-  }, [machine, sessionId, m?.connected]);
+    if (m?.connected && shown) loadTranscript(machine, sessionId);
+  }, [machine, sessionId, m?.connected, shown]);
+  useEffect(() => closeSessionHeaderOnPhone(), [machine, sessionId]);
 
-  if (!m || !s) {
+  if (!m || !s || !shown) {
     return (
       <div className="mx-auto max-w-3xl p-6 text-sm text-muted-foreground">
         <BackLink />
-        <p className="mt-4">このセッションは見つかりません。終了したか、{m?.name ?? "この working server"} の gasho-daemon が接続していません。</p>
+        <p className="mt-4">
+          {s
+            ? "このセッションは Gasho から起動したものではないので、表示しません。"
+            : `このセッションは見つかりません。終了したか、${m?.name ?? "この working server"} の gasho-daemon が接続していません。`}
+        </p>
       </div>
     );
   }
+
+  // Opens a panel beside the session (in its place on a phone); one already open is swapped, not stacked in the history.
+  const open = (p: SessionPanel) => go({ name: "session", machine, sessionId, panel: p }, { replace: panel !== undefined });
 
   const url = claudeUrl(s);
   const cost = formatCost(s.costUSD);
@@ -91,9 +103,10 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
                   <GitBranch className="size-3.5" />
                   <button
                     type="button"
-                    onClick={() => go({ name: "graph", machine, sessionId })}
+                    onClick={() => open({ kind: "graph" })}
                     title="ブランチグラフを開き、リポジトリを切り替えて見る"
-                    className="underline-offset-2 hover:text-foreground hover:underline"
+                    aria-pressed={panel?.kind === "graph"}
+                    className={cn("underline-offset-2 hover:text-foreground hover:underline", panel?.kind === "graph" && "text-foreground")}
                   >
                     ブランチ…
                   </button>
@@ -111,9 +124,10 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
                 <GitBranch className="size-3.5" />
                 <button
                   type="button"
-                  onClick={() => go({ name: "graph", machine, sessionId, ...(only ? { repo: only.path } : {}) })}
+                  onClick={() => open({ kind: "graph", ...(only ? { repo: only.path } : {}) })}
                   title="ブランチグラフを開く"
-                  className="underline-offset-2 hover:text-foreground hover:underline"
+                  aria-pressed={panel?.kind === "graph"}
+                  className={cn("underline-offset-2 hover:text-foreground hover:underline", panel?.kind === "graph" && "text-foreground")}
                 >
                   {branch}
                 </button>
@@ -130,6 +144,27 @@ export function SessionView({ machine, sessionId }: { machine: string; sessionId
                   </a>
                 )}
               </span>
+            )}
+            {/* gasho-daemon 0.7 reads the issues and pull requests. */}
+            {(github || several?.some((r) => r.github)) && daemonAtLeast(m, 0, 7) && (
+              <>
+                <PanelLink
+                  icon={<CircleDot className="size-3.5" />}
+                  open={panel?.kind === "issues"}
+                  title="このリポジトリの Issue を開く"
+                  onClick={() => open({ kind: "issues", ...(only ? { repo: only.path } : {}) })}
+                >
+                  Issues
+                </PanelLink>
+                <PanelLink
+                  icon={<GitPullRequest className="size-3.5" />}
+                  open={panel?.kind === "pulls"}
+                  title="このリポジトリの Pull request を開く"
+                  onClick={() => open({ kind: "pulls", ...(only ? { repo: only.path } : {}) })}
+                >
+                  Pull requests
+                </PanelLink>
+              </>
             )}
             {s.prLinks.map((p) => (
               <a
@@ -398,6 +433,34 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
         </p>
       )}
     </div>
+  );
+}
+
+/** A text in the session's header that opens one of its panels. */
+function PanelLink({
+  icon,
+  open,
+  title,
+  onClick,
+  children,
+}: {
+  icon: ReactNode;
+  open: boolean;
+  title: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={open}
+      className={cn("inline-flex items-center gap-1 underline-offset-2 hover:text-foreground hover:underline", open && "text-foreground")}
+    >
+      {icon}
+      {children}
+    </button>
   );
 }
 

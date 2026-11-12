@@ -215,6 +215,35 @@ export interface GitGraph {
   github?: GitHubRepo;
 }
 
+/** Which list of a GitHub repository: its issues or its pull requests. */
+export type GitHubListKind = "issues" | "pulls";
+
+/** An open issue or pull request of the GitHub repository a session works in. */
+export interface GitHubItem {
+  number: number;
+  title: string;
+  url: string;
+  author?: string;
+  /** ISO 8601 */
+  createdAt: string;
+  updatedAt: string;
+  labels: { name: string; color?: string }[];
+  /** Pull requests: a draft, its branch and the branch it goes into, and the review's state. */
+  draft?: boolean;
+  head?: string;
+  base?: string;
+  review?: "approved" | "changes_requested" | "review_required";
+}
+
+/** The open issues or pull requests of a repository, newest first, as gasho-daemon read them with `gh`. */
+export interface GitHubList {
+  repo: GitHubRepo;
+  kind: GitHubListKind;
+  items: GitHubItem[];
+  /** More are open than were sent. */
+  truncated: boolean;
+}
+
 /** A page of transcript entries. `start` is the index of entries[0]; `total` counts all entries. */
 export interface TranscriptPage {
   entries: TranscriptEntry[];
@@ -239,13 +268,23 @@ export type DaemonToHub =
       features?: InputFeature[];
     }
   | { type: "command.result"; requestId: string; result: CommandResult }
-  | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string };
+  | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
+  | {
+      type: "github.list";
+      requestId: string;
+      sessionId: string;
+      repo?: string;
+      kind: GitHubListKind;
+      list?: GitHubList;
+      error?: string;
+    };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
   | { type: "welcome" }
   | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number }
   | { type: "git.graph.get"; requestId: string; sessionId: string; repo?: string }
+  | { type: "github.list.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind }
   | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
@@ -264,13 +303,24 @@ export type HubToClient =
   | { type: "notification.read"; ids: string[] }
   | { type: "event"; event: MachineHookEvent }
   | { type: "command.result"; requestId: string; machine: string; result: CommandResult }
-  | { type: "git.graph"; machine: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string };
+  | { type: "git.graph"; machine: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
+  | {
+      type: "github.list";
+      machine: string;
+      sessionId: string;
+      repo?: string;
+      kind: GitHubListKind;
+      list?: GitHubList;
+      error?: string;
+    };
 
 // browser -> gasho-hub
 export type ClientToHub =
   | { type: "transcript.get"; machine: string; sessionId: string; before?: number; limit: number }
   /** `repo`: one of the session's `repos` (its path); omitted for the repository of the session's folder. */
   | { type: "git.graph.get"; machine: string; sessionId: string; repo?: string }
+  /** The open issues or pull requests of the session's GitHub repository (or of `repo` inside its folder). */
+  | { type: "github.list.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind }
   | { type: "notification.read"; ids: string[] }
   | ({ requestId: string; machine: string } & SessionCommand);
 
