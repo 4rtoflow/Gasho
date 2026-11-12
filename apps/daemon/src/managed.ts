@@ -130,6 +130,21 @@ export function switchQuestion(screen: string): { onYes: boolean; aboutCache: bo
   };
 }
 
+/**
+ * The model in Claude Code's welcome banner, drawn when it starts and before the first message is recorded:
+ * " ▐▛███▛█   Claude Code v2.1.322" / "▝▜██████▀  Sonnet 5.5 · Claude Ultra" / " ▝▝   ▝▝   ~/repos/app". Undefined when the
+ * banner is not on the screen.
+ */
+export function bannerModel(screen: string): string | undefined {
+  const lines = screen.split("\n");
+  const at = lines.findIndex((l) => /Claude Code v\d/.test(l));
+  if (at < 0) return undefined;
+  // The logo is drawn with block elements (U+2580–U+259F).
+  const rest = (lines[at + 1] ?? "").replace(/^[\s\u2580-\u259f]+/, "");
+  const name = /^(.+?)\s+·\s/.exec(rest)?.[1]?.trim();
+  return name && name.length <= 40 && /\d/.test(name) ? name : undefined;
+}
+
 /** Whether the output of the latest /model on the screen says the model was switched for this session only. */
 export function switchedForSession(screen: string): boolean {
   const flat = screen.replace(/\s+/g, " ");

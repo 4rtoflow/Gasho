@@ -23,6 +23,7 @@ import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
   atBottom,
+  bannerModel,
   cleanEnv,
   clearPromptKeys,
   dialogOpen,
@@ -94,6 +95,8 @@ interface Tracked {
   meta: TranscriptMeta;
   /** The transcript did not exist yet when the session was first seen (Claude Code writes it on the first message). */
   sawWithoutTranscript?: boolean;
+  /** Sessions started from Gasho: the model in Claude Code's welcome banner, until the transcript records one. */
+  bannerModel?: string;
 }
 
 /** What happened to the switches asked for with an input (`id`: the request of the input that was handled). */
@@ -322,7 +325,7 @@ export class Daemon {
     info.prLinks = meta.prLinks;
     info.costUSD = meta.costUSD;
     info.lastActivityAt = meta.lastActivityAt;
-    info.model = meta.model;
+    info.model = meta.model ?? t.bannerModel;
     info.effort = meta.effort;
     info.ultracode = meta.ultracode;
   }
@@ -433,6 +436,11 @@ export class Daemon {
       }
       const ultracode = promptRuleUltracode(screen);
       if (ultracode !== undefined) t.info.ultracode = ultracode;
+      // Before the first message, the transcript does not say which model the session uses; the banner does.
+      if (!t.meta.model) {
+        const banner = bannerModel(screen);
+        if (banner) t.bannerModel = t.info.model = banner;
+      }
       await this.closeProbePicker(m, screen);
     }
     const stale = !this.models || Date.now() - this.models.at > MODELS_MAX_AGE_MS;

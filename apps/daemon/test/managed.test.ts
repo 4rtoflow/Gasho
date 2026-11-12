@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   atBottom,
+  bannerModel,
   cleanEnv,
   clearPromptKeys,
   dialogOpen,
@@ -431,4 +432,14 @@ test("the question is judged by its own lines: \"hook\" in the conversation abov
     aboutCache: true,
   });
   assert.deepEqual(switchQuestion(question("● はい", "A PreModelSwitch hook asked you to confirm")), { onYes: true, aboutCache: false });
+});
+
+test("the model in Claude Code's welcome banner is read before the transcript has one", () => {
+  const banner = (second: string) =>
+    ["", " ▐▛███▛█   Claude Code v2.1.322", second, " ▝▝   ▝▝   ~/repos/Bobert", "", "  /remote-control is active · Continue here, on"].join("\n");
+  assert.equal(bannerModel(banner("▝▜██████▀  Sonnet 5.5 · Claude Ultra")), "Sonnet 5.5");
+  assert.equal(bannerModel(banner("▝▜██████▀  Opus 4.6 (1M context) · API Usage Billing")), "Opus 4.6 (1M context)");
+  // Not the banner's model line, or no banner at all.
+  assert.equal(bannerModel(banner("▝▜██████▀  ~/repos/Bobert")), undefined);
+  assert.equal(bannerModel(screenWith("❯ ")), undefined);
 });

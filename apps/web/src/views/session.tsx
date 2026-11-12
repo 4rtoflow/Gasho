@@ -216,7 +216,7 @@ const MODELS: { id: SessionModel; name: string; description: string }[] = [
 
 /**
  * The first option when the session's model is not one of the picker's: a model the picker does not list by that
- * name (say "Opus 4.6"), or a model not known yet (no reply so far). Picking it switches nothing.
+ * name (say "Opus 4.6"). Picking it switches nothing.
  */
 const KEEP_MODEL = "keep";
 /**
@@ -242,7 +242,7 @@ function legacyFeatures(daemonVersion: string | undefined): InputFeature[] {
  */
 function modelOptions(
   machine: MachineInfo,
-  current: SessionModel | typeof KEEP_MODEL,
+  current: SessionModel | typeof KEEP_MODEL | undefined,
   label: string | undefined,
   picked?: SessionModel,
 ): PromptModel[] {
@@ -266,12 +266,8 @@ function modelOptions(
       return { id: m.id, name: shown, description, ...(m.id === current ? { badge: "いま" } : {}) };
     },
   );
-  if (current === KEEP_MODEL) {
-    options.unshift(
-      label
-        ? { id: KEEP_MODEL, name: label, description: "このセッションがいま使っているモデル", badge: "いま" }
-        : { id: KEEP_MODEL, name: "モデル（未確認）", description: "最初の返答のあとで分かります。選び直さなければ、そのまま送ります" },
-    );
+  if (current === KEEP_MODEL && label) {
+    options.unshift({ id: KEEP_MODEL, name: label, description: "このセッションがいま使っているモデル", badge: "いま" });
   }
   return options;
 }
@@ -281,11 +277,12 @@ const MAX_FILES_BYTES = 10 * 1024 * 1024;
 /**
  * Which of the picker's models the session uses, from Claude Code's name for it: "Sonnet 5.5 (default)" (its name
  * after picking the default) is the default, and other names must equal a name the picker gives ("Opus 5.5"). A
- * session on a model the picker does not list ("Opus 4.6"), or whose model is not known yet, is KEEP_MODEL. Without
- * the picker's names, the family ("opus") is the best guess.
+ * session on a model the picker does not list ("Opus 4.6") is KEEP_MODEL. Without the picker's names, the family
+ * ("opus") is the best guess. Undefined while not known: gasho-daemon reads it from Claude Code's welcome banner
+ * soon after the session starts, so this is brief; the default is shown meanwhile.
  */
-function currentModel(machine: MachineInfo, label: string | undefined): SessionModel | typeof KEEP_MODEL {
-  if (!label) return KEEP_MODEL;
+function currentModel(machine: MachineInfo, label: string | undefined): SessionModel | typeof KEEP_MODEL | undefined {
+  if (!label) return undefined;
   if (/\(default\)/i.test(label)) return "default";
   const name = label.replace(/\s*\(.*\)\s*$/, "").trim().toLowerCase();
   if (machine.models) {
@@ -332,7 +329,7 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
           onSend={() => undefined}
           disabled
           models={modelOptions(machine, current, s.model)}
-          model={current}
+          model={current ?? "default"}
           placeholder="Gasho からは入力できません"
           hint={false}
         />
@@ -408,7 +405,7 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
         onStop={() => void stop()}
         disabled={offline}
         models={features.includes("model") ? modelOptions(machine, current, s.model, picked) : []}
-        model={picked ?? current}
+        model={picked ?? current ?? "default"}
         onModelChange={(id) => setPicked(id === KEEP_MODEL ? undefined : (id as SessionModel))}
         actions={
           <>
