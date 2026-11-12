@@ -1,7 +1,7 @@
 // Reads Claude Code transcripts (~/.claude/projects/<dir>/<sessionId>.jsonl).
 // The format is internal to Claude Code, so unknown records are ignored rather than rejected.
 import fs from "node:fs/promises";
-import type { PrLink, TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
+import type { EffortLevel, PrLink, TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { clip, inputSummary, str } from "./util.ts";
 
 const MAX_TEXT = 4000;
@@ -15,6 +15,10 @@ const COMMAND_OUTPUT_RE = /^\s*<local-command-(stdout|stderr)>([\s\S]*?)<\/local
 /** Text pasted into Claude Code (as Gasho sends it) is recorded inside this tag. */
 const PASTED_RE = /<pasted_content(?:\s[^>]*)?>\n?([\s\S]*?)\n?<\/pasted_content(?:\s[^>]*)?>/g;
 const MODEL_SET_RE = /Set model to `?([^`\n]+?)`?(?: and saved| for this session|$)/;
+/** "Set effort level to high", "… with `medium` effort", "Effort stays high." */
+const EFFORT_SET_RE = /(?:Set effort level to|Effort stays|with) `?(low|medium|high|xhigh|max)`?/i;
+const ULTRACODE_RE = /^Ultracode (on|off)\b/i;
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 /** "claude-opus-5-5" → "Opus 5.5". Other names are returned as they are. */
 export function modelLabel(id: string): string {
@@ -35,6 +39,11 @@ function commandNote(content: string, meta: TranscriptMeta): string | undefined 
   const text = (output[2] ?? "").trim();
   const model = MODEL_SET_RE.exec(text)?.[1];
   if (model) meta.model = model.trim();
+  if (model && /for this session only/.test(text)) meta.sessionSwitches = (meta.sessionSwitches ?? 0) + 1;
+  const effort = EFFORT_SET_RE.exec(text)?.[1]?.toLowerCase();
+  if (effort) meta.effort = effort as EffortLevel;
+  const ultracode = ULTRACODE_RE.exec(text)?.[1]?.toLowerCase();
+  if (ultracode) meta.ultracode = ultracode === "on";
   return text;
 }
 
@@ -53,6 +62,11 @@ export interface TranscriptMeta {
   lastActivityAt?: number;
   /** "Opus 5.5": the model of the latest reply or model switch. */
   model?: string;
+  /** The effort level of the latest reply or effort change, and ultracode after /effort ultracode on|off. */
+  effort?: EffortLevel;
+  ultracode?: boolean;
+  /** How many times the transcript says the model was switched for this session only. */
+  sessionSwitches?: number;
 }
 
 export function emptyMeta(): TranscriptMeta {
@@ -144,6 +158,8 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
   const content = message?.content;
   if (role === "assistant" && !isSidechain && typeof message?.model === "string" && !message.model.startsWith("<")) {
     meta.model = modelLabel(message.model);
+    // Each reply records the effort level it was made with.
+    if (typeof rec.effort === "string" && EFFORTS.has(rec.effort)) meta.effort = rec.effort as EffortLevel;
   }
   if (role === "user" && typeof content === "string") {
     // Slash commands (such as /model) and their output are shown as notes, not as something the user said.

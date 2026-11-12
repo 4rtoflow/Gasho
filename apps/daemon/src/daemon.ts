@@ -2,35 +2,60 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { CommandResult, GitHubRepo, HubToDaemon, InputFile, SessionInfo, SessionModel, SessionRepo } from "@gasho/protocol";
+import type {
+  CommandResult,
+  EffortLevel,
+  GitHubRepo,
+  HubToDaemon,
+  InputFeature,
+  InputFile,
+  ModelOption,
+  SessionInfo,
+  SessionModel,
+  SessionRepo,
+  SwitchField,
+} from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
 import {
+  atBottom,
   cleanEnv,
+  clearPromptKeys,
+  dialogOpen,
+  EFFORT_LEVELS,
   isAlive,
   launchableFolders,
   launchArgs,
   ManagedSessions,
-  PERMISSION_PROMPT_RE,
-  SURVEY_RE,
-  TRUST_PROMPT_RE,
-  clearPromptKeys,
+  type ManagedSession,
   modelPickerOptions,
+  PERMISSION_PROMPT_RE,
+  pickerCatalog,
+  pickerEffort,
   pickerMatches,
+  type PickerOption,
   promptBoxLines,
   promptHolds,
+  promptRuleUltracode,
+  refusedCommand,
   safeFileName,
+  type Screen,
+  statusLine,
+  SURVEY_RE,
+  switchedForSession,
+  switchQuestion,
+  TRUST_PROMPT_RE,
+  typedInBox,
   Zellij,
   zellijSessionName,
-  type PickerOption,
 } from "./managed.ts";
 import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.5.0";
+export const DAEMON_VERSION = "0.6.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -39,7 +64,24 @@ const LAUNCH_TIMEOUT_MS = 30_000;
 const MAX_INPUT = 20_000;
 const INTERRUPT_SETTLE_MS = 1500;
 const MODEL_NAMES: Record<SessionModel, string> = { default: "既定のモデル", opus: "Opus", fable: "Fable", sonnet: "Sonnet", haiku: "Haiku" };
+const EFFORT_NAMES: Record<EffortLevel, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "xHigh", max: "Max" };
+/** What this gasho-daemon can switch or carry with an input (MachineInfo.features). */
+const INPUT_FEATURES: readonly InputFeature[] = ["model", "effort", "ultracode", "files"];
+/** How long the prompt box may take to let go of a text after Enter (see typeInput). */
+const ENTER_WAIT_MS = 8000;
+/** When it did not, how long to wait before looking at the box again. */
+const UNSURE_RETRY_MS = 20_000;
+/** When nothing could be typed, how long to wait before trying again. */
+const RETRY_MS = 5000;
+/** How long to watch for a /model picker that Claude Code may still open (see closeLatePicker). */
+const LATE_PICKER_WAIT_MS = 10_000;
+/** A session is used to read the model names only once it has run this long (Claude Code has finished starting). */
+const PROBE_MIN_AGE_MS = 30_000;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** How long the model names read from the /model picker are trusted before an idle session is asked again. */
+const MODELS_MAX_AGE_MS = 24 * 3600_000;
+/** At most one look at the /model picker just to read the model names, per this interval. */
+const MODELS_PROBE_INTERVAL_MS = 10 * 60_000;
 
 interface Tracked {
   info: SessionInfo;
@@ -49,6 +91,15 @@ interface Tracked {
   /** The transcript did not exist yet when the session was first seen (Claude Code writes it on the first message). */
   sawWithoutTranscript?: boolean;
 }
+
+/** What happened to the switches asked for with an input. */
+interface InputOutcome {
+  warnings: string[];
+  unapplied: SwitchField[];
+}
+
+/** See Daemon.typeInput. */
+type TypeResult = "sent" | "not-typed" | "unsure";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -70,6 +121,10 @@ export class Daemon {
   private flushing = new Set<string>();
   /** Until when input must wait after an interrupt, so Claude Code has put the stopped prompt back first. */
   private settleUntil = new Map<string, number>();
+  /** The models as Claude Code's /model picker names them on this machine, and when they were read. */
+  private models: { at: number; options: ModelOption[] } | undefined;
+  /** No look at the /model picker just for the model names before this time. */
+  private nextModelsProbe = 0;
 
   constructor(cfg: DaemonConfig) {
     this.cfg = cfg;
@@ -100,6 +155,10 @@ export class Daemon {
     const live = this.canLaunch ? await this.zellij.liveSessions() : new Set<string>();
     await this.managed.load(async (m) => isAlive(m.pid) && live.has(m.zellijSession));
     await this.pruneAttachments();
+    this.models = await fsp
+      .readFile(this.modelsFile(), "utf8")
+      .then((t) => JSON.parse(t) as { at: number; options: ModelOption[] })
+      .catch(() => undefined);
     await this.refreshFolders();
     setInterval(() => void this.refreshFolders(), FOLDERS_REFRESH_MS).unref();
 
@@ -154,8 +213,13 @@ export class Daemon {
         if (!seen.has(id)) this.tracked.delete(id);
       }
       await this.forgetEndedSessions(seen);
+      await this.readManagedScreens();
       this.emitSessions();
-      for (const m of this.managed.all()) if (this.managed.pending(m.sessionId) > 0) void this.flushInput(m.sessionId);
+      for (const m of this.managed.all()) {
+        if (this.managed.pending(m.sessionId) === 0) continue;
+        // A failure leaves the input on the queue for the next try.
+        void this.flushInput(m.sessionId).catch((e) => log(`could not send the waiting input to ${m.name}`, e));
+      }
     } catch (e) {
       log("refresh failed", e);
     } finally {
@@ -235,6 +299,8 @@ export class Daemon {
     info.costUSD = meta.costUSD;
     info.lastActivityAt = meta.lastActivityAt;
     info.model = meta.model;
+    info.effort = meta.effort;
+    info.ultracode = meta.ultracode;
   }
 
   private async githubOf(cwd: string): Promise<GitHubRepo | undefined> {
@@ -278,7 +344,111 @@ export class Daemon {
   }
 
   private emitCapabilities(): void {
-    if (this.hub.connected) this.hub.send({ type: "capabilities", canLaunch: this.canLaunch, folders: this.folders });
+    if (!this.hub.connected) return;
+    this.hub.send({
+      type: "capabilities",
+      canLaunch: this.canLaunch,
+      folders: this.folders,
+      models: this.models?.options,
+      modelsAt: this.models?.at,
+      features: [...INPUT_FEATURES],
+    });
+  }
+
+  private modelsFile(): string {
+    return path.join(this.cfg.stateDir, "models.json");
+  }
+
+  /**
+   * Keeps the model names read from a /model picker on screen, and tells the Gasho server. A list with fewer models
+   * than a recent one is not taken (part of the picker may have been cut off). Returns whether the names were taken.
+   */
+  private async rememberModels(screen: string): Promise<boolean> {
+    const options = pickerCatalog(modelPickerOptions(screen));
+    if (options.length === 0) return false;
+    const kept = this.models;
+    if (kept && Date.now() - kept.at < MODELS_MAX_AGE_MS && options.length < kept.options.length) return false;
+    this.models = { at: Date.now(), options };
+    await fsp.writeFile(this.modelsFile(), `${JSON.stringify(this.models)}\n`, { mode: 0o600 }).catch(() => undefined);
+    this.emitCapabilities();
+    return true;
+  }
+
+  /** The name of a model for messages: the picker's name with its version when known ("Opus 5.5"). */
+  private modelName(model: SessionModel): string {
+    if (model === "default") return MODEL_NAMES.default;
+    return this.models?.options.find((o) => o.id === model)?.name ?? MODEL_NAMES[model];
+  }
+
+  /**
+   * Whether the session already uses the model asked for: its name ("Opus 5.5") is the one the picker gives for that
+   * model. A session on another version ("Opus 4.6") is switched. "default" always switches: the session's name does
+   * not say whether it follows the default.
+   */
+  private sameModel(current: string | undefined, model: SessionModel): boolean {
+    if (model === "default" || !current) return false;
+    const name = this.models?.options.find((o) => o.id === model)?.name;
+    return name !== undefined && name.toLowerCase() === current.replace(/\s*\(default\)\s*$/i, "").toLowerCase();
+  }
+
+  /**
+   * Sessions started from Gasho: reads the effort level and ultracode shown above the prompt box. When the model
+   * names are unknown or old, one idle session's /model picker is opened and closed again (Esc) to read them.
+   */
+  private async readManagedScreens(): Promise<void> {
+    for (const m of this.managed.all()) {
+      const t = this.tracked.get(m.sessionId);
+      if (!t || this.flushing.has(m.sessionId)) continue;
+      // What the screen shows now wins over the transcript: the line above the prompt box ("◐ medium · ultracode ·
+      // /effort", shown for a while after a change) and the "ultracode" in the rule above the box (while it is on).
+      const screen = (await this.zellij.screen(m.zellijSession).catch(() => undefined))?.plain ?? "";
+      const state = statusLine(screen);
+      if (state) {
+        t.info.effort = state.effort;
+        t.info.ultracode = state.ultracode;
+      }
+      const ultracode = promptRuleUltracode(screen);
+      if (ultracode !== undefined) t.info.ultracode = ultracode;
+    }
+    const stale = !this.models || Date.now() - this.models.at > MODELS_MAX_AGE_MS;
+    if (!stale || Date.now() < this.nextModelsProbe) return;
+    // The newest session that has been running for a while: its conversation is the shortest, so the /model note
+    // disturbs the least, and its Claude Code has finished starting.
+    const idle = this.managed
+      .all()
+      .sort((a, b) => b.launchedAt - a.launchedAt)
+      .find(
+        (m) =>
+          Date.now() - m.launchedAt > PROBE_MIN_AGE_MS &&
+          this.tracked.get(m.sessionId)?.info.status === "idle" &&
+          this.managed.pending(m.sessionId) === 0 &&
+          !this.flushing.has(m.sessionId),
+      );
+    if (idle) await this.probeModelsIn(idle);
+  }
+
+  /**
+   * Reads the model names in a session's /model picker (opened and closed again); nothing else types meanwhile. Not
+   * while someone is typing in the session's terminal (their text would be erased). After a failure, the next try
+   * waits as long as the names are trusted: a picker that could not be read once is likely to stay so.
+   */
+  private async probeModelsIn(m: ManagedSession): Promise<void> {
+    if (this.flushing.has(m.sessionId)) return;
+    this.flushing.add(m.sessionId);
+    this.nextModelsProbe = Date.now() + MODELS_PROBE_INTERVAL_MS;
+    try {
+      if ((await this.currentStatus(m.pid)) !== "idle") return;
+      if (typedInBox(await this.zellij.screen(m.zellijSession)) !== "") return;
+      if (!(await this.probeModels(m.zellijSession))) {
+        this.nextModelsProbe = Date.now() + MODELS_MAX_AGE_MS;
+        log(`could not read the model names in ${m.name}; trying again in a day`);
+      }
+    } catch (e) {
+      this.nextModelsProbe = Date.now() + MODELS_MAX_AGE_MS;
+      log(`could not read the model names in ${m.name}`, e);
+    } finally {
+      this.flushing.delete(m.sessionId);
+    }
   }
 
   private async pollTails(): Promise<void> {
@@ -312,7 +482,7 @@ export class Daemon {
         let result: CommandResult;
         try {
           if (m.type === "session.launch") result = await this.launch(m.cwd, m.name);
-          else if (m.type === "session.input") result = await this.input(m.sessionId, m.text, m.model, m.files);
+          else if (m.type === "session.input") result = await this.input(m);
           else result = await this.interrupt(m.sessionId);
         } catch (e) {
           log(`${m.type} failed`, e);
@@ -400,7 +570,8 @@ export class Daemon {
       await sleep(500);
       pid ??= Number((await fsp.readFile(pidFile, "utf8").catch(() => "")).trim()) || undefined;
       if (!pid) continue;
-      const screen = await this.zellij.screen(zellijSession).catch(() => "");
+      // A new session has no conversation yet, so the whole screen can be searched.
+      const screen = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain ?? "";
       if (TRUST_PROMPT_RE.test(screen)) {
         await this.zellij.kill(zellijSession);
         return {
@@ -423,24 +594,42 @@ export class Daemon {
     return { ok: false, error: "Claude Code を起動できませんでした（時間内にセッションを確認できませんでした）。" };
   }
 
-  private async input(sessionId: string, text: string, model?: SessionModel, files?: InputFile[]): Promise<CommandResult> {
+  private async input(m: Extract<HubToDaemon, { type: "session.input" }>): Promise<CommandResult> {
+    const { sessionId, text, model, effort, ultracode, files } = m;
     if (!this.managed.has(sessionId)) {
       return { ok: false, error: "このセッションには Gasho から入力できません。入力できるのは、Gasho が起動したセッションだけです。" };
     }
     const body = text.trim();
     if (!body && !files?.length) return { ok: false, error: "入力が空です。" };
     if (body.length > MAX_INPUT) return { ok: false, error: `入力が長すぎます（${MAX_INPUT} 文字まで）。` };
+    const refused = refusedCommand(body);
+    if (refused) return { ok: false, error: refused };
     let message = body;
     if (files?.length) {
       // Claude Code reads the files mentioned as @path when the message is sent.
       const paths = await this.saveAttachments(sessionId, files);
       message = [body, paths.map((p) => `@${p}`).join("\n")].filter(Boolean).join("\n\n");
     }
-    this.managed.enqueue(sessionId, { text: message, ...(model ? { model } : {}) });
-    const warning = await this.flushInput(sessionId);
+    this.managed.enqueue(sessionId, {
+      text: message,
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+      ...(ultracode !== undefined ? { ultracode } : {}),
+    });
+    let outcome: InputOutcome | undefined;
+    let failed: string | undefined;
+    try {
+      outcome = await this.flushInput(sessionId);
+    } catch (e) {
+      // The input is back on the queue and is sent later: saying that it failed would invite sending it again.
+      log(`could not send the input to ${sessionId} yet`, e);
+      failed = "Claude Code の画面を操作できませんでした。入力は待たせてあり、あとで送ります。";
+    }
     const queued = this.managed.pending(sessionId) > 0;
     this.emitSessions();
-    return { ok: true, queued, ...(warning ? { warning } : {}) };
+    const warning = [...(outcome?.warnings ?? []), failed].filter(Boolean).join(" ");
+    const unapplied = [...new Set(outcome?.unapplied ?? [])];
+    return { ok: true, queued, ...(warning ? { warning } : {}), ...(unapplied.length > 0 ? { unapplied } : {}) };
   }
 
   private attachmentsOf(sessionId: string): string {
@@ -476,10 +665,11 @@ export class Daemon {
   }
 
   /**
-   * Types the next waiting input if the session is idle and no dialog is open. One message per idle period.
-   * Returns a warning when the input was sent but its model could not be switched.
+   * Types the next waiting input if the session is idle and no dialog is open. One message per idle period. Returns
+   * what happened to the switches asked for with it (undefined when nothing was tried). Throws when a /model picker
+   * cannot be closed; the input is then back on the queue.
    */
-  private async flushInput(sessionId: string): Promise<string | undefined> {
+  private async flushInput(sessionId: string): Promise<InputOutcome | undefined> {
     if (this.flushing.has(sessionId)) return;
     this.flushing.add(sessionId);
     try {
@@ -492,108 +682,299 @@ export class Daemon {
       }
       this.settleUntil.delete(sessionId);
       if ((await this.currentStatus(m.pid)) !== "idle") return;
-      const screen = await this.zellij.screen(m.zellijSession).catch(() => "");
-      if (PERMISSION_PROMPT_RE.test(screen) || TRUST_PROMPT_RE.test(screen)) return;
+      const screen = (await this.zellij.screen(m.zellijSession)).plain;
+      if (atBottom(screen, PERMISSION_PROMPT_RE) || atBottom(screen, TRUST_PROMPT_RE)) return;
+      // A /model picker (or its question) still open, e.g. from an Enter that Claude Code took late: close it first.
+      // Esc changes nothing there.
+      if (modelPickerOptions(screen).length > 0 || switchQuestion(screen)) await this.closePicker(m.zellijSession);
       const item = this.managed.next(sessionId);
       if (item === undefined) return;
-      let warning: string | undefined;
+      const out: InputOutcome = { warnings: [], unapplied: [] };
+      let typed: TypeResult;
       try {
-        if (item.model && !sameModel(this.tracked.get(sessionId)?.info.model, item.model)) {
-          warning = await this.switchModel(m.zellijSession, item.model);
+        if (!item.entered) {
+          const t = this.tracked.get(sessionId);
+          const model = item.model && !this.sameModel(t?.info.model, item.model) ? item.model : undefined;
+          const effort = item.effort && item.effort !== t?.info.effort ? item.effort : undefined;
+          if (model || effort) await this.switchModel(m.zellijSession, model, effort, t, out);
+          if (item.ultracode !== undefined && item.ultracode !== t?.info.ultracode) {
+            await this.setUltracode(m.zellijSession, item.ultracode, out);
+          }
         }
-        if (!(await this.typeInput(m.zellijSession, item.text))) {
-          // The model (if any) is switched already; only the text waits for the next try.
-          this.managed.unshift(sessionId, { text: item.text });
-          log(`could not type into ${m.name}; trying again later`);
-          this.emitSessions();
-          return warning ?? "入力欄に入れられませんでした。少ししてから送り直します。";
-        }
+        typed = await this.typeInput(m.zellijSession, item.text, item.entered);
       } catch (e) {
         this.managed.unshift(sessionId, item);
         throw e;
       }
+      if (typed === "not-typed") {
+        // Model, effort and ultracode are switched already; only the text waits for the next try.
+        this.managed.unshift(sessionId, { text: item.text });
+        this.settleUntil.set(sessionId, Date.now() + RETRY_MS);
+        this.scheduleRefresh(RETRY_MS + 100);
+        log(`could not type into ${m.name}; trying again later`);
+        out.warnings.push("入力欄に入れられませんでした。少ししてから送り直します。");
+      } else if (typed === "unsure") {
+        // Enter was pressed, but the box still held the text: Claude Code may take it late. It is never typed again;
+        // a later look presses Enter only if the box still holds it.
+        this.managed.unshift(sessionId, { text: item.text, entered: true });
+        this.settleUntil.set(sessionId, Date.now() + UNSURE_RETRY_MS);
+        this.scheduleRefresh(UNSURE_RETRY_MS + 100);
+        log(`${m.name} has not taken the input yet; looking again in ${UNSURE_RETRY_MS / 1000}s`);
+        out.warnings.push(`送ったことを画面で確かめられませんでした。${UNSURE_RETRY_MS / 1000} 秒後に入力欄を見て、まだ残っていれば送ります。`);
+      } else {
+        this.scheduleRefresh(500);
+      }
       this.emitSessions();
-      this.scheduleRefresh(500);
-      return warning;
+      return out;
     } finally {
       this.flushing.delete(sessionId);
     }
   }
 
   /**
-   * Types `text` into Claude Code's prompt box and sends it, checking each step on the screen: a feedback survey is
-   * dismissed ("0"), the box is emptied (Claude Code may have put a stopped prompt back), the text must be in the
-   * box before Enter, and the box must be empty after it. Tries three times; false when the text could not be sent.
-   * When the screen shows no prompt box at all, it pastes and presses Enter without checking.
+   * Types `text` into Claude Code's prompt box and presses Enter once, checking each step on the screen:
+   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; a feedback survey is
+   *   dismissed ("0");
+   * - the box is emptied first (Claude Code may have put a stopped prompt back);
+   * - the text must be in the box before Enter, and the box must let go of it after Enter.
+   * Enter is never pressed twice for one paste: if Claude Code takes an Enter late, a second one could land in what
+   * the first one opened (Enter in the /model picker saves the default model for every session). With `entered`
+   * (an earlier call returned "unsure"), nothing is typed: Enter is pressed again only if the box still holds the text.
+   * Returns "sent", "not-typed" (nothing was sent; try again later), or "unsure" (Enter was pressed, but the box
+   * still holds the text).
    */
-  private async typeInput(session: string, text: string): Promise<boolean> {
-    const screen = () => this.zellij.screen(session).catch(() => "");
-    const waitScreen = async (done: (s: string) => boolean, ms: number): Promise<boolean> => {
+  private async typeInput(session: string, text: string, entered = false): Promise<TypeResult> {
+    const look = () => this.zellij.screen(session).catch(() => undefined);
+    const waitFor = async (done: (s: Screen) => boolean, ms: number): Promise<Screen | undefined> => {
       for (let waited = 0; waited < ms; waited += 150) {
         await sleep(150);
-        if (done(await screen())) return true;
-      }
-      return false;
-    };
-    for (let attempt = 0; attempt < 3; attempt++) {
-      let now = await screen();
-      if (SURVEY_RE.test(now)) {
-        await this.zellij.keys(session, "0");
-        await sleep(300);
-        now = await screen();
-      }
-      await this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(now)?.length ?? 1));
-      await this.zellij.paste(session, text);
-      if (!(await waitScreen((s) => promptHolds(s, text) || !promptBoxLines(s), 1500))) continue;
-      if (!promptBoxLines(await screen())) {
-        await this.zellij.keys(session, "Enter");
-        return true;
-      }
-      await this.zellij.keys(session, "Enter");
-      if (await waitScreen((s) => !promptHolds(s, text), 2500)) return true;
-    }
-    return false;
-  }
-
-  /**
-   * Switches the model for this session only through Claude Code's /model picker: its cursor is moved to the model
-   * and "s" is pressed. Enter would also save the model as the default for every new session, so Enter is never
-   * pressed while the picker is open. Returns a warning when the model stays as it was; throws when the picker
-   * cannot be closed, so nothing is typed into it.
-   */
-  private async switchModel(session: string, model: SessionModel): Promise<string | undefined> {
-    const read = async (): Promise<{ screen: string; options: PickerOption[] }> => {
-      const screen = await this.zellij.screen(session).catch(() => "");
-      return { screen, options: modelPickerOptions(screen) };
-    };
-    const waitFor = async (done: (r: { screen: string; options: PickerOption[] }) => boolean) => {
-      for (let i = 0; i < 15; i++) {
-        await sleep(200);
-        const r = await read();
-        if (done(r)) return r;
+        const s = await look();
+        if (s && done(s)) return s;
       }
       return undefined;
     };
-    const close = async (warning: string): Promise<string> => {
-      await this.zellij.keys(session, "Esc");
-      if (!(await waitFor((r) => r.options.length === 0))) throw new Error("the /model picker did not close");
-      return warning;
+    const enter = async (): Promise<TypeResult> => {
+      await this.zellij.keys(session, "Enter");
+      // Taken: the box lets go of the text (or a picker, such as /model's, takes its place).
+      return (await waitFor((s) => !promptHolds(s, text), ENTER_WAIT_MS)) ? "sent" : "unsure";
     };
+    let now = await look();
+    if (now && atBottom(now.plain, SURVEY_RE)) {
+      await this.zellij.keys(session, "0");
+      now = (await waitFor((s) => !atBottom(s.plain, SURVEY_RE), 1500)) ?? now;
+    }
+    // Right after a picker or a command, Claude Code is still redrawing; wait for the prompt box.
+    const ready = now && typedInBox(now) !== undefined ? now : await waitFor((s) => typedInBox(s) !== undefined, 3000);
+    if (!ready) return "not-typed";
+    if (entered) return promptHolds(ready, text) ? enter() : "sent";
+    if (typedInBox(ready)) {
+      await this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(ready.plain)?.length ?? 1));
+      if (!(await waitFor((s) => typedInBox(s) === "", 1500))) return "not-typed";
+    }
+    await this.zellij.paste(session, text);
+    // Enter only once the text is in the box. Otherwise an empty box after Enter could not tell "sent" from
+    // "never typed" (a redraw can drop a paste).
+    if (!(await waitFor((s) => promptHolds(s, text), 2000))) {
+      const s = await look();
+      if (s && typedInBox(s)) await this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(s.plain)?.length ?? 1));
+      return "not-typed";
+    }
+    return enter();
+  }
 
-    if (!(await this.typeInput(session, "/model"))) return "モデルの選択画面を開けませんでした。いまのモデルのまま送ります。";
-    const opened = await waitFor((r) => r.options.length > 0);
-    if (!opened) return close("モデルの選択画面を開けませんでした。いまのモデルのまま送りました。");
-    const target = opened.options.findIndex((o) => pickerMatches(o.label, model));
-    if (target < 0) return close(`${MODEL_NAMES[model]} はこのセッションでは選べません。いまのモデルのまま送りました。`);
-    const steps = target - Math.max(0, opened.options.findIndex((o) => o.cursor));
-    if (steps !== 0) await this.zellij.keys(session, ...Array<string>(Math.abs(steps)).fill(steps > 0 ? "Down" : "Up"));
-    const moved = await waitFor((r) => r.options[target]?.cursor === true);
-    if (!moved) return close("モデルを選べませんでした。いまのモデルのまま送りました。");
-    await this.zellij.keys(session, "s");
-    // The confirmation may wrap in the narrow pane, so look for it with the line breaks taken out.
-    const done = await waitFor((r) => r.options.length === 0 && /for this session only/.test(r.screen.replace(/\s+/g, " ")));
-    if (!done) return close("モデルを切り替えられたか確かめられませんでした。");
+  /** Waits until the screen satisfies `done` (polling every 200 ms, up to `ms`). */
+  private async waitForScreen(
+    session: string,
+    done: (r: { screen: string; options: PickerOption[] }) => boolean,
+    ms = 3000,
+  ): Promise<{ screen: string; options: PickerOption[] } | undefined> {
+    for (let waited = 0; waited < ms; waited += 200) {
+      await sleep(200);
+      const s = await this.zellij.screen(session).catch(() => undefined);
+      if (!s) continue;
+      const r = { screen: s.plain, options: modelPickerOptions(s.plain) };
+      if (done(r)) return r;
+    }
     return undefined;
+  }
+
+  /**
+   * Closes the /model picker, and the question it may have asked, with Esc (nothing is changed). Closed means that
+   * the prompt box is back and nothing else has the keys; throws when that does not happen, so nothing is typed into
+   * them.
+   */
+  private async closePicker(session: string): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      await this.zellij.keys(session, "Esc");
+      if (await this.waitForScreen(session, (r) => promptBoxLines(r.screen) !== undefined && !dialogOpen(r.screen))) return;
+    }
+    throw new Error("the /model picker did not close");
+  }
+
+  /** After "/model" came back "unsure" from typeInput, Claude Code may still open the picker: close it if it does. */
+  private async closeLatePicker(session: string): Promise<void> {
+    const opened = await this.waitForScreen(session, (r) => r.options.length > 0 || switchQuestion(r.screen) !== undefined, LATE_PICKER_WAIT_MS);
+    if (opened) await this.closePicker(session);
+  }
+
+  /**
+   * Switches the model and/or the effort level for this session only, through Claude Code's /model picker: the
+   * cursor is moved to the model (it starts on the current one), ←/→ step the effort level, and "s" applies both to
+   * this session only. Enter would save them as the default for every new session, so Enter is never pressed while
+   * the picker is open. What could not be switched goes into `out`; throws when the picker cannot be closed.
+   */
+  private async switchModel(
+    session: string,
+    model: SessionModel | undefined,
+    effort: EffortLevel | undefined,
+    t: Tracked | undefined,
+    out: InputOutcome,
+  ): Promise<void> {
+    // Nothing is switched: the session keeps its model and effort level.
+    const kept = (why: string) => {
+      out.warnings.push(`${why}${model && effort ? "いまのモデルと Effort" : model ? "いまのモデル" : "いまの Effort"}のまま送ります。`);
+      if (model) out.unapplied.push("model");
+      if (effort) out.unapplied.push("effort");
+    };
+    const giveUp = async (why: string) => {
+      await this.closePicker(session);
+      kept(why);
+    };
+    const switchesBefore = t?.meta.sessionSwitches ?? 0;
+    const typed = await this.typeInput(session, "/model");
+    if (typed !== "sent") {
+      if (typed === "unsure") await this.closeLatePicker(session);
+      return kept("モデルの選択画面を開けませんでした。");
+    }
+    const opened = await this.waitForScreen(session, (r) => r.options.length > 0);
+    if (!opened) return giveUp("モデルの選択画面を開けませんでした。");
+    await this.rememberModels(opened.screen);
+
+    const cursorAt = opened.options.findIndex((o) => o.cursor);
+    let target = cursorAt;
+    if (model) {
+      target = opened.options.findIndex((o) => pickerMatches(o.label, model));
+      if (target < 0) return giveUp(`${this.modelName(model)} はこのセッションでは選べません。`);
+      const steps = target - Math.max(0, cursorAt);
+      if (steps !== 0) await this.zellij.keys(session, ...Array<string>(Math.abs(steps)).fill(steps > 0 ? "Down" : "Up"));
+      if (!(await this.waitForScreen(session, (r) => r.options[target]?.cursor === true))) return giveUp("モデルを選べませんでした。");
+    } else if (!opened.options[cursorAt]?.current) {
+      // Effort only: "s" applies the model under the cursor too, so it must be the one the session uses (✔).
+      return giveUp("選択画面で、いまのモデルが見つかりませんでした。");
+    }
+    if (effort) {
+      const r = await this.stepEffort(session, effort);
+      if (r !== "set") {
+        const why = `Effort を ${EFFORT_NAMES[effort]} にできませんでした${r === "unsupported" ? "（このモデルでは選べません）" : ""}。`;
+        if (r === "lost" || !model) return giveUp(why);
+        // The level is as it was; the model is still switched.
+        out.warnings.push(`${why}モデルだけ切り替えます。`);
+        out.unapplied.push("effort");
+      }
+    }
+    // Right before "s": the cursor must still be on the row to apply.
+    if (!(await this.waitForScreen(session, (r) => r.options[target]?.cursor === true))) return giveUp("モデルを選べませんでした。");
+    await this.zellij.keys(session, "s");
+    // In a conversation Claude Code has cached, switching asks first, because the whole history is read again. The
+    // switch was asked for in Gasho, so the answer is "Yes" (still for this session only). Any other question with
+    // the same choices (a hook may ask to confirm) is for the person, and the switch is cancelled.
+    // Done when the transcript records a new "… for this session only" (the screen can still show earlier ones);
+    // a session whose transcript is not followed yet falls back to the output of the latest /model on the screen.
+    let note: string | undefined;
+    let answered = false;
+    let done = false;
+    for (let i = 0; i < 40 && !done; i++) {
+      await sleep(200);
+      const s = await this.zellij.screen(session).catch(() => undefined);
+      if (!s) continue;
+      const question = switchQuestion(s.plain);
+      if (question) {
+        if (answered) continue; // answered already; the question is going away
+        if (!question.aboutCache || !question.onYes) return giveUp("Claude Code が切り替えの確認を求めたので、切り替えませんでした。");
+        await this.zellij.keys(session, "Enter");
+        answered = true;
+        note = `${model ? "モデル" : "Effort "}を切り替えたので、次の返答では会話の履歴を読み直します（時間とトークンが多くかかります）。`;
+        continue;
+      }
+      if (dialogOpen(s.plain) || !promptBoxLines(s.plain)) continue;
+      if (t?.tail) await this.pollTails();
+      done = t?.tail ? (t.meta.sessionSwitches ?? 0) > switchesBefore : switchedForSession(s.plain);
+    }
+    if (!done) {
+      await this.closePicker(session);
+      out.warnings.push("モデルと Effort を切り替えられたか確かめられませんでした。");
+      return;
+    }
+    if (note) out.warnings.push(note);
+  }
+
+  /**
+   * Steps the /model picker's effort level to `to` with ←/→, one press at a time, reading the picker after each: a
+   * model may lack some levels, and the picker then skips them. When `to` cannot be reached, the level is put back.
+   * "set": done; "unsupported": the model does not have `to` (put back as it was); "unread": the picker shows no
+   * effort level (nothing pressed); "lost": the level could not be put back.
+   */
+  private async stepEffort(session: string, to: EffortLevel): Promise<"set" | "unsupported" | "unread" | "lost"> {
+    const at = (e: EffortLevel) => EFFORT_LEVELS.indexOf(e);
+    const walk = async (from: EffortLevel, goal: EffortLevel): Promise<EffortLevel> => {
+      let now = from;
+      for (let i = 0; i < EFFORT_LEVELS.length && now !== goal; i++) {
+        await this.zellij.keys(session, at(goal) > at(now) ? "Right" : "Left");
+        const moved = await this.waitForScreen(
+          session,
+          (r) => {
+            const e = pickerEffort(r.screen);
+            return e !== undefined && e !== now;
+          },
+          1500,
+        );
+        const next = moved && pickerEffort(moved.screen);
+        if (!next) break; // it did not move: the last level in that direction
+        const passed = (at(next) - at(goal)) * (at(now) - at(goal)) < 0;
+        now = next;
+        if (passed) break; // the model skips `goal`
+      }
+      return now;
+    };
+    const before = pickerEffort((await this.waitForScreen(session, () => true))?.screen ?? "");
+    if (!before) return "unread";
+    const reached = await walk(before, to);
+    if (reached === to) return "set";
+    if (reached === before) return "unsupported";
+    return (await walk(reached, before)) === before ? "unsupported" : "lost";
+  }
+
+  /** Turns ultracode on or off for this session only (`/effort ultracode on|off`; the effort level stays). */
+  private async setUltracode(session: string, on: boolean, out: InputOutcome): Promise<void> {
+    const failed = () => {
+      out.warnings.push(`Ultracode を${on ? "オン" : "オフ"}にできませんでした。`);
+      out.unapplied.push("ultracode");
+    };
+    if ((await this.typeInput(session, `/effort ultracode ${on ? "on" : "off"}`)) !== "sent") return failed();
+    // The mark in the rule above the prompt box must show the new state twice in a row: a frame being redrawn can
+    // lack the rule's label for a moment.
+    let seen = 0;
+    const done = await this.waitForScreen(session, (r) => {
+      seen = promptRuleUltracode(r.screen) === on ? seen + 1 : 0;
+      return seen >= 2;
+    });
+    if (!done) failed();
+  }
+
+  /**
+   * Opens the /model picker only to read the model names, and closes it again without changing anything (Esc).
+   * Returns whether the names were read.
+   */
+  private async probeModels(session: string): Promise<boolean> {
+    const typed = await this.typeInput(session, "/model");
+    if (typed !== "sent") {
+      if (typed === "unsure") await this.closeLatePicker(session);
+      return false;
+    }
+    const opened = await this.waitForScreen(session, (r) => r.options.length > 0);
+    const read = opened ? await this.rememberModels(opened.screen) : false;
+    await this.closePicker(session);
+    return read;
   }
 
   private async interrupt(sessionId: string): Promise<CommandResult> {
@@ -605,9 +986,4 @@ export class Daemon {
     this.scheduleRefresh(500);
     return { ok: true };
   }
-}
-
-/** Whether the model the session uses ("Opus 5.5") is the one asked for. "default" always switches. */
-function sameModel(current: string | undefined, model: SessionModel): boolean {
-  return model !== "default" && current !== undefined && current.toLowerCase().startsWith(model);
 }

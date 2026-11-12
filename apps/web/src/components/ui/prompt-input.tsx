@@ -298,7 +298,7 @@ function ModelPicker({
   };
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className="relative shrink-0">
       <button
         ref={btnRef}
         type="button"
@@ -782,7 +782,8 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
 
         {/* toolbar */}
         <div className="mt-1 flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-0.5">
+          {/* Scrolls sideways when the tools do not fit (a phone): nothing is squeezed or pushed under the send button. */}
+          <div className="scrollbar-none -my-0.5 flex min-w-0 items-center gap-0.5 overflow-x-auto py-0.5">
             {allowAttachments && (
               <>
                 <input
@@ -802,7 +803,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
                   aria-label="ファイルを添付"
                   title="ファイルを添付"
                   onClick={() => fileInput.current?.click()}
-                  className={`grid h-10 w-10 place-items-center rounded-xl sm:h-9 sm:w-9 ${softBtn} ${focusRing} disabled:pointer-events-none disabled:opacity-40`}
+                  className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl sm:h-9 sm:w-9 ${softBtn} ${focusRing} disabled:pointer-events-none disabled:opacity-40`}
                 >
                   <Ico d={P.clip} />
                 </button>

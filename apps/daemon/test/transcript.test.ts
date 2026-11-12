@@ -207,3 +207,31 @@ test("commands recorded as system records are notes too", () => {
   );
   assert.deepEqual(command?.blocks, [{ type: "text", text: "/model" }]);
 });
+
+test("the effort level comes from replies and from /effort and /model output; ultracode from /effort ultracode", () => {
+  const meta = emptyMeta();
+  parseRecord({ type: "assistant", uuid: "a", effort: "medium", message: { model: "claude-haiku-5-5", content: [{ type: "text", text: "はい" }] } }, meta);
+  assert.equal(meta.effort, "medium");
+  const out = (text: string) => parseRecord({ type: "user", uuid: text, message: { role: "user", content: `<local-command-stdout>${text}</local-command-stdout>` } }, meta);
+  out("Set effort level to high (saved as your default for new sessions): Comprehensive implementation");
+  assert.equal(meta.effort, "high");
+  out("Ultracode on (this session only): dynamic workflows on every task. Effort stays high.");
+  assert.equal(meta.ultracode, true);
+  out("Set model to `Sonnet 5.5 (default)` for this session only with `xhigh` effort");
+  assert.equal(meta.effort, "xhigh");
+  assert.equal(meta.model, "Sonnet 5.5 (default)");
+  out("Ultracode off. Effort stays xhigh.");
+  assert.equal(meta.ultracode, false);
+  assert.equal(meta.effort, "xhigh");
+});
+
+test("session-only model switches are counted, so a new one can be told from earlier ones", () => {
+  const meta = emptyMeta();
+  const out = (text: string) => parseRecord({ type: "user", uuid: text, message: { role: "user", content: `<local-command-stdout>${text}</local-command-stdout>` } }, meta);
+  out("Set model to `Sonnet 5.5` and saved as your default for new sessions");
+  assert.equal(meta.sessionSwitches, undefined);
+  out("Set model to `Haiku 5.5` for this session only with `high` effort");
+  out("Kept model as `Haiku 5.5`");
+  out("Set model to `Sonnet 5.5 (default)` for this session only");
+  assert.equal(meta.sessionSwitches, 2);
+});

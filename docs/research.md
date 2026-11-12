@@ -102,6 +102,22 @@ zellij を操作するときは、`--session` で対象を必ず指定する。r
 - まれに満足度のアンケート（`How is Claude doing this session?` と `1: Bad 2: Fine 3: Good 0: Dismiss`）が出る。モデルを切り替えた直後に出たとき、続けて貼り付けた発言が入力欄に入らず、送られなかった
 - Node の組み込みの WebSocket は、14MB のメッセージを受け取れた
 
+## 検証5：Effort と Ultracode
+
+2026年11月12日に、Gasho が起動したセッション（Claude Code 2.1.322）で確かめた。設定ファイルの控えを取ってから試し、変わったものは元に戻した。
+
+- `/effort high` は「新しいセッションの既定として保存」になり、`~/.claude/settings.json` に `modelSettings.<モデル>.effortLevel` が加わった。Gasho からは送らない
+- `/effort ultracode on` と `/effort ultracode off` は、どちらも「このセッションだけ」で、設定ファイルは変わらなかった（`Ultracode on (this session only): …`、`Ultracode off. Effort stays high.`）
+- `/model` の選択画面では、←→ で Effort が Low・Medium（既定）・High・xHigh・Max の順に変わり、端で止まる。「s」を押すと、モデルと Effort がそのセッションだけに適用された（`Set model to Sonnet 5.5 (default) for this session only with medium effort`）。設定ファイルは変わらなかった
+- 選択画面の「Default (recommended)」が指すモデルは、時間とともに変わった（13時台の初めは Opus 5.5、30分後は Sonnet 5.5）。幅が狭いと、名前は `Default (recommend…` のように切れる
+- 会話の途中でモデルを切り替えると、`… means the full history gets re-read.` と確認され、`1. Yes, switch to Haiku 5.5` と `2. No, go back` を選ぶ画面が出た。Enter で Yes を選ぶと、そのセッションだけ切り替わった
+- 入力欄の上の `◐ medium · ultracode · /effort` は、変更のあとしばらくだけ出る。Ultracode がオンのあいだは、入力欄の上の罫線に `ultracode` と出続ける
+- 入力欄には、次の発言の候補が薄い文字で出ることがある。Ctrl+U では消えない。`zellij action dump-screen --ansi` で見ると、候補は薄い文字（SGR 2）で描かれ、打った文字（SGR 22）と見分けられる
+- Effort だけを変えて「s」を押したときも、`Set model to Haiku 5.5 for this session only with low effort` と出た
+- 選択画面の枠の上端は `▔` の線で描かれ、入力欄の罫線（`─`）とは違う。選択画面と確認は、画面のいちばん下に出る
+- 返答の記録には `"effort": "medium"` が残る。`claude agents --json` には、モデルも Effort も Ultracode も出ない
+- CLI には `--effort <level>`（low・medium・high・xhigh・max）があり、`--effort ultracode` でも Ultracode が有効になる
+
 ## 未確認の事項
 
 - hook から拒否を返したときの動き

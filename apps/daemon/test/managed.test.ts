@@ -4,16 +4,29 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
+  atBottom,
   cleanEnv,
   clearPromptKeys,
+  dialogOpen,
   launchableFolders,
   launchArgs,
   ManagedSessions,
+  EFFORT_LEVELS,
   modelPickerOptions,
+  pickerCatalog,
+  pickerEffort,
   pickerMatches,
+  plainScreen,
   promptBoxLines,
   promptHolds,
+  promptRuleUltracode,
+  readScreen,
+  refusedCommand,
   safeFileName,
+  statusLine,
+  switchedForSession,
+  switchQuestion,
+  typedInBox,
   zellijSessionName,
 } from "../src/managed.ts";
 
@@ -196,9 +209,165 @@ test("safeFileName keeps letters of any script and the extension, and nothing th
 });
 
 test("promptHolds tells whether the prompt box holds the text, folded or collapsed into [Pasted text]", () => {
-  assert.ok(promptHolds(screenWith("❯ これは停止の実験です。「はい」とだけ返してくだ", "  さい。"), "これは停止の実験です。「はい」とだけ返してください。"));
-  assert.ok(promptHolds(screenWith("❯ [Pasted text #2 +40 lines]"), "長い\n指示"));
-  assert.ok(!promptHolds(screenWith("❯ "), "これは"));
-  assert.ok(!promptHolds(screenWith('❯ Try "edit hub.test.ts to..."'), "これは"));
-  assert.ok(!promptHolds("no prompt box", "これは"));
+  const held = (screen: string, text: string) => promptHolds(plainScreen(screen), text);
+  assert.ok(held(screenWith("❯ これは停止の実験です。「はい」とだけ返してくだ", "  さい。"), "これは停止の実験です。「はい」とだけ返してください。"));
+  assert.ok(held(screenWith("❯ [Pasted text #2 +40 lines]"), "長い\n指示"));
+  assert.ok(!held(screenWith("❯ "), "これは"));
+  assert.ok(!held(screenWith('❯ Try "edit hub.test.ts to..."'), "これは"));
+  assert.ok(!held("no prompt box", "これは"));
+});
+
+// The bottom of a screen dumped with `zellij action dump-screen --ansi` from Claude Code v2.1.322: the conversation
+// shows the user's message, and the prompt box below shows Claude Code's suggestion to send it again, drawn dim.
+const ANSI_BOTTOM = [
+  "\x1b[38;2;153;153;153m\x1b[48;2;55;55;55m\x1b[22m\x1b[23m❯ \x1b[38;2;255;255;255m\x1b[48;2;55;55;55m\x1b[22m「はい」とだけ返してください。\x1b[39m",
+  "",
+  "\x1b[38;2;255;255;255m\x1b[49m\x1b[22m\x1b[23m●\x1b[m はい",
+  "",
+  `\x1b[38;2;136;136;136m\x1b[49m\x1b[22m\x1b[24m\x1b[22m\x1b[23m${"─".repeat(38)}\x1b[m \x1b[38;2;175;135;255m\x1b[49m\x1b[22multracode\x1b[m \x1b[38;2;136;136;136m─`,
+  "\x1b[m❯\u00a0\x1b[39m\x1b[49m\x1b[29m\x1b[28m\x1b[27m\x1b[25m\x1b[25m\x1b[22m\x1b[24m\x1b[2m\x1b[23m「はい」とだけ返してください。",
+  `\x1b[38;2;136;136;136m\x1b[49m\x1b[22m\x1b[24m\x1b[22m\x1b[23m${"─".repeat(50)}`,
+  "\x1b[m  \x1b[38;2;255;193;7m\x1b[49m\x1b[22m⏵⏵ auto mode on\x1b[38;2;153;153;153m (shift+tab to cycle)\x1b[m",
+  "",
+].join("\n");
+
+test("readScreen leaves what is drawn dim out of the typed text, and keeps every line", () => {
+  const s = readScreen(ANSI_BOTTOM);
+  assert.equal(s.plain.split("\n").length, s.typed.split("\n").length);
+  assert.ok(!s.plain.includes("\x1b"));
+  // The suggestion in the box is on the screen, but nobody typed it.
+  assert.deepEqual(promptBoxLines(s.plain), ["❯\u00a0「はい」とだけ返してください。"]);
+  assert.equal(typedInBox(s), "");
+  assert.ok(!promptHolds(s, "「はい」とだけ返してください。"));
+  assert.equal(promptRuleUltracode(s.plain), true);
+  // Typed text in the same place counts.
+  const typed = readScreen(ANSI_BOTTOM.replace("\x1b[2m\x1b[23m「はい」", "\x1b[22m\x1b[23m「はい」"));
+  assert.ok(promptHolds(typed, "「はい」とだけ返してください。"));
+  // Colours whose values contain a 2 ("38;2;…", "48;5;2") are not dim; SGR 0, an empty SGR and 22 end dim.
+  assert.equal(readScreen("\x1b[38;2;2;2;2ma\x1b[48;5;2mb\x1b[2mc\x1b[0md\x1b[2me\x1b[mf\x1b[2;1mg\x1b[22mh").typed, "abdfh");
+  assert.equal(readScreen("\x1b]8;;https://example.com\x07link\x1b]8;;\x07 \x1b(Bok").plain, "link ok");
+  // A dim run that crosses a line break keeps the break.
+  assert.equal(readScreen("\x1b[2mone\ntwo\x1b[22m three").typed, "\n three");
+});
+
+// The picker after ultracode was turned on and the default model moved to Sonnet 5.5 (its label gets cut short).
+const PICKER_DEFAULT_SONNET = [
+  "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ● high · ultracode · /effort ▔",
+  "   Select model",
+  "   ❯ 1.  Default (recommend… ✔  Sonnet 5.5 ·",
+  "                                Efficient for",
+  "     2.  Opus 5.5               For complex",
+  "     3.  Fable 5.2              For your",
+  "     4.  Sonnet 5.5             Most efficient",
+  "     5.  Haiku 5.5              Fastest for",
+  "     ▸   More models",
+  "   ◉ xHigh effort ←/→ to adjust · Ultracode on",
+  "   (/effort)",
+  "   Enter to set as default · s to use this",
+  "   session only · Esc to cancel",
+].join("\n");
+
+test("the /model picker gives the model names with their versions, the model the default stands for, and the effort", () => {
+  const options = modelPickerOptions(PICKER_DEFAULT_SONNET);
+  assert.equal(options[0]?.label, "Default (recommend…");
+  assert.ok(options[0]?.cursor && options[0].current);
+  assert.deepEqual(pickerCatalog(options), [
+    { id: "default", name: "Sonnet 5.5" },
+    { id: "opus", name: "Opus 5.5" },
+    { id: "fable", name: "Fable 5.2" },
+    { id: "sonnet", name: "Sonnet 5.5" },
+    { id: "haiku", name: "Haiku 5.5" },
+  ]);
+  assert.equal(pickerEffort(PICKER_DEFAULT_SONNET), "xhigh");
+  const KEYS = "   Enter to set as default · s to use this\n   session only · Esc to cancel";
+  assert.equal(pickerEffort(`   Select model\n   ◐ Medium effort (default) ←/→ to adjust ·\n${KEYS}`), "medium");
+  // Only the picker counts, not the conversation above it.
+  assert.equal(pickerEffort(`     session only with medium effort\n   Select model\n   ● High effort ←/→ to adjust\n${KEYS}`), "high");
+  assert.equal(pickerEffort("     session only with medium effort"), undefined);
+  // Without its key help at the bottom, it is not the picker.
+  assert.equal(pickerEffort("   Select model\n   ● High effort ←/→ to adjust"), undefined);
+  assert.deepEqual(EFFORT_LEVELS, ["low", "medium", "high", "xhigh", "max"]);
+});
+
+test("statusLine reads the effort level and ultracode shown above the prompt box", () => {
+  const screen = (status: string) => ["● はい", `                  ${status}`, "─".repeat(50), "❯ ", "─".repeat(50)].join("\n");
+  assert.deepEqual(statusLine(screen("◐ medium · ultracode · /effort")), { effort: "medium", ultracode: true });
+  assert.deepEqual(statusLine(screen("● high · /effort")), { effort: "high", ultracode: false });
+  assert.deepEqual(statusLine(screen("◈ max · /effort")), { effort: "max", ultracode: false });
+  assert.equal(statusLine("no status here"), undefined);
+  // A status line left from an earlier frame higher up does not count.
+  assert.equal(statusLine(["   ◐ medium · ultracode · /effort", "● はい", "─".repeat(50), "❯ ", "─".repeat(50)].join("\n")), undefined);
+  // The picker's own effort line ("Ultracode on (/effort)") is not the status line.
+  assert.equal(statusLine("   ◐ Medium effort (default) ←/→ to adjust ·\n   Ultracode on (/effort)"), undefined);
+});
+
+test("promptRuleUltracode reads the ultracode mark in the rule above the prompt box", () => {
+  assert.equal(promptRuleUltracode(["● はい", `${"─".repeat(38)} ultracode ─`, "❯ ", "─".repeat(50)].join("\n")), true);
+  assert.equal(promptRuleUltracode(screenWith("❯ ")), false);
+  assert.equal(promptRuleUltracode("no prompt box"), undefined);
+});
+
+test("the question before a model switch is recognised at the bottom only, and only the latest /model output counts as switched", () => {
+  const question = [
+    "● はい",
+    "   Your next response will be slower and use",
+    "   more tokens",
+    "   This conversation is cached for the current",
+    "   model. Switching to Haiku 5.5 means the full",
+    "   history gets re-read.",
+    "   ❯ 1. Yes, switch to Haiku 5.5",
+    "     2. No, go back",
+  ].join("\n");
+  assert.deepEqual(switchQuestion(question), { onYes: true, aboutCache: true });
+  assert.deepEqual(switchQuestion(question.replace("   ❯ 1.", "     1.").replace("     2.", "   ❯ 2.")), { onYes: false, aboutCache: true });
+  assert.ok(dialogOpen(question));
+  // The same choices for a confirmation a hook asks for: not Gasho's to answer.
+  const hook = ["   Switch model?", "   A PreModelSwitch hook asked you to confirm", "   ❯ 1. Yes, switch to Fable 5.2", "     2. No, go back"].join("\n");
+  assert.deepEqual(switchQuestion(hook), { onYes: true, aboutCache: false });
+  // Quoted in the conversation, with the prompt box below it: not a question.
+  const quoted = screenWith("❯ ").replace("● はい", `● はい\n${question}`);
+  assert.equal(switchQuestion(quoted), undefined);
+  assert.ok(!dialogOpen(quoted));
+  assert.equal(typedInBox(plainScreen(quoted)), "");
+  const switched = ["❯ /model", "  ⎿  Set model to Haiku 5.5 for this session only", "     with high effort", "❯ 「はい」", "● はい"].join("\n");
+  assert.ok(!switchedForSession(switched + "\n❯ /model\n  ⎿  Kept model as Haiku 5.5"));
+  assert.ok(switchedForSession(switched));
+});
+
+test("the /model picker is read only at the bottom of the screen, not where the conversation quotes one", () => {
+  const quoted = [
+    "● The picker looked like this:",
+    "   Select model",
+    "   ❯ 1.  Default (recommended) ✔  Opus 5.5 · Best",
+    "   ◐ High effort ←/→ to adjust",
+    "   Enter to set as default · s to use this session only · Esc to cancel",
+  ].join("\n");
+  // A quote above the prompt box is not a picker.
+  const withBox = screenWith("❯ ").replace("● はい", quoted);
+  assert.deepEqual(modelPickerOptions(withBox), []);
+  assert.equal(pickerEffort(withBox), undefined);
+  assert.ok(!dialogOpen(withBox));
+  // A quote above the real picker: the real one (the last) is read.
+  const both = `${quoted}\n${PICKER_DEFAULT_SONNET}`;
+  assert.equal(modelPickerOptions(both).length, 5);
+  assert.equal(pickerCatalog(modelPickerOptions(both))[0]?.name, "Sonnet 5.5");
+  assert.equal(pickerEffort(both), "xhigh");
+  assert.ok(dialogOpen(both));
+  assert.equal(typedInBox(plainScreen(both)), undefined);
+});
+
+test("atBottom looks at the last lines only, read as one text", () => {
+  const screen = ["Do you want to proceed?", ...Array<string>(20).fill("● 作業中"), " Do you trust the files in this", " folder?", ""].join("\n");
+  assert.ok(!atBottom(screen, /Do you want to proceed\?/));
+  assert.ok(atBottom(screen, /trust the files in this folder/));
+  assert.ok(atBottom(screen, /Do you want to proceed\?/, 30));
+});
+
+test("commands that would change the defaults of every new session are refused", () => {
+  for (const text of ["/model", "/model sonnet", "  /model\nopus", "/MODEL haiku", "/effort", "/effort high", "/effort ultracode", "/effort ultracode on please"]) {
+    assert.ok(refusedCommand(text), text);
+  }
+  for (const text of ["/effort ultracode on", "/effort ultracode off", " /effort ultracode on ", "/exit", "/models の説明をして", "model を変えて", "please /model"]) {
+    assert.equal(refusedCommand(text), undefined, text);
+  }
 });

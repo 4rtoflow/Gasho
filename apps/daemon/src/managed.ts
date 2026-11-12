@@ -8,7 +8,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { SessionModel } from "@gasho/protocol";
+import type { EffortLevel, ModelOption, SessionModel } from "@gasho/protocol";
 
 const execFileP = promisify(execFile);
 
@@ -20,26 +20,151 @@ export const PERMISSION_PROMPT_RE = /Do you want to proceed\?/;
 export const SURVEY_RE = /How is Claude doing this session\?/;
 
 /**
- * The lines of Claude Code's prompt box: the lines between the last two horizontal rules on the screen,
- * the first of which starts with "❯". Undefined when the screen does not show the prompt box.
+ * A screen of the pane, read from `zellij action dump-screen --ansi`. `plain` has every character. `typed` leaves out
+ * what is drawn dim (SGR 2): in the prompt box, that is Claude Code's suggestion for the next message and its
+ * placeholder, which nobody typed. Both keep every line break, so their lines match.
  */
-export function promptBoxLines(screen: string): string[] | undefined {
-  const lines = screen.split("\n").map((l) => l.trimEnd());
+export interface Screen {
+  plain: string;
+  typed: string;
+}
+
+// CSI (with SGR as the "m" case), OSC, character set selection, and the other two-character escapes.
+const ESCAPE_RE = /\x1b(?:\[([0-?]*)[ -\/]*([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+][ -~]|[ -~])/g;
+
+/** Reads the output of `zellij action dump-screen --ansi`. */
+export function readScreen(ansi: string): Screen {
+  let plain = "";
+  let typed = "";
+  let dim = false;
+  let at = 0;
+  const text = (s: string) => {
+    plain += s;
+    typed += dim ? s.replace(/[^\n]/g, "") : s;
+  };
+  for (const m of ansi.matchAll(ESCAPE_RE)) {
+    const index = m.index ?? 0;
+    text(ansi.slice(at, index));
+    at = index + m[0].length;
+    if (m[2] !== "m") continue;
+    const params = (m[1] || "0").split(";");
+    for (let i = 0; i < params.length; i++) {
+      const [code, ...sub] = (params[i] ?? "").split(":");
+      const n = Number(code || "0");
+      // 38, 48 and 58 set a colour; the numbers after them are its value, not attributes ("38;5;n", "38;2;r;g;b").
+      if (n === 38 || n === 48 || n === 58) {
+        if (sub.length === 0) i += params[i + 1] === "5" ? 2 : 4;
+      } else if (n === 0 || n === 22) dim = false;
+      else if (n === 2) dim = true;
+    }
+  }
+  text(ansi.slice(at));
+  return { plain, typed };
+}
+
+/** A screen read from plain text, where nothing is dim (for screens that need no more). */
+export function plainScreen(plain: string): Screen {
+  return { plain, typed: plain };
+}
+
+function screenLines(screen: string): string[] {
+  return screen.split("\n").map((l) => l.trimEnd());
+}
+
+/**
+ * The last `n` non-empty lines of the screen. Pickers, questions and dialogs are drawn at the bottom; the conversation
+ * above them can contain the same words (a quoted dialog, a diff of this file), so checks for them look only here.
+ */
+export function bottomLines(screen: string, n: number): string[] {
+  return screenLines(screen).filter(Boolean).slice(-n);
+}
+
+/** Whether `re` matches the last `n` non-empty lines of the screen, read as one text (a narrow pane wraps lines). */
+export function atBottom(screen: string, re: RegExp, n = 15): boolean {
+  return re.test(bottomLines(screen, n).join(" ").replace(/\s+/g, " "));
+}
+
+/**
+ * Claude Code's question before a switch that makes it read the whole conversation again: "… This conversation is
+ * cached for the current model. Switching to Haiku 5.5 means the full history gets re-read. ❯ 1. Yes, switch to
+ * Haiku 5.5 / 2. No, go back". Undefined unless its two choices are at the bottom of the screen. `aboutCache` is false
+ * for other questions with the same choices, such as a confirmation that a hook asks for: those are not Gasho's to
+ * answer.
+ */
+export function switchQuestion(screen: string): { onYes: boolean; aboutCache: boolean } | undefined {
+  const all = screenLines(screen).filter(Boolean);
+  const yes = all.findLastIndex((l) => /^\s*(?:❯\s*)?1\.\s+Yes, switch to\b/.test(l));
+  const no = all.findLastIndex((l) => /^\s*(?:❯\s*)?2\.\s+No, go back\b/.test(l));
+  // The choices, then at most a line or two of key help.
+  if (yes < 0 || no <= yes || no - yes > 2 || all.length - no > 3) return undefined;
+  const text = all
+    .slice(Math.max(0, yes - 10), yes)
+    .join(" ")
+    .replace(/\s+/g, " ");
+  return {
+    onYes: /^\s*❯/.test(all[yes] ?? ""),
+    aboutCache: /conversation is cached/i.test(text) && /history gets re-read/i.test(text) && !/\bhook\b/i.test(text),
+  };
+}
+
+/** Whether the output of the latest /model on the screen says the model was switched for this session only. */
+export function switchedForSession(screen: string): boolean {
+  const flat = screen.replace(/\s+/g, " ");
+  const i = flat.lastIndexOf("❯ /model");
+  return i >= 0 && /for this session only/.test(flat.slice(i));
+}
+
+/** The prompt box: the last two horizontal rules on the screen, the first one followed by a line starting with "❯". */
+function promptBox(lines: string[]): { top: number; bottom: number } | undefined {
   const rules = lines.flatMap((l, i) => (/^─{8,}/.test(l) ? [i] : []));
-  const [start, end] = rules.slice(-2);
-  if (start === undefined || end === undefined) return undefined;
-  const box = lines.slice(start + 1, end);
-  return box[0]?.startsWith("❯") ? box : undefined;
+  const [top, bottom] = rules.slice(-2);
+  if (top === undefined || bottom === undefined || !lines[top + 1]?.startsWith("❯")) return undefined;
+  return { top, bottom };
+}
+
+/** The lines of Claude Code's prompt box. Undefined when the screen does not show the prompt box. */
+export function promptBoxLines(screen: string): string[] | undefined {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  return box && lines.slice(box.top + 1, box.bottom);
+}
+
+/**
+ * Whether something at the bottom of the screen has the keys instead of the prompt box: the /model picker, the
+ * question before a switch, a permission dialog or the trust dialog.
+ */
+export function dialogOpen(screen: string): boolean {
+  return (
+    modelPickerOptions(screen).length > 0 ||
+    switchQuestion(screen) !== undefined ||
+    atBottom(screen, PERMISSION_PROMPT_RE) ||
+    atBottom(screen, TRUST_PROMPT_RE)
+  );
+}
+
+/**
+ * What is typed in the prompt box, without the "❯", spaces and line breaks (the box folds long text), and without
+ * what is drawn dim. Undefined when the screen shows no prompt box, or when a dialog has the keys.
+ */
+export function typedInBox(s: Screen): string | undefined {
+  if (dialogOpen(s.plain)) return undefined;
+  const box = promptBox(screenLines(s.plain));
+  if (!box) return undefined;
+  return s.typed
+    .split("\n")
+    .slice(box.top + 1, box.bottom)
+    .join("")
+    .replace(/\s+/g, "")
+    .replace(/^❯/, "");
 }
 
 /**
  * Whether the prompt box holds `text`: its first characters (spaces aside), or the "[Pasted text #N]" that Claude
  * Code shows for a long or multi-line paste. False when the screen shows no prompt box.
  */
-export function promptHolds(screen: string, text: string): boolean {
-  const box = promptBoxLines(screen);
-  if (!box) return false;
-  const inBox = box.join("").replace(/^❯/, "").replace(/\s+/g, "");
+export function promptHolds(s: Screen, text: string): boolean {
+  const inBox = typedInBox(s);
+  if (!inBox) return false;
   if (/\[Pastedtext#\d+/.test(inBox)) return true;
   const head = text.replace(/\s+/g, "").slice(0, 12);
   return head.length > 0 && inBox.includes(head);
@@ -55,39 +180,128 @@ export function clearPromptKeys(lines: number): string[] {
   return Array.from({ length: Math.max(1, lines) + 1 }, () => ["Ctrl u", "Backspace"]).flat();
 }
 
-/** An input waiting to be typed, and the model to switch to first. */
+/** An input waiting to be typed, and what to switch first (for this session only). */
 export interface QueuedInput {
   text: string;
   model?: SessionModel;
+  effort?: EffortLevel;
+  ultracode?: boolean;
+  /**
+   * Enter was pressed for this text, but the prompt box still held it when Gasho stopped waiting. The next try
+   * presses Enter only if the box still holds the text, and never types it again (that would send it twice).
+   */
+  entered?: boolean;
+}
+
+/**
+ * Commands that would change Claude Code's defaults for every new session, not only this one: `/model …` and
+ * `/effort …` (except `/effort ultracode on|off`, which is for this session only). The chat box switches them for this
+ * session instead. Returns the reason, or undefined when the text can be sent.
+ */
+export function refusedCommand(text: string): string | undefined {
+  if (/^\s*\/model\b/i.test(text)) {
+    return "モデルは、入力欄のモデルの選択で切り替えてください。/model で切り替えると、これから始めるすべてのセッションの既定のモデルも変わります。";
+  }
+  if (/^\s*\/effort\b/i.test(text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(text)) {
+    return "Effort は、入力欄の Effort のボタンで切り替えてください。/effort で切り替えると、これから始めるすべてのセッションの既定の Effort も変わります（/effort ultracode on と off は、このセッションだけなので送れます）。";
+  }
+  return undefined;
+}
+
+/** Claude Code's effort levels, lowest first; ←/→ in the /model picker steps through them. */
+export const EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
+const EFFORT_WORD = "(low|medium|high|xhigh|max)";
+
+/**
+ * The lines of the /model picker between its title ("Select model") and its key help ("Enter to set as default ·
+ * s to use this session only · Esc to cancel", which wraps in a narrow pane). The picker is drawn at the bottom of the
+ * screen, so only the last title counts, and nothing but the rest of the key help may follow it: the conversation
+ * above can quote a picker. Undefined when the picker is not open.
+ */
+function pickerLines(screen: string): string[] | undefined {
+  const lines = screenLines(screen);
+  const start = lines.findLastIndex((l) => /^\s*Select model\s*$/.test(l));
+  if (start < 0) return undefined;
+  const end = lines.findIndex((l, i) => i > start && /Enter to set as default|Esc to cancel/.test(l));
+  if (end < 0 || lines.slice(end + 1).filter(Boolean).length > 3) return undefined;
+  return lines.slice(start + 1, end);
+}
+
+/** The effort level the /model picker shows ("◐ Medium effort (default) ←/→ to adjust"). */
+export function pickerEffort(screen: string): EffortLevel | undefined {
+  const re = new RegExp(`\\b${EFFORT_WORD} effort\\b`, "i");
+  for (const line of pickerLines(screen) ?? []) {
+    const m = re.exec(line);
+    if (m?.[1]) return m[1].toLowerCase() as EffortLevel;
+  }
+  return undefined;
+}
+
+/**
+ * Whether the prompt box says ultracode is on: Claude Code writes "ultracode" into the rule above the box while it
+ * is on. Undefined when the screen shows no prompt box.
+ */
+export function promptRuleUltracode(screen: string): boolean | undefined {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  return box && /\bultracode\b/i.test(lines[box.top] ?? "");
+}
+
+/**
+ * The effort level and ultracode as Claude Code shows them, for a while after a change, on the line right above the
+ * prompt box ("◐ medium · ultracode · /effort"). Only that line counts: the terminal can still show such lines from
+ * earlier frames higher up. Undefined when the line is not there.
+ */
+export function statusLine(screen: string): { effort: EffortLevel; ultracode: boolean } | undefined {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  if (!box) return undefined;
+  const m = new RegExp(`\\b${EFFORT_WORD}\\b(\\s*·\\s*ultracode)?\\s*·\\s*/effort\\s*$`, "i").exec(lines[box.top - 1] ?? "");
+  if (!m?.[1]) return undefined;
+  return { effort: m[1].toLowerCase() as EffortLevel, ultracode: Boolean(m[2]) };
 }
 
 /** One line of Claude Code's /model picker. */
 export interface PickerOption {
   label: string;
+  /** The start of the description column ("Sonnet 5.5 ·" for "Default (recommended)"). */
+  detail?: string;
   /** The picker's cursor (❯) is on this line. */
   cursor: boolean;
   /** The model the session uses now (✔). */
   current: boolean;
 }
 
-/**
- * The options of Claude Code's /model picker, read from the screen between its title ("Select model") and its
- * key help ("Enter to set as default · s to use this session only · Esc to cancel", which wraps in a narrow
- * pane). Empty when the picker is not open.
- */
+/** The options of Claude Code's /model picker (see pickerLines). Empty when the picker is not open. */
 export function modelPickerOptions(screen: string): PickerOption[] {
-  const lines = screen.split("\n");
-  const start = lines.findIndex((l) => /^\s*Select model\s*$/.test(l));
-  if (start < 0) return [];
-  const end = lines.findIndex((l, i) => i > start && /Enter to set as default|Esc to cancel/.test(l));
-  if (end < 0) return [];
   const options: PickerOption[] = [];
-  for (const line of lines.slice(start + 1, end)) {
-    const m = /^\s*(❯\s*)?\d+\.\s+(\S.*?)(?:\s{2,}|$)/.exec(line);
+  for (const line of pickerLines(screen) ?? []) {
+    const m = /^\s*(❯\s*)?\d+\.\s+(\S.*?)(?:\s{2,}(\S.*))?$/.exec(line);
     if (!m?.[2]) continue;
-    options.push({ label: m[2].replace(/\s*✔\s*$/, "").trim(), cursor: Boolean(m[1]), current: m[2].includes("✔") });
+    options.push({
+      label: m[2].replace(/\s*✔\s*$/, "").trim(),
+      ...(m[3] ? { detail: m[3].trim() } : {}),
+      cursor: Boolean(m[1]),
+      current: m[2].includes("✔"),
+    });
   }
   return options;
+}
+
+/**
+ * The models of the /model picker by Claude Code's names: "Opus 5.5", and for "default" the model it stands for
+ * ("Sonnet 5.5"), read from the start of its description.
+ */
+export function pickerCatalog(options: PickerOption[]): ModelOption[] {
+  const ids: SessionModel[] = ["default", "opus", "fable", "sonnet", "haiku"];
+  const out: ModelOption[] = [];
+  for (const id of ids) {
+    const o = options.find((x) => pickerMatches(x.label, id));
+    if (!o) continue;
+    const name = id === "default" ? (o.detail?.split("·")[0]?.trim() ?? "") : o.label;
+    out.push({ id, name: name || o.label });
+  }
+  return out;
 }
 
 /** Which picker line stands for a model ("Default (recommended)", "Opus 5.5", …). */
@@ -212,8 +426,9 @@ export class Zellij {
     return names;
   }
 
-  screen(session: string): Promise<string> {
-    return this.run(["--session", session, "action", "dump-screen", "-p", PANE]);
+  /** The pane's screen, with what is drawn dim told apart (see Screen). */
+  async screen(session: string): Promise<Screen> {
+    return readScreen(await this.run(["--session", session, "action", "dump-screen", "-p", PANE, "--ansi"]));
   }
 
   async paste(session: string, text: string): Promise<void> {

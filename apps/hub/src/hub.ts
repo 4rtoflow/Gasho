@@ -7,6 +7,7 @@ import type {
   DeviceInfo,
   HubToClient,
   HubToDaemon,
+  InputFeature,
   MachineHookEvent,
   MachineInfo,
   SessionCommand,
@@ -42,8 +43,17 @@ interface PendingRequest {
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const LAUNCH_TIMEOUT_MS = 45_000;
+/**
+ * An input may wait for Claude Code to switch the model, the effort level and ultracode before it is typed, each
+ * step checked on the screen; the browser waits a little longer than this.
+ */
+const INPUT_TIMEOUT_MS = 150_000;
 const MAX_INPUT = 20_000;
 const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]);
+/** What a gasho-daemon that does not say (older than 0.6.0) can do with an input. */
+export const LEGACY_FEATURES: readonly InputFeature[] = ["model", "files"];
 /** Files sent with one input: how many, and their size in all. */
 export const MAX_FILES = 5;
 export const MAX_FILES_BYTES = 10 * 1024 * 1024;
@@ -74,6 +84,15 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       if (!cmd.text.trim() && files.length === 0) return "入力が空です。";
       if (cmd.text.length > MAX_INPUT) return `入力が長すぎます（${MAX_INPUT} 文字まで）。`;
       if (cmd.model !== undefined && !MODELS.has(cmd.model)) return "モデルの指定が正しくありません。";
+      if (cmd.effort !== undefined && !EFFORTS.has(cmd.effort)) return "Effort の指定が正しくありません。";
+      if (cmd.ultracode !== undefined && typeof cmd.ultracode !== "boolean") return "Ultracode の指定が正しくありません。";
+      // These change Claude Code's defaults for every new session; the chat box switches them for this session.
+      if (/^\s*\/model\b/i.test(cmd.text)) {
+        return "モデルは、入力欄のモデルの選択で切り替えてください。/model で切り替えると、これから始めるすべてのセッションの既定のモデルも変わります。";
+      }
+      if (/^\s*\/effort\b/i.test(cmd.text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(cmd.text)) {
+        return "Effort は、入力欄の Effort のボタンで切り替えてください。/effort で切り替えると、これから始めるすべてのセッションの既定の Effort も変わります（/effort ultracode on と off は、このセッションだけなので送れます）。";
+      }
       if (files.length > MAX_FILES) return `添付できるファイルは ${MAX_FILES} 個までです。`;
       let total = 0;
       for (const f of files) {
@@ -148,6 +167,13 @@ export class Hub {
       case "capabilities":
         m.canLaunch = msg.canLaunch;
         m.folders = msg.folders;
+        m.models = Array.isArray(msg.models)
+          ? msg.models
+              .filter((o) => MODELS.has(o?.id) && typeof o.name === "string" && o.name.length > 0 && o.name.length <= 60)
+              .map((o) => ({ id: o.id, name: o.name }))
+          : undefined;
+        m.modelsAt = typeof msg.modelsAt === "number" && Number.isFinite(msg.modelsAt) ? msg.modelsAt : undefined;
+        m.features = Array.isArray(msg.features) ? [...new Set(msg.features.filter((f) => FEATURES.has(f)))] : undefined;
         this.broadcast({ type: "machine", machine: m });
         break;
       case "command.result": {
@@ -230,7 +256,7 @@ export class Hub {
         const requestId = randomUUID();
         const timer = setTimeout(() => {
           if (this.pending.delete(requestId)) peer.send({ ...reply, error: "timed out" });
-        }, REQUEST_TIMEOUT_MS);
+        }, REQUEST_TIMEOUT_MS).unref();
         this.pending.set(requestId, { kind: "transcript", client: peer, machine: msg.machine, sessionId: msg.sessionId, timer });
         const limit = Math.min(Math.max(1, msg.limit), 500);
         daemon.send({ type: "transcript.get", requestId, sessionId: msg.sessionId, before: msg.before, limit });
@@ -251,7 +277,7 @@ export class Hub {
         const requestId = randomUUID();
         const timer = setTimeout(() => {
           if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
-        }, REQUEST_TIMEOUT_MS);
+        }, REQUEST_TIMEOUT_MS).unref();
         this.pending.set(requestId, { kind: "graph", client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
         daemon.send({ type: "git.graph.get", requestId, sessionId: msg.sessionId, repo });
         break;
@@ -272,7 +298,7 @@ export class Hub {
 
   private relayCommand(peer: ClientPeer, clientRequestId: string, machine: string, cmd: SessionCommand): void {
     const reply = (result: CommandResult) => peer.send({ type: "command.result", requestId: clientRequestId, machine, result });
-    const invalid = validateCommand(cmd);
+    const invalid = validateCommand(cmd) ?? this.unsupported(machine, cmd);
     if (invalid) return reply({ ok: false, error: invalid });
     const daemon = this.daemons.get(machine);
     if (!daemon) return reply({ ok: false, error: "この working server はオフラインです。" });
@@ -283,6 +309,8 @@ export class Hub {
         ? [
             cmd.text.slice(0, 300),
             cmd.model && `[model: ${cmd.model}]`,
+            cmd.effort && `[effort: ${cmd.effort}]`,
+            cmd.ultracode !== undefined && `[ultracode: ${cmd.ultracode ? "on" : "off"}]`,
             ...(cmd.files ?? []).map((f) => `[file: ${f.name.slice(0, 100)}, ${Math.ceil(base64Bytes(f.data) / 1024)}KB]`),
           ]
             .filter(Boolean)
@@ -294,13 +322,29 @@ export class Hub {
     this.store.addEvent(event);
 
     const requestId = randomUUID();
-    // Launching waits for Claude Code to start; an input may switch the model first and carry files.
-    const timeout = cmd.type === "session.interrupt" ? REQUEST_TIMEOUT_MS : LAUNCH_TIMEOUT_MS;
+    // Launching waits for Claude Code to start; an input may switch the model, effort and ultracode first.
+    const timeout = cmd.type === "session.interrupt" ? REQUEST_TIMEOUT_MS : cmd.type === "session.input" ? INPUT_TIMEOUT_MS : LAUNCH_TIMEOUT_MS;
     const timer = setTimeout(() => {
       if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
     }, timeout);
+    // The server's sockets keep the process running; a reply still awaited does not need to (tests end sooner).
+    timer.unref();
     this.commands.set(requestId, { client: peer, clientRequestId, machine, timer });
     daemon.send({ requestId, ...cmd });
+  }
+
+  /** An input that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
+  private unsupported(machine: string, cmd: SessionCommand): string | undefined {
+    if (cmd.type !== "session.input") return undefined;
+    const features = this.machines.get(machine)?.features ?? LEGACY_FEATURES;
+    const missing = [
+      cmd.model !== undefined && !features.includes("model") && "モデル",
+      cmd.effort !== undefined && !features.includes("effort") && "Effort",
+      cmd.ultracode !== undefined && !features.includes("ultracode") && "Ultracode",
+      (cmd.files?.length ?? 0) > 0 && !features.includes("files") && "ファイルの添付",
+    ].filter(Boolean);
+    if (missing.length === 0) return undefined;
+    return `この working server の gasho-daemon は古いため、次のものを扱えません：${missing.join("、")}。gasho-daemon を更新してください。`;
   }
 
   onClientClose(peer: ClientPeer): void {

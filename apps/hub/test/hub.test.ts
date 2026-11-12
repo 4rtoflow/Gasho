@@ -317,3 +317,64 @@ test("the audit log records file names and sizes, never their contents", () => {
   assert.match(logged?.summary ?? "", /読んで \[model: haiku\] \[file: memo\.txt, 1KB\]/);
   assert.ok(!(logged?.summary ?? "").includes(data));
 });
+
+test("effort and ultracode of inputs are checked, and machines carry the model names their daemon read", () => {
+  const ok = { type: "session.input", sessionId: "s1", text: "考えて" } as const;
+  assert.equal(validateCommand({ ...ok, effort: "xhigh", ultracode: true }), undefined);
+  assert.match(validateCommand({ ...ok, effort: "huge" as never }) ?? "", /Effort/);
+  assert.match(validateCommand({ ...ok, ultracode: "yes" as never }) ?? "", /Ultracode/);
+  // Typed commands that would change the defaults of every new session are refused; the session-only one is not.
+  assert.match(validateCommand({ ...ok, text: "/model sonnet" }) ?? "", /モデルの選択/);
+  assert.match(validateCommand({ ...ok, text: " /effort high" }) ?? "", /Effort のボタン/);
+  assert.equal(validateCommand({ ...ok, text: "/effort ultracode on" }), undefined);
+  assert.equal(validateCommand({ ...ok, text: "/models について教えて" }), undefined);
+
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.6.0" });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  hub.onDaemonMessage(d, {
+    type: "capabilities",
+    canLaunch: true,
+    folders: [],
+    models: [
+      { id: "default", name: "Sonnet 5.5" },
+      { id: "opus", name: "Opus 5.5" },
+      { id: "gpt" as never, name: "x" },
+      { id: "haiku", name: "" },
+    ],
+    modelsAt: 1_700_000_000_000,
+    features: ["model", "effort", "ultracode", "files", "teleport" as never, "effort"],
+  });
+  const got = c.sent.filter((m) => m.type === "machine").at(-1);
+  assert.ok(got?.type === "machine");
+  assert.deepEqual(got.machine.models, [
+    { id: "default", name: "Sonnet 5.5" },
+    { id: "opus", name: "Opus 5.5" },
+  ]);
+  assert.equal(got.machine.modelsAt, 1_700_000_000_000);
+  assert.deepEqual(got.machine.features, ["model", "effort", "ultracode", "files"]);
+
+  hub.onClientMessage(c, { type: "session.input", requestId: "e", machine: machineId, sessionId: "s1", text: "考えて", effort: "high", ultracode: false });
+  const relayed = d.sent.at(-1);
+  assert.ok(relayed?.type === "session.input" && relayed.effort === "high" && relayed.ultracode === false);
+});
+
+test("a gasho-daemon that does not list its features gets no effort or ultracode switch, with a clear error", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.5.0" });
+  hub.onDaemonMessage(d, { type: "capabilities", canLaunch: true, folders: [] });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const before = d.sent.length;
+  hub.onClientMessage(c, { type: "session.input", requestId: "old", machine: machineId, sessionId: "s1", text: "考えて", effort: "high", ultracode: true });
+  assert.equal(d.sent.length, before);
+  const reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && !reply.result.ok);
+  assert.match(reply.result.error ?? "", /gasho-daemon は古いため、次のものを扱えません：Effort、Ultracode。/);
+  // What 0.5.0 could do still goes through.
+  hub.onClientMessage(c, { type: "session.input", requestId: "ok", machine: machineId, sessionId: "s1", text: "見て", model: "opus" });
+  assert.equal(d.sent.at(-1)?.type, "session.input");
+});

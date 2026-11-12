@@ -60,6 +60,9 @@ export interface SessionInfo {
   repos?: SessionRepo[];
   /** The model the session uses, as Claude Code names it ("Opus 5.5"); from the transcript. */
   model?: string;
+  /** Sessions started from Gasho: the effort level and ultracode as Claude Code shows them above the prompt. */
+  effort?: EffortLevel;
+  ultracode?: boolean;
 }
 
 export type TranscriptBlock =
@@ -122,6 +125,15 @@ export interface MachineInfo {
   canLaunch?: boolean;
   /** Folders a session can be started in (already trusted by Claude Code). */
   folders?: string[];
+  /** Models as Claude Code's /model picker names them on this machine, once gasho-daemon has seen the picker. */
+  models?: ModelOption[];
+  /** When gasho-daemon read `models` from the picker (ms since the epoch). */
+  modelsAt?: number;
+  /**
+   * What gasho-daemon can switch or carry with an input to a session started from Gasho. Absent for a gasho-daemon
+   * older than 0.6.0, which can switch the model and carry files, but not the effort level or ultracode.
+   */
+  features?: InputFeature[];
 }
 
 /** Something registered with the Gasho server: a browser or a working server. */
@@ -218,7 +230,14 @@ export type DaemonToHub =
   | { type: "transcript.append"; sessionId: string; entries: TranscriptEntry[] }
   | ({ type: "transcript.page"; requestId: string; sessionId: string } & TranscriptPage)
   | { type: "hook"; event: HookEvent }
-  | { type: "capabilities"; canLaunch: boolean; folders: string[] }
+  | {
+      type: "capabilities";
+      canLaunch: boolean;
+      folders: string[];
+      models?: ModelOption[];
+      modelsAt?: number;
+      features?: InputFeature[];
+    }
   | { type: "command.result"; requestId: string; result: CommandResult }
   | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string };
 
@@ -258,6 +277,21 @@ export type ClientToHub =
 /** Models a session started from Gasho can switch to, as Claude Code's /model picker lists them. */
 export type SessionModel = "default" | "opus" | "fable" | "sonnet" | "haiku";
 
+/** Claude Code's effort levels, lowest first. */
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** What can be switched with an input, for this session only. */
+export type SwitchField = "model" | "effort" | "ultracode";
+
+/** What gasho-daemon can do with an input besides typing it: switch these, and carry files. */
+export type InputFeature = SwitchField | "files";
+
+/** A model as Claude Code's /model picker names it on a working server ("Opus 5.5"; for "default", the model it stands for). */
+export interface ModelOption {
+  id: SessionModel;
+  name: string;
+}
+
 /** A file sent with an input, base64-encoded. The Gasho server allows 5 files and 10 MB in all per input. */
 export interface InputFile {
   name: string;
@@ -268,10 +302,18 @@ export interface InputFile {
 export type SessionCommand =
   | { type: "session.launch"; cwd: string; name?: string }
   /**
-   * `model`: switch the session to this model (for this session only) before the text is sent.
+   * `model`, `effort`, `ultracode`: switch the session (for this session only) before the text is sent.
    * `files`: saved on the working server and mentioned at the end of the text (`@path`), so Claude reads them.
    */
-  | { type: "session.input"; sessionId: string; text: string; model?: SessionModel; files?: InputFile[] }
+  | {
+      type: "session.input";
+      sessionId: string;
+      text: string;
+      model?: SessionModel;
+      effort?: EffortLevel;
+      ultracode?: boolean;
+      files?: InputFile[];
+    }
   | { type: "session.interrupt"; sessionId: string };
 
 export interface CommandResult {
@@ -282,4 +324,6 @@ export interface CommandResult {
   queued?: boolean;
   /** Sent, but something asked for did not happen (e.g. the model could not be switched). */
   warning?: string;
+  /** session.input: what was asked to switch but was not switched (the session keeps what it had). */
+  unapplied?: SwitchField[];
 }
