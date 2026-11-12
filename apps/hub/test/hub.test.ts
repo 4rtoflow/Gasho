@@ -441,3 +441,14 @@ test("one GitHub item goes to the daemon and back; a bad number is ignored", () 
   const got = c.sent.at(-1);
   assert.ok(got?.type === "github.item" && got.number === 3 && got.repo === "api" && got.error === "読めません");
 });
+
+test("what a browser asked a working server to do reaches the browsers at once (the home screen's latest operations)", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.8.0" });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  hub.onClientMessage(c, { type: "session.input", requestId: "x", machine: machineId, sessionId: "s1", text: "テストを流して" });
+  const ev = c.sent.find((m) => m.type === "event");
+  assert.ok(ev?.type === "event" && ev.event.event === "Gasho:session.input" && ev.event.summary?.startsWith("テストを流して"));
+});

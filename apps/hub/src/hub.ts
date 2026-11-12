@@ -404,6 +404,8 @@ export class Hub {
           : "";
     const event: MachineHookEvent = { machine, sessionId, event: `Gasho:${cmd.type}`, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` };
     this.store.addEvent(event);
+    // Browsers show the latest operations on the home screen.
+    this.broadcast({ type: "event", event });
 
     const requestId = randomUUID();
     // Launching waits for Claude Code to start; an input may switch the model, effort and ultracode first.
