@@ -106,6 +106,11 @@ export interface PromptInputProps {
   hint?: ReactNode | false;
   /** Pad the bottom for the iPhone home indicator (use when the composer is pinned to the screen bottom) */
   safeArea?: boolean;
+  /**
+   * "card" (default): the text on top and the buttons in a row under it.
+   * "pill": the text and the buttons in one row on frosted glass, for a composer that floats over content.
+   */
+  variant?: "card" | "pill";
   className?: string;
 }
 
@@ -410,10 +415,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
     actions,
     hint,
     safeArea = false,
+    variant = "card",
     className = "",
   },
   ref,
 ) {
+  const pill = variant === "pill";
   const reduce = useReducedMotion();
   const uid = useId();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -659,6 +666,161 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const sendLabel = streaming ? "停止" : "送信";
   const sendReady = streaming || canSend;
 
+  // the textarea, with its hidden measuring twin
+  const textArea = (
+    <div className={cx("relative overflow-hidden", pill && "min-w-0 flex-1")}>
+      <div
+        ref={mirrorRef}
+        aria-hidden
+        className={cx("pointer-events-none invisible absolute inset-x-0 top-0 whitespace-pre-wrap break-words", PAD_X, PAD_Y, TEXT)}
+        style={{ overflowWrap: "anywhere" }}
+      >
+        {text + "\u200b"}
+      </div>
+      <motion.textarea
+        ref={textRef}
+        value={text}
+        rows={1}
+        disabled={disabled}
+        maxLength={maxLength + 400}
+        placeholder={placeholder}
+        aria-label="メッセージ"
+        aria-describedby={`${uid}-hint`}
+        enterKeyHint={enter ? "send" : "enter"}
+        onChange={(e) => {
+          histIdx.current = -1;
+          setText(e.target.value);
+        }}
+        onKeyDown={onKeyDown}
+        onPaste={onPaste}
+        style={{ height: h, overflowY: atMax ? "auto" : "hidden" }}
+        className={cx(
+          "block w-full resize-none bg-transparent text-neutral-900 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500",
+          PAD_X,
+          PAD_Y,
+          TEXT,
+        )}
+      />
+    </div>
+  );
+
+  // attach, model picker, extra actions
+  const leftTools = (
+    <div className="flex min-w-0 items-center gap-0.5">
+      {allowAttachments && (
+        <>
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            accept={accept}
+            onChange={(e) => {
+              if (e.target.files) addFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            disabled={disabled || attachments.length >= maxFiles}
+            aria-label="ファイルを添付"
+            title="ファイルを添付"
+            onClick={() => fileInput.current?.click()}
+            className={`grid h-10 w-10 place-items-center rounded-xl sm:h-9 sm:w-9 ${softBtn} ${focusRing} disabled:pointer-events-none disabled:opacity-40`}
+          >
+            <Ico d={P.clip} />
+          </button>
+        </>
+      )}
+      {models.length > 0 && (
+        <ModelPicker
+          models={models}
+          value={activeModelId}
+          disabled={disabled}
+          onChange={(id) => {
+            setModelId(id);
+            onModelChange?.(id);
+          }}
+        />
+      )}
+      {actions}
+    </div>
+  );
+
+  // character count and send ⇄ stop
+  const rightTools = (
+    <div className="flex shrink-0 items-center gap-2">
+      {nearLimit && (
+        <span className={cx("text-[11.5px] tabular-nums", over ? "text-rose-500" : "text-neutral-500")} aria-live="polite">
+          {text.length}/{maxLength}
+        </span>
+      )}
+
+      {/* send ⇄ stop */}
+      <div className="relative h-10 w-10 shrink-0">
+        <motion.svg
+          viewBox="0 0 46 46"
+          aria-hidden
+          className="pointer-events-none absolute -inset-[3px] h-[46px] w-[46px] text-neutral-400"
+          initial={false}
+          animate={{ opacity: streaming ? 1 : 0, scale: streaming ? 1 : 0.85 }}
+          transition={{ duration: 0.2 }}
+        >
+          <motion.circle
+            cx="23"
+            cy="23"
+            r="21"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray="34 98"
+            style={{ transformOrigin: "center", transformBox: "fill-box" }}
+            animate={streaming && !reduce ? { rotate: 360 } : { rotate: 0 }}
+            transition={streaming && !reduce ? { repeat: Infinity, duration: 1.1, ease: "linear" } : { duration: 0 }}
+          />
+        </motion.svg>
+
+        <motion.button
+          type="button"
+          aria-label={sendLabel}
+          title={streaming ? "停止（Esc）" : "送信"}
+          disabled={!sendReady}
+          onClick={() => (streaming ? onStop?.() : void submit())}
+          initial={false}
+          animate={{ borderRadius: streaming ? 14 : 20 }}
+          whileTap={reduce ? undefined : { scale: 0.92 }}
+          transition={{ type: "spring", duration: 0.35, bounce: 0.25 }}
+          className={cx(
+            "relative grid h-10 w-10 place-items-center overflow-hidden transition-colors duration-200 [-webkit-tap-highlight-color:transparent]",
+            sendReady
+              ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900"
+              : "bg-black/[0.06] text-neutral-400 dark:bg-white/[0.08] dark:text-neutral-500",
+            focusRing,
+            "disabled:cursor-not-allowed",
+          )}
+        >
+          <motion.span
+            className="absolute"
+            initial={false}
+            animate={{ opacity: streaming ? 0 : 1, scale: streaming ? 0.4 : 1, y: streaming ? 8 : 0 }}
+            transition={{ type: "spring", duration: 0.35, bounce: 0.2 }}
+          >
+            <Ico d={P.up} className="h-[18px] w-[18px]" sw={2.2} />
+          </motion.span>
+          <motion.span
+            className="absolute h-3 w-3 rounded-[3px] bg-current"
+            initial={false}
+            animate={{ opacity: streaming ? 1 : 0, scale: streaming ? 1 : 0.3 }}
+            transition={{ type: "spring", duration: 0.35, bounce: 0.3 }}
+          />
+        </motion.button>
+      </div>
+    </div>
+  );
+  const hasLeftTools = allowAttachments || models.length > 0 || Boolean(actions);
+
+
   return (
     <div className={cx("relative w-full", className)} style={safeArea ? { paddingBottom: "env(safe-area-inset-bottom)" } : undefined}>
       {/* soft glow while the assistant is replying */}
@@ -675,11 +837,18 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
         ref={cardRef}
         {...dragProps}
         className={cx(
-          "relative rounded-[24px] bg-white p-2 ring-1 ring-black/[0.08] transition-[box-shadow] duration-200 dark:bg-[#0f0f10] dark:ring-white/[0.09]",
+          "relative ring-1 transition-[box-shadow] duration-200",
+          pill
+            ? "rounded-[26px] bg-white/70 p-1.5 ring-black/[0.08] backdrop-blur-xl backdrop-saturate-150 dark:bg-neutral-900/55 dark:ring-white/[0.12]"
+            : "rounded-[24px] bg-white p-2 ring-black/[0.08] dark:bg-[#0f0f10] dark:ring-white/[0.09]",
           "focus-within:ring-black/25 dark:focus-within:ring-white/25",
-          disabled && "opacity-60",
+          disabled && !pill && "opacity-60",
         )}
-        style={{ boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 18px 40px -24px rgba(0,0,0,0.25)" }}
+        style={{
+          boxShadow: pill
+            ? "0 12px 32px -12px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06)"
+            : "0 1px 2px rgba(0,0,0,0.04), 0 18px 40px -24px rgba(0,0,0,0.25)",
+        }}
       >
         {/* attachment chips */}
         <AnimatePresence initial={false}>
@@ -734,153 +903,21 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
           )}
         </AnimatePresence>
 
-        {/* textarea (with its hidden measuring twin) */}
-        <div className="relative overflow-hidden">
-          <div
-            ref={mirrorRef}
-            aria-hidden
-            className={cx("pointer-events-none invisible absolute inset-x-0 top-0 whitespace-pre-wrap break-words", PAD_X, PAD_Y, TEXT)}
-            style={{ overflowWrap: "anywhere" }}
-          >
-            {text + "\u200b"}
+        {pill ? (
+          <div className="flex items-end gap-1">
+            {hasLeftTools && leftTools}
+            {textArea}
+            {rightTools}
           </div>
-          <motion.textarea
-            ref={textRef}
-            value={text}
-            rows={1}
-            disabled={disabled}
-            maxLength={maxLength + 400}
-            placeholder={placeholder}
-            aria-label="メッセージ"
-            aria-describedby={`${uid}-hint`}
-            enterKeyHint={enter ? "send" : "enter"}
-            onChange={(e) => {
-              histIdx.current = -1;
-              setText(e.target.value);
-            }}
-            onKeyDown={onKeyDown}
-            onPaste={onPaste}
-            style={{ height: h, overflowY: atMax ? "auto" : "hidden" }}
-            className={cx(
-              "block w-full resize-none bg-transparent text-neutral-900 outline-none placeholder:text-neutral-400 dark:text-neutral-100 dark:placeholder:text-neutral-500",
-              PAD_X,
-              PAD_Y,
-              TEXT,
-            )}
-          />
-        </div>
-
-        {/* toolbar */}
-        <div className="mt-1 flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-0.5">
-            {allowAttachments && (
-              <>
-                <input
-                  ref={fileInput}
-                  type="file"
-                  multiple
-                  hidden
-                  accept={accept}
-                  onChange={(e) => {
-                    if (e.target.files) addFiles(e.target.files);
-                    e.target.value = "";
-                  }}
-                />
-                <button
-                  type="button"
-                  disabled={disabled || attachments.length >= maxFiles}
-                  aria-label="ファイルを添付"
-                  title="ファイルを添付"
-                  onClick={() => fileInput.current?.click()}
-                  className={`grid h-10 w-10 place-items-center rounded-xl sm:h-9 sm:w-9 ${softBtn} ${focusRing} disabled:pointer-events-none disabled:opacity-40`}
-                >
-                  <Ico d={P.clip} />
-                </button>
-              </>
-            )}
-            {models.length > 0 && (
-              <ModelPicker
-                models={models}
-                value={activeModelId}
-                disabled={disabled}
-                onChange={(id) => {
-                  setModelId(id);
-                  onModelChange?.(id);
-                }}
-              />
-            )}
-            {actions}
-          </div>
-
-          <div className="flex shrink-0 items-center gap-2">
-            {nearLimit && (
-              <span className={cx("text-[11.5px] tabular-nums", over ? "text-rose-500" : "text-neutral-500")} aria-live="polite">
-                {text.length}/{maxLength}
-              </span>
-            )}
-
-            {/* send ⇄ stop */}
-            <div className="relative h-10 w-10 shrink-0">
-              <motion.svg
-                viewBox="0 0 46 46"
-                aria-hidden
-                className="pointer-events-none absolute -inset-[3px] h-[46px] w-[46px] text-neutral-400"
-                initial={false}
-                animate={{ opacity: streaming ? 1 : 0, scale: streaming ? 1 : 0.85 }}
-                transition={{ duration: 0.2 }}
-              >
-                <motion.circle
-                  cx="23"
-                  cy="23"
-                  r="21"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeDasharray="34 98"
-                  style={{ transformOrigin: "center", transformBox: "fill-box" }}
-                  animate={streaming && !reduce ? { rotate: 360 } : { rotate: 0 }}
-                  transition={streaming && !reduce ? { repeat: Infinity, duration: 1.1, ease: "linear" } : { duration: 0 }}
-                />
-              </motion.svg>
-
-              <motion.button
-                type="button"
-                aria-label={sendLabel}
-                title={streaming ? "停止（Esc）" : "送信"}
-                disabled={!sendReady}
-                onClick={() => (streaming ? onStop?.() : void submit())}
-                initial={false}
-                animate={{ borderRadius: streaming ? 14 : 20 }}
-                whileTap={reduce ? undefined : { scale: 0.92 }}
-                transition={{ type: "spring", duration: 0.35, bounce: 0.25 }}
-                className={cx(
-                  "relative grid h-10 w-10 place-items-center overflow-hidden transition-colors duration-200 [-webkit-tap-highlight-color:transparent]",
-                  sendReady
-                    ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900"
-                    : "bg-black/[0.06] text-neutral-400 dark:bg-white/[0.08] dark:text-neutral-500",
-                  focusRing,
-                  "disabled:cursor-not-allowed",
-                )}
-              >
-                <motion.span
-                  className="absolute"
-                  initial={false}
-                  animate={{ opacity: streaming ? 0 : 1, scale: streaming ? 0.4 : 1, y: streaming ? 8 : 0 }}
-                  transition={{ type: "spring", duration: 0.35, bounce: 0.2 }}
-                >
-                  <Ico d={P.up} className="h-[18px] w-[18px]" sw={2.2} />
-                </motion.span>
-                <motion.span
-                  className="absolute h-3 w-3 rounded-[3px] bg-current"
-                  initial={false}
-                  animate={{ opacity: streaming ? 1 : 0, scale: streaming ? 1 : 0.3 }}
-                  transition={{ type: "spring", duration: 0.35, bounce: 0.3 }}
-                />
-              </motion.button>
+        ) : (
+          <>
+            {textArea}
+            <div className="mt-1 flex items-center justify-between gap-2">
+              {leftTools}
+              {rightTools}
             </div>
-          </div>
-        </div>
+          </>
+        )}
 
         {/* drop zone overlay */}
         <AnimatePresence>
@@ -904,7 +941,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
       <p id={`${uid}-hint`} className="sr-only">
         {enter ? "Enter で送信、Shift＋Enter で改行。" : "Ctrl（⌘）＋Enter で送信。"}
       </p>
-      <div className="flex min-h-[1.5rem] items-center justify-between gap-3 px-3 pt-2 text-[12px] text-neutral-500">
+      <div
+        className={cx(
+          "flex items-center justify-between gap-3 px-3 text-[12px] text-neutral-500",
+          pill ? error && "pt-1.5" : "min-h-[1.5rem] pt-2",
+        )}
+      >
         <p role="alert" aria-live="polite" className={cx("min-w-0 truncate", error && "text-rose-500")}>
           {error}
         </p>

@@ -1,8 +1,9 @@
 // Conversation view. Keeps the scroll position when older pages are prepended and follows new entries
 // only while the reader is at the bottom. The footer (the chat box) floats over the bottom of the
-// conversation: it stays at the bottom of the screen, and the conversation scrolls behind it.
-import { AlertTriangle, ChevronRight, Image as ImageIcon, Wrench } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
+// conversation: it stays at the bottom of the screen, and the conversation scrolls behind it, blurred.
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { AlertTriangle, ArrowDown, ChevronRight, Image as ImageIcon, Wrench } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { MarkdownText } from "@/components/markdown";
 import { clockTime } from "@/lib/format";
@@ -27,6 +28,9 @@ function pretty(input: string): string {
     return input;
   }
 }
+
+/** The blur behind the chat box starts 2.5rem above it and is at full strength 1rem into it. */
+const BLUR_MASK = "linear-gradient(to bottom, transparent, black 3.5rem)";
 
 function Fold({ summary, children, tone }: { summary: React.ReactNode; children: React.ReactNode; tone?: "error" }) {
   return (
@@ -140,6 +144,8 @@ export function Transcript({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const footerBox = useRef<HTMLDivElement>(null);
+  const reduceMotion = useReducedMotion();
+  const [following, setFollowing] = useState(true);
   const prev = useRef<{ first?: string; count: number; height: number }>({ count: 0, height: 0 });
   const atBottom = useRef(true);
   const entries = state?.entries ?? [];
@@ -179,10 +185,11 @@ export function Transcript({
       onScroll={(e) => {
         const el = e.currentTarget;
         atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+        setFollowing(atBottom.current);
       }}
     >
       <div className="flex min-h-full flex-col">
-        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 pt-4 pb-10 md:px-6">
+        <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 pt-4 pb-12 md:px-6">
           {state && state.start > 0 && (
             <button
               type="button"
@@ -203,11 +210,43 @@ export function Transcript({
           )}
         </div>
         {hasFooter && (
-          // Opaque behind the chat box, so nothing shows through it. The conversation fades out in the strip
-          // above it, which lets clicks through. The bottom padding of the list keeps the newest entry clear of it.
-          <div ref={footerBox} className="sticky bottom-0 z-10 bg-background px-4 md:px-6">
-            <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-full h-8 bg-linear-to-t from-background to-transparent" />
-            <div className="mx-auto max-w-3xl">{footer}</div>
+          <div
+            ref={footerBox}
+            className="sticky bottom-0 z-10 px-4 md:px-6"
+            style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+          >
+            {/* The conversation behind the chat box: blurred and darkened, fading in from above. The bottom
+                padding of the list keeps the newest entry clear of it when scrolled to the end. */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 -top-10 bottom-0 bg-linear-to-b from-transparent to-background/85 backdrop-blur-md"
+              style={{ maskImage: BLUR_MASK, WebkitMaskImage: BLUR_MASK }}
+            />
+            <div className="relative mx-auto max-w-3xl">
+              <AnimatePresence>
+                {!following && (
+                  <div className="pointer-events-none absolute inset-x-0 bottom-full mb-3 flex justify-center">
+                    <motion.button
+                      type="button"
+                      aria-label="最新の発言へ"
+                      title="最新の発言へ"
+                      onClick={() => {
+                        const el = scroller.current;
+                        el?.scrollTo({ top: el.scrollHeight, behavior: reduceMotion ? "auto" : "smooth" });
+                      }}
+                      initial={{ opacity: 0, scale: 0.8, y: 6 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.8, y: 6 }}
+                      transition={{ duration: 0.16 }}
+                      className="pointer-events-auto grid size-10 place-items-center rounded-full bg-neutral-800/70 text-neutral-100 shadow-lg ring-1 ring-white/15 backdrop-blur-xl hover:bg-neutral-700/80"
+                    >
+                      <ArrowDown className="size-5" />
+                    </motion.button>
+                  </div>
+                )}
+              </AnimatePresence>
+              {footer}
+            </div>
           </div>
         )}
       </div>

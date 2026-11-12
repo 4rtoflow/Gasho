@@ -127,9 +127,17 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
 
   if (!s.managed) {
     return (
-      <div className="pb-3">
-        <PromptInput onSend={() => undefined} disabled models={[]} allowAttachments={false} placeholder="Gasho からは入力できません" hint={false} />
-        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 text-xs text-muted-foreground">
+      <div>
+        <PromptInput
+          variant="pill"
+          onSend={() => undefined}
+          disabled
+          models={[]}
+          allowAttachments={false}
+          placeholder="Gasho からは入力できません"
+          hint={false}
+        />
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 text-xs text-muted-foreground">
           <span>claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。</span>
           {url && (
             <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-foreground/80 hover:text-foreground">
@@ -157,8 +165,9 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
   };
 
   return (
-    <div className="pb-3">
+    <div>
       <PromptInput
+        variant="pill"
         onSend={async ({ text }) => {
           setError(undefined);
           const r = await sendCommand(machine.id, { type: "session.input", sessionId: s.sessionId, text });
@@ -175,11 +184,10 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
         allowAttachments={false}
         maxLength={20_000}
         placeholder="Agent への指示を入力…"
-        safeArea
         hint={false}
       />
       {(status || error) && (
-        <p className={error ? "px-3 text-xs text-red-400" : "px-3 text-xs text-muted-foreground"}>{error ?? status}</p>
+        <p className={error ? "mt-1.5 px-3 text-xs text-red-400" : "mt-1.5 px-3 text-xs text-muted-foreground"}>{error ?? status}</p>
       )}
     </div>
   );
