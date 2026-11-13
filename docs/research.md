@@ -118,8 +118,23 @@ zellij を操作するときは、`--session` で対象を必ず指定する。r
 - 返答の記録には `"effort": "medium"` が残る。`claude agents --json` には、モデルも Effort も Ultracode も出ない
 - CLI には `--effort <level>`（low・medium・high・xhigh・max）があり、`--effort ultracode` でも Ultracode が有効になる
 
+## 検証6：フォーク、名前の変更、終了
+
+2026年11月13日に、Claude Code 2.1.323 で確かめた。作業用の一時フォルダーで試し、試したあとで `claude purge` で消した。
+
+- `claude --resume <ID> --fork-session` で起動すると、`claude agents --json` には、はじめから元と違う ID で出た。`--remote-control <名前>` と一緒に付けても起動し、Remote Control につながった
+- フォークのトランスクリプトは、すぐには書かれなかった。`--name` を付けても同じだった。`/rename` を送ると、コピーした会話と一緒に書かれた
+- コピーされた発言は、元と同じ uuid とタイムスタンプを持っていた。フォークは API を呼んでいないのに、終了したときの `cost-state` には元の会話の費用が入っていた
+- 起動したときのレジストリ（`~/.claude/sessions/<pid>.json`）の名前は、`gasho-73` のような自動の名前（`nameSource` が `derived`）で、`--remote-control` に渡した名前とは別だった。`claude agents --json` の `name` も同じ
+- `/rename <名前>`（別名 `/name`）を送ると、`Session renamed to: <名前>` と表示された。レジストリの名前（`nameSource` が `user` になる）と `claude agents --json` の名前が変わり、トランスクリプトに `custom-title` が記録された。入力欄の上の罫線にも名前が出る
+- Claude Code のコードでは、`/rename` は、Remote Control のセッションがあるとその名前も変える。同じマシンで同じ名前のセッションが動いていると、別の名前を付ける。どちらも、画面ではまだ確かめていない
+- SIGTERM を送ると、Claude Code は0.25秒以内に終了した。レジストリのファイルを消し、トランスクリプトの最後に `cost-state` を書いて、`claude --resume <ID>` で再開できると表示した。Remote Control につながっているセッションでは、1秒より長くかかった
+- Claude Code のコードでは、前の発言から70分以上（`CLAUDE_CODE_RESUME_THRESHOLD_MINUTES`）たち、会話が10万トークン以上（`CLAUDE_CODE_RESUME_TOKEN_THRESHOLD`）あるセッションを再開すると、要約から始めるかを尋ねる。出るかどうかは、サーバー側の設定でも変わる。Esc で閉じると、何も保存せずにそのまま再開する。`Don't ask me again` を選ぶと、全体の設定（`resumeReturnDismissed`）に保存される。この問いも、画面ではまだ見ていない
+
 ## 未確認の事項
 
+- 名前の変更が、公式アプリのセッション名に反映されるか
+- 古く長い会話を再開するときの問いの画面と、Esc で閉じたときの動き
 - hook から拒否を返したときの動き
 - Mac（launchd、zellij）での動き
 - AskUserQuestion に hook で答える方法

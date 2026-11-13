@@ -25,11 +25,14 @@ import { HubClient } from "./hub-client.ts";
 import {
   atBottom,
   bannerModel,
+  bottomLines,
   cleanEnv,
   clearPromptKeys,
   dialogOpen,
   EFFORT_LEVELS,
+  forkName,
   isAlive,
+  isRename,
   launchableFolders,
   launchArgs,
   ManagedSessions,
@@ -44,8 +47,11 @@ import {
   promptHolds,
   promptRuleUltracode,
   refusedCommand,
+  renameCommand,
+  resumeQuestionOpen,
   safeFileName,
   type Screen,
+  sessionName,
   statusLine,
   surveyOpen,
   switchedForSession,
@@ -59,12 +65,17 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.8.0";
+export const DAEMON_VERSION = "0.9.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
+/** A fork: how long Claude Code may take to show its prompt box once it runs, and then to write the copy's transcript. */
+const FORK_READY_MS = 15_000;
+const FORK_TRANSCRIPT_MS = 5000;
+/** Removing a session: how long Claude Code may take to end after SIGTERM (Remote Control sessions take a moment). */
+const REMOVE_WAIT_MS = 8000;
 const MAX_INPUT = 20_000;
 const INTERRUPT_SETTLE_MS = 1500;
 const MODEL_NAMES: Record<SessionModel, string> = { default: "既定のモデル", opus: "Opus", fable: "Fable", sonnet: "Sonnet", haiku: "Haiku" };
@@ -473,7 +484,8 @@ export class Daemon {
     for (const m of this.managed.all()) {
       const t = this.tracked.get(m.sessionId);
       if (!t?.transcript) continue;
-      t.tokens ??= new TokenCounter(t.transcript);
+      // A fork's transcript starts with a copy of the conversation it was forked from: not this session's tokens.
+      t.tokens ??= new TokenCounter(t.transcript, { since: m.forkedAt });
       if (t.info.status !== "busy" && t.tokensAt !== undefined && now - t.tokensAt < TOKENS_IDLE_MS) continue;
       t.tokensAt = now;
       try {
@@ -542,7 +554,9 @@ export class Daemon {
       let changed = false;
       for (const t of this.tracked.values()) {
         if (!t.tail) continue;
+        const named = t.meta.customTitle;
         const entries = await t.tail.poll(t.meta);
+        if (t.meta.customTitle !== named && (await this.followName(t))) changed = true;
         if (entries.length === 0) continue;
         this.notePrompts(t.info.sessionId, entries);
         this.hub.send({ type: "transcript.append", sessionId: t.info.sessionId, entries });
@@ -553,6 +567,23 @@ export class Daemon {
     } finally {
       this.polling = false;
     }
+  }
+
+  /**
+   * A session started from Gasho takes the name Claude Code has just recorded for it (`custom-title`): the one asked
+   * for with /rename, or another when a live session on this machine holds that name already, or one given in the
+   * session's own terminal. Not while a /rename from Gasho still waits: the newer name would be undone until it is sent.
+   * Only names recorded while the transcript is followed count, never older ones (a fork's copy may hold its source's).
+   */
+  private async followName(t: Tracked): Promise<boolean> {
+    const id = t.info.sessionId;
+    const recorded = t.meta.customTitle;
+    if (!recorded || !this.managed.has(id) || this.managed.waiting(id).some((input) => isRename(input.text))) return false;
+    const checked = sessionName(recorded);
+    if ("error" in checked || !this.managed.setName(id, checked.name)) return false;
+    log(`${id} is now named "${checked.name}" (recorded by Claude Code)`);
+    await this.managed.save().catch((e) => log("could not save the managed sessions", e));
+    return true;
   }
 
   /** Keeps the last user messages of a session (see `prompts`). */
@@ -584,12 +615,32 @@ export class Daemon {
         return this.sendGitHubItem(m);
       case "session.launch":
       case "session.input":
-      case "session.interrupt": {
+      case "session.interrupt":
+      case "session.rename":
+      case "session.fork":
+      case "session.remove": {
         let result: CommandResult;
         try {
-          if (m.type === "session.launch") result = await this.launch(m.cwd, m.name);
-          else if (m.type === "session.input") result = await this.input(m);
-          else result = await this.interrupt(m.sessionId);
+          switch (m.type) {
+            case "session.launch":
+              result = await this.launch(m.cwd, m.name);
+              break;
+            case "session.input":
+              result = await this.input(m);
+              break;
+            case "session.interrupt":
+              result = await this.interrupt(m.sessionId);
+              break;
+            case "session.rename":
+              result = await this.rename(m.sessionId, m.name, m.requestId);
+              break;
+            case "session.fork":
+              result = await this.fork(m.sessionId, m.name);
+              break;
+            case "session.remove":
+              result = await this.remove(m.sessionId);
+              break;
+          }
         } catch (e) {
           log(`${m.type} failed`, e);
           result = { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -707,42 +758,224 @@ export class Daemon {
     const stat = await fsp.stat(dir).catch(() => undefined);
     if (!stat?.isDirectory()) return { ok: false, error: `フォルダーがありません：${dir}` };
     const rcName = name?.trim() || `${path.basename(dir)}-gasho`;
+    const started = await this.startClaude(dir, rcName);
+    if ("error" in started) return { ok: false, error: started.error };
+    const { sessionId, zellijSession, pid } = started;
+    this.managed.add({ sessionId, zellijSession, pid, cwd: dir, name: rcName, launchedAt: Date.now() });
+    await this.managed.save();
+    await this.refresh();
+    return { ok: true, sessionId };
+  }
+
+  /**
+   * Starts `claude --remote-control <rcName> [claudeArgs…]` in `dir` inside a new zellij session, and waits until
+   * `claude agents` lists it with a session id (one that `accept` takes). With `resuming`, Claude Code's question about
+   * resuming an old, long session is answered with Esc (the full session, as it is; see resumeQuestionOpen), and
+   * `resumeAsked` says so. On failure, the zellij session is closed.
+   */
+  private async startClaude(
+    dir: string,
+    rcName: string,
+    { claudeArgs = [], accept = () => true, resuming = false }: { claudeArgs?: string[]; accept?: (row: AgentRow) => boolean; resuming?: boolean } = {},
+  ): Promise<{ sessionId: string; zellijSession: string; pid: number; resumeAsked: boolean } | { error: string }> {
     const zellijSession = zellijSessionName(rcName);
     const pidFile = path.join(this.cfg.stateDir, `${zellijSession}.pid`);
     await fsp.mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
     await this.zellij.run(
-      launchArgs({ zellijSession, pidFile, cwd: dir, claudeBin: this.cfg.claudeBin, rcName, env: cleanEnv() }),
+      launchArgs({ zellijSession, pidFile, cwd: dir, claudeBin: this.cfg.claudeBin, rcName, env: cleanEnv(), claudeArgs }),
     );
-    log(`launching "${rcName}" in ${dir} (zellij session ${zellijSession})`);
+    log(`launching "${rcName}" in ${dir} (zellij session ${zellijSession})${claudeArgs.length > 0 ? ` with ${claudeArgs.join(" ")}` : ""}`);
 
     const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
     let pid: number | undefined;
-    while (Date.now() < deadline) {
-      await sleep(500);
-      pid ??= Number((await fsp.readFile(pidFile, "utf8").catch(() => "")).trim()) || undefined;
-      if (!pid) continue;
-      // A new session has no conversation yet, so the whole screen can be searched.
-      const screen = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain ?? "";
-      if (TRUST_PROMPT_RE.test(screen)) {
-        await this.zellij.kill(zellijSession);
-        return {
-          ok: false,
-          error: "このフォルダーは、まだ Claude Code に信頼されていません。端末で一度 claude を起動して信頼してから、もう一度試してください。",
-        };
+    let resumeAsked = false;
+    try {
+      while (Date.now() < deadline) {
+        await sleep(500);
+        pid ??= Number((await fsp.readFile(pidFile, "utf8").catch(() => "")).trim()) || undefined;
+        if (!pid) continue;
+        // The dialogs are drawn at the bottom, in place of the prompt box. A conversation being resumed can quote their
+        // words above it, so only a dialog that has the keys counts.
+        const screen = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain ?? "";
+        if (dialogOpen(screen) && atBottom(screen, TRUST_PROMPT_RE)) {
+          await this.zellij.kill(zellijSession);
+          return { error: "このフォルダーは、まだ Claude Code に信頼されていません。端末で一度 claude を起動して信頼してから、もう一度試してください。" };
+        }
+        if (resuming && resumeQuestionOpen(screen)) {
+          resumeAsked = true;
+          if (!(await this.answerResumeQuestion(zellijSession).then(() => true, () => false))) {
+            await this.zellij.kill(zellijSession);
+            return { error: "Claude Code が会話を要約から始めるかを尋ねたまま、答えを受け付けませんでした。" };
+          }
+          continue;
+        }
+        const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid && r.sessionId);
+        if (row?.sessionId && accept(row)) return { sessionId: row.sessionId, zellijSession, pid, resumeAsked };
+        if (!isAlive(pid)) break;
       }
-      const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid && r.sessionId);
-      if (row?.sessionId) {
-        this.managed.add({ sessionId: row.sessionId, zellijSession, pid, cwd: dir, name: rcName, launchedAt: Date.now() });
-        await this.managed.save();
-        await fsp.rm(pidFile, { force: true });
-        await this.refresh();
-        return { ok: true, sessionId: row.sessionId };
-      }
-      if (!isAlive(pid)) break;
+      const last = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain;
+      if (last) log(`"${rcName}" did not start; the end of its screen:\n${bottomLines(last, 8).join("\n")}`);
+      await this.zellij.kill(zellijSession);
+      return { error: "Claude Code を起動できませんでした（時間内にセッションを確認できませんでした）。" };
+    } finally {
+      await fsp.rm(pidFile, { force: true });
     }
-    await this.zellij.kill(zellijSession);
-    await fsp.rm(pidFile, { force: true });
-    return { ok: false, error: "Claude Code を起動できませんでした（時間内にセッションを確認できませんでした）。" };
+  }
+
+  /** Esc to the question about resuming an old, long session (see resumeQuestionOpen); throws if it stays open. */
+  private async answerResumeQuestion(session: string): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      await this.zellij.keys(session, "Esc");
+      if (await this.waitForScreen(session, (r) => !resumeQuestionOpen(r.screen))) return;
+    }
+    throw new Error("the question about resuming the session did not close");
+  }
+
+  /**
+   * Forks a session started from Gasho: `claude --remote-control <name> --resume <id> --fork-session` in its folder, in
+   * a new zellij session. The copy starts with the conversation so far; the session itself goes on as it was. Claude
+   * Code writes a fork's transcript only once something is recorded, so the copy is named with /rename right away:
+   * that names it in Claude Code too (the Remote Control name is set already), and its conversation can be read at once.
+   */
+  private async fork(sessionId: string, name: string | undefined): Promise<CommandResult> {
+    const source = this.managed.get(sessionId);
+    if (!source) return { ok: false, error: "このセッションはフォークできません。フォークできるのは、Gasho が起動したセッションだけです。" };
+    if (!this.canLaunch) return { ok: false, error: "この working server には zellij がないので、セッションを起動できません。" };
+    const checked = sessionName(name?.trim() ? name : forkName(source.name));
+    if ("error" in checked) return { ok: false, error: checked.error };
+    if (!(this.tracked.get(sessionId)?.transcript ?? (await findTranscript(this.cfg.claudeDir, sessionId)))) {
+      return { ok: false, error: "このセッションには、まだ会話がありません。最初の発言のあとでフォークしてください。" };
+    }
+    const forkedAt = Date.now();
+    const started = await this.startClaude(source.cwd, checked.name, {
+      claudeArgs: ["--resume", sessionId, "--fork-session"],
+      // The copy gets its own id; never take the session it was forked from for it.
+      accept: (row) => row.sessionId !== sessionId,
+      resuming: true,
+    });
+    if ("error" in started) return { ok: false, error: started.error };
+    const { sessionId: forkId, zellijSession, pid } = started;
+    const warnings: string[] = [];
+    let resumeAsked = started.resumeAsked;
+    try {
+      // Claude Code shows the prompt box once it has loaded the conversation (the question about an old session may
+      // come first). Nothing else types into the copy yet: Gasho takes it on only below.
+      let ready = false;
+      for (let waited = 0; waited < FORK_READY_MS && !ready; waited += 300) {
+        await sleep(300);
+        const s = await this.zellij.screen(zellijSession).catch(() => undefined);
+        if (!s) continue;
+        if (resumeQuestionOpen(s.plain)) {
+          await this.answerResumeQuestion(zellijSession).catch((e) => log(`${checked.name}: could not answer the question about resuming`, e));
+          resumeAsked = true;
+          continue;
+        }
+        ready = typedInBox(s) !== undefined;
+      }
+      const rename = renameCommand(checked.name);
+      const typed: TypeResult = ready ? await this.typeInput(zellijSession, rename).catch(() => "not-typed" as const) : "not-typed";
+      if (typed === "sent") {
+        for (let waited = 0; waited < FORK_TRANSCRIPT_MS; waited += 250) {
+          if (await findTranscript(this.cfg.claudeDir, forkId)) break;
+          await sleep(250);
+        }
+        // Seen by a refresh before its transcript was written, the copy would be streamed from its start: every copied
+        // message would reach browsers as a new one. Read as a whole instead; nobody has typed into it yet.
+        const t = this.tracked.get(forkId);
+        if (t && !t.transcript) t.sawWithoutTranscript = false;
+      }
+      this.managed.add({ sessionId: forkId, zellijSession, pid, cwd: source.cwd, name: checked.name, launchedAt: Date.now(), forkOf: sessionId, forkedAt });
+      if (typed !== "sent") {
+        // Until Claude Code records something, the copy shows no conversation in Gasho.
+        this.managed.enqueue(forkId, { text: rename, ...(typed === "unsure" ? { entered: true, enteredAt: Date.now() } : {}) });
+        warnings.push("フォークした会話は、Claude Code が書き出すまで Gasho に出ません。書き出させるための /rename を待たせてあり、送れたら出ます。");
+      }
+      await this.managed.save();
+    } catch (e) {
+      // A copy that Gasho does not keep would run on unseen: it is closed instead.
+      this.managed.remove(forkId);
+      await this.zellij.kill(zellijSession);
+      throw e;
+    }
+    log(`forked ${source.name} (${sessionId}) as "${checked.name}" (${forkId})`);
+    if (resumeAsked) {
+      warnings.push(
+        "前の発言から時間がたっていて会話も長いため、Claude Code が要約から始めるかを尋ねました。フォークなので、会話はそのまま引き継いでいます。次の返答では、会話をすべて読み直します（時間とトークンが多くかかります）。",
+      );
+    }
+    await this.refresh();
+    return { ok: true, sessionId: forkId, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  /**
+   * Renames a session started from Gasho: in Gasho at once, and in Claude Code with /rename, which also renames its
+   * Remote Control session (the name in the official apps). /rename is typed like an input, so only while the session
+   * is idle: it waits while the session works. A /rename still waiting is replaced, not sent too.
+   */
+  private async rename(sessionId: string, name: string, requestId: string): Promise<CommandResult> {
+    if (!this.managed.has(sessionId)) {
+      return { ok: false, error: "このセッションの名前は変えられません。変えられるのは、Gasho が起動したセッションだけです。" };
+    }
+    const checked = sessionName(name);
+    if ("error" in checked) return { ok: false, error: checked.error };
+    this.managed.drop(sessionId, (input) => isRename(input.text));
+    if (this.managed.setName(sessionId, checked.name)) await this.managed.save();
+    // Other inputs waiting go first, and typing them can take long (a model switch): the answer does not wait for them.
+    const ahead = this.managed.pending(sessionId) > 0;
+    this.managed.enqueue(sessionId, { id: requestId, text: renameCommand(checked.name) });
+    log(`renaming ${sessionId} to "${checked.name}"`);
+    this.emitSessions();
+    if (ahead) return { ok: true, queued: true };
+    let warnings: string[] = [];
+    try {
+      const flushed = await this.flushInput(sessionId);
+      // The queue may have held earlier inputs: what happened to those is not this request's to report.
+      if (flushed?.id === requestId) warnings = flushed.warnings;
+    } catch (e) {
+      log(`could not send /rename to ${sessionId} yet`, e);
+      warnings.push("Claude Code の画面を操作できませんでした。名前の変更は待たせてあり、あとで送ります。");
+    }
+    this.emitSessions();
+    return { ok: true, queued: this.managed.pending(sessionId) > 0, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  /**
+   * Removes a session started from Gasho. Claude Code is asked to end with SIGTERM, as on a shutdown: it ends its
+   * Remote Control session, and its conversation is kept (`claude --resume` lists it). Then its zellij session is
+   * closed, which ends whatever still runs in it. Only a process that `claude agents` lists with this session's id is
+   * signalled, so a PID used again by another process is never hit.
+   */
+  private async remove(sessionId: string): Promise<CommandResult> {
+    const m = this.managed.get(sessionId);
+    if (!m) return { ok: false, error: "このセッションは削除できません。削除できるのは、Gasho が起動したセッションだけです。" };
+    // From here on nothing is typed into it, and Gasho no longer shows it.
+    this.managed.remove(sessionId);
+    for (const map of [this.settleUntil, this.latePicker, this.prompts]) map.delete(sessionId);
+    await this.managed.save();
+    this.emitSessions();
+    const row = (await listAgents(this.cfg.claudeBin).catch(() => [] as AgentRow[])).find((r) => r.pid === m.pid);
+    const ours = row?.sessionId === sessionId;
+    if (ours) {
+      try {
+        process.kill(m.pid, "SIGTERM");
+      } catch {
+        // ended already
+      }
+      for (let waited = 0; waited < REMOVE_WAIT_MS && isAlive(m.pid); waited += 250) await sleep(250);
+    }
+    await this.zellij.kill(m.zellijSession);
+    if (ours && isAlive(m.pid)) {
+      log(`${m.name} did not end; stopping it`);
+      try {
+        process.kill(m.pid, "SIGKILL");
+      } catch {
+        // ended meanwhile
+      }
+    }
+    await fsp.rm(this.attachmentsOf(sessionId), { recursive: true, force: true });
+    log(`removed session ${m.name} (${sessionId}); closed zellij session ${m.zellijSession}`);
+    await this.refresh();
+    return { ok: true };
   }
 
   private async input(m: Extract<HubToDaemon, { type: "session.input" }>): Promise<CommandResult> {

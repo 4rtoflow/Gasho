@@ -60,3 +60,21 @@ test("tokens are counted once per reply, across the session's transcript and its
   assert.deepEqual(c.hours(Date.parse("2026-11-15T00:00:00Z")), []);
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("a fork does not count the replies copied from the session it was forked from", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-tokens-"));
+  try {
+    const transcript = path.join(dir, "fork.jsonl");
+    const u = { input_tokens: 1, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 100 };
+    // The copy keeps the replies' times; the fork's own replies come after it was forked.
+    await fs.writeFile(transcript, reply("m1", "2026-11-13T09:00:00Z", u) + reply("m2", "2026-11-13T09:30:00Z", u) + reply("m3", "2026-11-13T10:05:00Z", u));
+    const fork = new TokenCounter(transcript, { since: Date.parse("2026-11-13T10:00:00Z") });
+    await fork.update();
+    assert.deepEqual(fork.totals(), { input: 1, output: 10, cacheWrite: 0, cacheRead: 100 });
+    const whole = new TokenCounter(transcript);
+    await whole.update();
+    assert.equal(whole.totals().output, 30);
+  } finally {
+    await fs.rm(dir, { recursive: true });
+  }
+});

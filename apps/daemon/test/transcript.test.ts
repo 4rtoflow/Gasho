@@ -235,3 +235,19 @@ test("session-only model switches are counted, so a new one can be told from ear
   out("Set model to `Sonnet 5.5 (default)` for this session only");
   assert.equal(meta.sessionSwitches, 2);
 });
+
+test("the name given with /rename or --name is recorded as custom-title, and the last one counts", () => {
+  const meta = emptyMeta();
+  assert.equal(parseRecord({ type: "custom-title", customTitle: "フォークの試し", sessionId: "s1" }, meta), null);
+  assert.equal(meta.customTitle, "フォークの試し");
+  parseRecord({ type: "custom-title", customTitle: "  調査 その2 " }, meta);
+  assert.equal(meta.customTitle, "調査 その2");
+  // Nothing usable: the name stays.
+  parseRecord({ type: "custom-title", customTitle: "   " }, meta);
+  parseRecord({ type: "custom-title" }, meta);
+  assert.equal(meta.customTitle, "調査 その2");
+  // The title Claude Code generates is another thing.
+  parseRecord({ type: "ai-title", aiTitle: "テストの整理" }, meta);
+  assert.equal(meta.customTitle, "調査 その2");
+  assert.equal(meta.title, "テストの整理");
+});

@@ -1,6 +1,7 @@
-import { Home, KeyRound } from "lucide-react";
-import { useState } from "react";
+import { Home, KeyRound, Plus } from "lucide-react";
+import { useState, type ReactElement } from "react";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
+import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
@@ -14,6 +15,7 @@ import { GitHubItemPanel } from "@/views/github-item";
 import { GitHubListPanel } from "@/views/github-list";
 import { GraphPanel } from "@/views/graph";
 import { HomeView } from "@/views/home";
+import { LaunchDialog } from "@/views/launch";
 import { PairView } from "@/views/pair";
 import { SessionView } from "@/views/session";
 
@@ -82,6 +84,10 @@ export function App() {
   const route = useRoute();
   const { auth, me, machines, notifications, connected } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
+  // What was picked from a session's menu in the sidebar (rename, fork, remove); its dialog is open meanwhile.
+  const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
+  // The dialog that starts a new session, opened from the "＋" of the sidebar's session list.
+  const [launchOpen, setLaunchOpen] = useState(false);
   const desktop = useMediaQuery(DESKTOP);
 
   if (auth === "checking") return <Centered>読み込み中…</Centered>;
@@ -98,19 +104,23 @@ export function App() {
         { id: "devices", label: "端末", icon: <KeyRound /> },
       ],
     },
-    ...(sessions.length > 0
-      ? [
-          {
-            title: "セッション",
-            items: sessions.map(({ machine: m, session: s }) => ({
-              id: [m.id, s.sessionId].join(SEP),
-              label: sessionLabel(s),
-              icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
-              badge: !m.connected ? "オフライン" : s.status === "waiting" ? "確認" : undefined,
-            })),
-          },
-        ]
-      : []),
+    {
+      // Shown even without sessions, for its "＋".
+      title: "セッション",
+      action: { label: "新しいセッション", icon: <Plus />, onClick: () => setLaunchOpen(true) },
+      items: sessions.map(({ machine: m, session: s }) => ({
+        id: [m.id, s.sessionId].join(SEP),
+        label: sessionLabel(s),
+        icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
+        badge: !m.connected ? "オフライン" : s.status === "waiting" ? "確認" : undefined,
+        // Right-click (a long press on a phone): rename, fork, remove.
+        wrap: (button: ReactElement) => (
+          <SessionContextMenu machine={m} session={s} onPick={setSessionAction}>
+            {button}
+          </SessionContextMenu>
+        ),
+      })),
+    },
   ];
   const activeId = route.name === "session" ? [route.machine, route.sessionId].join(SEP) : route.name;
   const panel = route.name === "session" ? route.panel : undefined;
@@ -161,6 +171,8 @@ export function App() {
           )}
         </div>
       </div>
+      <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} onNavigate={() => setMobileOpen(false)} />
+      <LaunchDialog open={launchOpen} onClose={() => setLaunchOpen(false)} onLaunched={() => setMobileOpen(false)} />
     </div>
   );
 }

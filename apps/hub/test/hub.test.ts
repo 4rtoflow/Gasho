@@ -452,3 +452,52 @@ test("what a browser asked a working server to do reaches the browsers at once (
   const ev = c.sent.find((m) => m.type === "event");
   assert.ok(ev?.type === "event" && ev.event.event === "Gasho:session.input" && ev.event.summary?.startsWith("テストを流して"));
 });
+
+test("renaming, forking and removing go to a gasho-daemon 0.9.0 or later; older ones are refused with a clear error", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.8.0" });
+  hub.onClientMessage(c, { type: "session.rename", requestId: "r0", machine: machineId, sessionId: "s1", name: "新しい名前" });
+  let reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && reply.requestId === "r0" && !reply.result.ok);
+  assert.match(reply.result.error ?? "", /gasho-daemon は古いため/);
+  assert.equal(old.sent.filter((m) => m.type !== "welcome").length, 0);
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.9.0" });
+  hub.onDaemonMessage(d, { type: "sessions", sessions: [{ ...session, name: "Bobert-gasho" }] });
+  hub.onClientMessage(c, { type: "session.rename", requestId: "r1", machine: machineId, sessionId: "s1", name: "  新しい名前 " });
+  const rename = d.sent.at(-1);
+  assert.ok(rename?.type === "session.rename" && rename.sessionId === "s1" && rename.name === "  新しい名前 ");
+  hub.onClientMessage(c, { type: "session.fork", requestId: "f1", machine: machineId, sessionId: "s1" });
+  const fork = d.sent.at(-1);
+  assert.ok(fork?.type === "session.fork" && fork.name === undefined);
+  hub.onDaemonMessage(d, { type: "command.result", requestId: fork.requestId, result: { ok: true, sessionId: "s2" } });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "f1", machine: machineId, result: { ok: true, sessionId: "s2" } });
+  hub.onClientMessage(c, { type: "session.remove", requestId: "x1", machine: machineId, sessionId: "s1" });
+  assert.equal(d.sent.at(-1)?.type, "session.remove");
+
+  // The latest operations name the session: the new name, and the removed session's name (it is gone afterwards).
+  const summaries = c.sent.flatMap((m) => (m.type === "event" ? [[m.event.event, m.event.summary?.replace(/ \(by .*\)$/, "")]] : []));
+  assert.deepEqual(summaries.slice(-3), [
+    ["Gasho:session.rename", "新しい名前"],
+    ["Gasho:session.fork", ""],
+    ["Gasho:session.remove", "Bobert-gasho"],
+  ]);
+});
+
+test("a session's name must be one line of 1 to 60 characters; a fork may leave it out", () => {
+  const rename = (name: unknown) => validateCommand({ type: "session.rename", sessionId: "s1", name } as never);
+  assert.equal(rename("調査"), undefined);
+  assert.equal(rename(`  ${"x".repeat(60)}  `), undefined);
+  assert.match(rename("   ") ?? "", /名前を入れて/);
+  assert.match(rename("x".repeat(61)) ?? "", /60文字まで/);
+  assert.match(rename("一行目\n/model opus") ?? "", /改行/);
+  assert.match(rename(42) ?? "", /名前を入れて/);
+  assert.equal(validateCommand({ type: "session.fork", sessionId: "s1" }), undefined);
+  assert.match(validateCommand({ type: "session.fork", sessionId: "s1", name: "\u0007" }) ?? "", /制御文字/);
+  assert.match(validateCommand({ type: "session.remove", sessionId: "" }) ?? "", /セッションの指定/);
+  assert.match(validateCommand({ type: "session.remove", sessionId: 7 } as never) ?? "", /セッションの指定/);
+});

@@ -13,7 +13,13 @@ import {
   launchArgs,
   ManagedSessions,
   EFFORT_LEVELS,
+  forkName,
+  isRename,
+  MAX_SESSION_NAME,
   modelPickerOptions,
+  renameCommand,
+  resumeQuestionOpen,
+  sessionName,
   pickerCatalog,
   pickerEffort,
   pickerMatches,
@@ -442,4 +448,96 @@ test("the model in Claude Code's welcome banner is read before the transcript ha
   // Not the banner's model line, or no banner at all.
   assert.equal(bannerModel(banner("▝▜██████▀  ~/repos/Bobert")), undefined);
   assert.equal(bannerModel(screenWith("❯ ")), undefined);
+});
+
+test("a fork passes Claude Code's own arguments after the Remote Control name", () => {
+  const args = launchArgs({
+    zellijSession: "gasho-x-2",
+    pidFile: "/s/y.pid",
+    cwd: "/home/rg/repos/Gasho",
+    claudeBin: "claude",
+    rcName: "Gasho-gasho のフォーク",
+    env: { HOME: "/home/rg" },
+    claudeArgs: ["--resume", "e1cd0c71-1ad9-4de3-bc6a-5a4da93e78d3", "--fork-session"],
+  });
+  assert.deepEqual(args.slice(-6), ["claude", "--remote-control", "Gasho-gasho のフォーク", "--resume", "e1cd0c71-1ad9-4de3-bc6a-5a4da93e78d3", "--fork-session"]);
+});
+
+test("session names are one line of at most 60 characters, and a fork's default name fits", () => {
+  assert.deepEqual(sessionName("  Bobert の調査  "), { name: "Bobert の調査" });
+  assert.ok("error" in sessionName("   "));
+  assert.ok("error" in sessionName("x".repeat(MAX_SESSION_NAME + 1)));
+  assert.deepEqual(sessionName("x".repeat(MAX_SESSION_NAME)), { name: "x".repeat(MAX_SESSION_NAME) });
+  // /rename takes the rest of its line: a second line would be typed as a message of its own.
+  assert.ok("error" in sessionName("一行目\n/model opus"));
+  assert.ok("error" in sessionName("tab\there"));
+  assert.equal(forkName("Bobert-gasho"), "Bobert-gasho のフォーク");
+  const long = forkName("あ".repeat(80));
+  assert.equal(long.length, MAX_SESSION_NAME);
+  assert.ok(long.endsWith(" のフォーク"));
+  assert.equal(renameCommand("調査 その2"), "/rename 調査 その2");
+  assert.ok(isRename("/rename 調査") && isRename("/name x") && isRename("/rename"));
+  assert.ok(!isRename("/renamed") && !isRename("rename this") && !isRename("/model"));
+});
+
+test("a /rename still waiting is replaced, but not one whose Enter was pressed; names are kept on save", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-test-"));
+  try {
+    const file = path.join(dir, "managed.json");
+    const a = new ManagedSessions(file);
+    a.add({ sessionId: "s1", zellijSession: "z1", pid: 1, cwd: "/x", name: "x", launchedAt: 1, forkOf: "s0", forkedAt: 1 });
+    a.enqueue("s1", { text: "最初の指示" });
+    a.enqueue("s1", { text: renameCommand("a") });
+    a.enqueue("s1", { text: renameCommand("b"), entered: true, enteredAt: 5 });
+    assert.equal(
+      a.drop("s1", (input) => isRename(input.text)),
+      1,
+    );
+    assert.deepEqual(
+      a.waiting("s1").map((input) => input.text),
+      ["最初の指示", "/rename b"],
+    );
+    assert.equal(a.drop("nobody", () => true), 0);
+    assert.equal(a.setName("s1", "新しい名前"), true);
+    assert.equal(a.setName("s1", "新しい名前"), false);
+    assert.equal(a.setName("nobody", "x"), false);
+    await a.save();
+    const b = new ManagedSessions(file);
+    await b.load(async () => true);
+    assert.deepEqual(b.get("s1"), { sessionId: "s1", zellijSession: "z1", pid: 1, cwd: "/x", name: "新しい名前", launchedAt: 1, forkOf: "s0", forkedAt: 1 });
+  } finally {
+    await fs.rm(dir, { recursive: true });
+  }
+});
+
+test("Claude Code's question when resuming an old, long session is a dialog; quoted in the conversation it is not", () => {
+  const question = [
+    " ▐▛███▛█   Claude Code v2.1.323",
+    "❯ 前の指示",
+    "● はい",
+    "",
+    " This session is 3h 5m old and 142.3k tokens.",
+    "",
+    " Resuming the full session will consume a",
+    " substantial portion of your usage limits. We",
+    " recommend resuming from a summary.",
+    "",
+    " ❯ 1. Resume from summary (recommended)",
+    "   2. Resume full session as-is",
+    "   3. Don't ask me again",
+    "",
+    " Enter to confirm · Esc to cancel",
+    "",
+  ].join("\n");
+  assert.ok(resumeQuestionOpen(question));
+  assert.ok(dialogOpen(question));
+  assert.equal(typedInBox(plainScreen(question)), undefined);
+  // Answered: the prompt box is back, and the conversation above may still mention the question.
+  const quoted = screenWith("❯ ").replace(
+    "● はい",
+    "● This session is 3h 5m old and 142.3k tokens. Resume full session as-is を選ぶと…",
+  );
+  assert.ok(!resumeQuestionOpen(quoted));
+  assert.ok(!dialogOpen(quoted));
+  assert.equal(typedInBox(plainScreen(quoted)), "");
 });

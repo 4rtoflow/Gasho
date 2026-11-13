@@ -55,6 +55,8 @@ export function unwrapPasted(text: string): string {
 /** Session facts collected from transcript records. */
 export interface TranscriptMeta {
   title?: string;
+  /** The name given with /rename or --name (`custom-title`; the last one counts). */
+  customTitle?: string;
   gitBranch?: string;
   prLinks: PrLink[];
   costUSD?: number;
@@ -100,6 +102,9 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
   switch (rec.type) {
     case "ai-title":
       if (typeof rec.aiTitle === "string") meta.title = rec.aiTitle;
+      return null;
+    case "custom-title":
+      if (typeof rec.customTitle === "string" && rec.customTitle.trim()) meta.customTitle = rec.customTitle.trim();
       return null;
     case "pr-link": {
       const { prNumber, prUrl, prRepository } = rec;

@@ -1,5 +1,6 @@
 "use client";
-// From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese.
+// From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item's button can be wrapped
+// (`wrap`), for a session's context menu, and a section's title can have a button (`action`), for "＋".
 
 import * as React from "react";
 import { AnimatePresence, motion, type PanInfo } from "framer-motion";
@@ -42,8 +43,12 @@ export type SidebarItem = {
   icon?: React.ReactNode;
   badge?: string | number;
   children?: SidebarChild[];
+  /** Gasho: puts something around the item's button, such as a context menu (the button stays the trigger). */
+  wrap?: (button: React.ReactElement) => React.ReactNode;
 };
-export type SidebarSection = { title?: string; items: SidebarItem[] };
+/** Gasho: a button at the right of a section's title, such as "＋" to add an item. */
+export type SidebarAction = { label: string; icon: React.ReactNode; onClick: () => void };
+export type SidebarSection = { title?: string; items: SidebarItem[]; action?: SidebarAction };
 
 const SidebarContext = React.createContext({ collapsed: false });
 /** Use inside `header` / `footer` to adapt to the icon-only state. */
@@ -171,6 +176,24 @@ export function SidebarTrigger({ className, ...props }: React.ComponentProps<"bu
 
 /* ───────────────────────── internals ───────────────────────── */
 
+/** Gasho: the button at the right of a section's title. In the drawer, it closes the drawer too (`onNavigate`). */
+function SectionAction({ action, onNavigate }: { action: SidebarAction; onNavigate?: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        action.onClick();
+        onNavigate?.();
+      }}
+      aria-label={action.label}
+      title={action.label}
+      className="grid size-6 shrink-0 place-items-center rounded-md text-neutral-400 outline-none transition-colors hover:bg-neutral-100 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-white dark:focus-visible:ring-neutral-600/60 [&>svg]:size-4"
+    >
+      {action.icon}
+    </button>
+  );
+}
+
 type PanelProps = Pick<SidebarProps, "sections" | "activeId" | "onActiveChange" | "header" | "footer"> & {
   collapsed: boolean;
   onToggle?: () => void;
@@ -234,57 +257,61 @@ function Panel({
       }
     };
 
+    const button = (
+      <button
+        type="button"
+        onClick={onClick}
+        onMouseEnter={(e) => enter(e, item.label)}
+        onFocus={(e) => enter(e, item.label)}
+        aria-label={collapsed ? item.label : undefined}
+        aria-expanded={hasChildren ? isOpen : undefined}
+        aria-current={isActive ? "page" : undefined}
+        className={cn(
+          "relative flex h-9 w-full items-center gap-3 rounded-lg px-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:focus-visible:ring-neutral-600/60",
+          isActive || childActive
+            ? "text-neutral-900 dark:text-white"
+            : "text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white"
+        )}
+      >
+        {isActive && (
+          <motion.span
+            layoutId={`${uid}-active`}
+            transition={spring}
+            className="absolute inset-0 rounded-lg bg-neutral-200/70 dark:bg-neutral-800"
+          />
+        )}
+        <span className="relative grid size-5 shrink-0 place-items-center [&>svg]:size-[18px]">{item.icon}</span>
+        <motion.span
+          initial={false}
+          animate={{ opacity: collapsed ? 0 : 1 }}
+          transition={{ duration: 0.15 }}
+          className="relative flex-1 truncate whitespace-nowrap text-left"
+        >
+          {item.label}
+        </motion.span>
+        {!collapsed && item.badge !== undefined && (
+          <motion.span
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="relative rounded-md bg-neutral-200/70 px-1.5 text-[11px] tabular-nums text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
+          >
+            {item.badge}
+          </motion.span>
+        )}
+        {!collapsed && hasChildren && (
+          <ChevronRight
+            className={cn(
+              "relative size-3.5 shrink-0 text-neutral-400 transition-transform duration-200",
+              isOpen && "rotate-90"
+            )}
+          />
+        )}
+      </button>
+    );
+
     return (
       <div key={item.id}>
-        <button
-          type="button"
-          onClick={onClick}
-          onMouseEnter={(e) => enter(e, item.label)}
-          onFocus={(e) => enter(e, item.label)}
-          aria-label={collapsed ? item.label : undefined}
-          aria-expanded={hasChildren ? isOpen : undefined}
-          aria-current={isActive ? "page" : undefined}
-          className={cn(
-            "relative flex h-9 w-full items-center gap-3 rounded-lg px-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:focus-visible:ring-neutral-600/60",
-            isActive || childActive
-              ? "text-neutral-900 dark:text-white"
-              : "text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white"
-          )}
-        >
-          {isActive && (
-            <motion.span
-              layoutId={`${uid}-active`}
-              transition={spring}
-              className="absolute inset-0 rounded-lg bg-neutral-200/70 dark:bg-neutral-800"
-            />
-          )}
-          <span className="relative grid size-5 shrink-0 place-items-center [&>svg]:size-[18px]">{item.icon}</span>
-          <motion.span
-            initial={false}
-            animate={{ opacity: collapsed ? 0 : 1 }}
-            transition={{ duration: 0.15 }}
-            className="relative flex-1 truncate whitespace-nowrap text-left"
-          >
-            {item.label}
-          </motion.span>
-          {!collapsed && item.badge !== undefined && (
-            <motion.span
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="relative rounded-md bg-neutral-200/70 px-1.5 text-[11px] tabular-nums text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
-            >
-              {item.badge}
-            </motion.span>
-          )}
-          {!collapsed && hasChildren && (
-            <ChevronRight
-              className={cn(
-                "relative size-3.5 shrink-0 text-neutral-400 transition-transform duration-200",
-                isOpen && "rotate-90"
-              )}
-            />
-          )}
-        </button>
+        {item.wrap ? item.wrap(button) : button}
 
         <AnimatePresence initial={false}>
           {isOpen && (
@@ -378,10 +405,24 @@ function Panel({
                 (collapsed ? (
                   <div className="mx-2.5 my-2 h-px bg-neutral-200 dark:bg-neutral-800" />
                 ) : (
-                  <p className="truncate px-2.5 pb-1 pt-4 text-xs text-neutral-400 dark:text-neutral-500">
-                    {section.title}
-                  </p>
+                  <div className="flex items-center gap-1 pb-1 pl-2.5 pr-1 pt-4">
+                    <p className="min-w-0 flex-1 truncate text-xs text-neutral-400 dark:text-neutral-500">{section.title}</p>
+                    {section.action && <SectionAction action={section.action} onNavigate={onNavigate} />}
+                  </div>
                 ))}
+              {/* Icon only: the action takes a row of its own under the divider, named by the tooltip. */}
+              {collapsed && section.action && (
+                <button
+                  type="button"
+                  onClick={section.action.onClick}
+                  onMouseEnter={(e) => enter(e, section.action!.label)}
+                  onFocus={(e) => enter(e, section.action!.label)}
+                  aria-label={section.action.label}
+                  className="relative flex h-9 w-full items-center gap-3 rounded-lg px-2.5 text-sm text-neutral-500 outline-none transition-colors hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:text-neutral-400 dark:hover:text-white dark:focus-visible:ring-neutral-600/60"
+                >
+                  <span className="relative grid size-5 shrink-0 place-items-center [&>svg]:size-[18px]">{section.action.icon}</span>
+                </button>
+              )}
               {section.items.map(renderItem)}
             </div>
           ))}

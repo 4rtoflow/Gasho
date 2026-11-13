@@ -2,7 +2,25 @@
 // the sessions and the instructions sent lately as number tiles, the sessions as the largest tile, the notifications,
 // the tokens used, then the latest operations, the open issues and pull requests, and the working servers. On a
 // phone, the number tiles two by two and the rest one under the other. Only sessions started from Gasho are shown.
-import { CircleDot, Cpu, FolderGit2, GitPullRequest, Hand, Layers, Moon, Plus, Rocket, Send, Server, Square, Zap } from "lucide-react";
+import {
+  CircleDot,
+  Cpu,
+  FolderGit2,
+  GitFork,
+  GitPullRequest,
+  Hand,
+  Layers,
+  Moon,
+  Pencil,
+  Plus,
+  Rocket,
+  Send,
+  Server,
+  Square,
+  Trash2,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   GashoNotification,
@@ -431,10 +449,23 @@ function Chip({ className, children }: { className?: string; children: ReactNode
   return <span className={cn("rounded-md bg-white/[0.06] px-1.5 py-0.5", className)}>{children}</span>;
 }
 
-/** What Gasho was asked to do lately: starting sessions, instructions and stops (the Gasho server's records). */
+/** The operations shown, by the event the Gasho server records for each, with their icons. */
+const OPERATION_ICONS: Record<string, LucideIcon> = {
+  "Gasho:session.launch": Rocket,
+  "Gasho:session.input": Send,
+  "Gasho:session.interrupt": Square,
+  "Gasho:session.rename": Pencil,
+  "Gasho:session.fork": GitFork,
+  "Gasho:session.remove": Trash2,
+};
+
+/**
+ * What Gasho was asked to do lately: starting, forking, renaming and removing sessions, instructions and stops (the
+ * Gasho server's records).
+ */
 function Operations({ events, machines, now }: { events: MachineHookEvent[]; machines: MachineInfo[]; now: number }) {
   const items = events
-    .filter((e) => e.event === "Gasho:session.launch" || e.event === "Gasho:session.input" || e.event === "Gasho:session.interrupt")
+    .filter((e) => Object.hasOwn(OPERATION_ICONS, e.event))
     .slice(-OPERATIONS_SHOWN)
     .reverse();
   if (items.length === 0) return <p className="text-sm text-muted-foreground">まだ操作はありません。</p>;
@@ -443,9 +474,10 @@ function Operations({ events, machines, now }: { events: MachineHookEvent[]; mac
       {items.map((e, i) => {
         const m = machines.find((x) => x.id === e.machine);
         const s = m?.sessions.find((x) => x.sessionId === e.sessionId);
-        const Icon = e.event === "Gasho:session.launch" ? Rocket : e.event === "Gasho:session.interrupt" ? Square : Send;
+        const Icon = OPERATION_ICONS[e.event] ?? Send;
         const what = operationText(e);
-        const where = s ? sessionLabel(s) : e.event === "Gasho:session.launch" ? (m?.name ?? "") : "終了したセッション";
+        // A launch's session is not known yet, and a removed one is gone: these show the working server instead.
+        const where = s ? sessionLabel(s) : e.event === "Gasho:session.launch" || e.event === "Gasho:session.remove" ? (m?.name ?? "") : "終了したセッション";
         const body = (
           <>
             <Icon className="mt-0.5 size-3.5 shrink-0 text-neutral-500" />
@@ -482,6 +514,10 @@ function operationText(e: MachineHookEvent): string {
   const summary = (e.summary ?? "").replace(/\s*\(by [^)]*\)\s*$/, "");
   if (e.event === "Gasho:session.launch") return `起動：${summary.split("/").filter(Boolean).pop() ?? summary}`;
   if (e.event === "Gasho:session.interrupt") return "作業を止めた";
+  // The new name, the fork's name, the removed session's name.
+  if (e.event === "Gasho:session.rename") return summary ? `名前を変更：${summary}` : "名前を変えた";
+  if (e.event === "Gasho:session.fork") return summary ? `フォーク：${summary}` : "フォークした";
+  if (e.event === "Gasho:session.remove") return summary ? `削除：${summary}` : "セッションを削除した";
   const text = summary.replace(/\s*\[(model|effort|ultracode|file): [^\]]*\]/g, "").trim();
   const files = (summary.match(/\[file: /g) ?? []).length;
   return text || (files > 0 ? `ファイルを ${files} 件送った` : "指示を送った");
