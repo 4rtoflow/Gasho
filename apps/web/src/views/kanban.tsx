@@ -5,6 +5,8 @@
 // the reason's icon, the next step), and cards that glide to their new column with a spring. On a phone one column shows at a time, picked with a sliding pill.
 import {
   ArrowRight,
+  ArrowUpDown,
+  Check,
   ChevronDown,
   CircleCheck,
   CircleX,
@@ -31,8 +33,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion, MotionConfig } from "framer-motion";
-import { Dialog } from "radix-ui";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Dialog, Popover } from "radix-ui";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { KanbanCard, KanbanColumn, KanbanReason, MachineInfo } from "@gasho/protocol";
 import { DIALOG_OVERLAY, DIALOG_PANEL } from "@/components/dialog-styles";
 import { StatusDot } from "@/components/status-badge";
@@ -43,7 +45,30 @@ import { DrawCheckbox } from "@/components/ui/draw-checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TILE, TILE_SHADOW } from "@/components/ui/stat-card";
 import { relativeTime, sessionLabel } from "@/lib/format";
-import { badges, KANBAN_COLUMNS, kanbanCards, kanbanReady, nextStep, reasonText, type PlacedCard } from "@/lib/kanban";
+import {
+  arrangeCards,
+  badges,
+  COLUMN_WIDTH,
+  KANBAN_COLUMNS,
+  KANBAN_SORTS,
+  kanbanCards,
+  kanbanReady,
+  nextStep,
+  reasonText,
+  type KanbanSort,
+  type KanbanSortKey,
+  type PlacedCard,
+} from "@/lib/kanban";
+import {
+  clampWidth,
+  columnCompact,
+  columnWidth,
+  setColumnCompact,
+  setColumnSort,
+  setColumnWidth,
+  useKanbanPrefs,
+  type KanbanPrefs,
+} from "@/lib/kanban-prefs";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { motionTransitions } from "@/lib/motion-tokens";
 import { go } from "@/lib/route";
@@ -98,6 +123,7 @@ export function KanbanView() {
   const [asked, setAsked] = useState(false);
   const [tab, setTab] = useState<KanbanColumn>("mine");
 
+  const prefs = useKanbanPrefs();
   const cards = useMemo(() => kanbanCards(machines), [machines]);
   const ready = machines.filter((m) => m.connected && kanbanReady(m));
   const boards = ready.flatMap((m) => (m.kanban ? [m.kanban] : []));
@@ -190,10 +216,10 @@ export function KanbanView() {
           <EmptyState canChoose={ready.length > 0} onChoose={() => setChoosing(true)} />
         ) : wide ? (
           <LayoutGroup>
-            <div className="-mx-4 overflow-x-auto px-4 pb-2 md:-mx-6 md:px-6">
-              <div className="grid auto-cols-[minmax(248px,1fr)] grid-flow-col items-start gap-3">
+            <div className="-mx-4 overflow-x-auto pb-2 pl-4 md:-mx-6 md:pl-6">
+              <div className="flex w-max items-start gap-3 pr-4 md:pr-6">
                 {KANBAN_COLUMNS.map((col) => (
-                  <Column key={col.id} id={col.id} label={col.label} rows={byColumn(col.id)} loading={loading} now={now} where={where} />
+                  <Column key={col.id} id={col.id} label={col.label} rows={byColumn(col.id)} loading={loading} now={now} where={where} prefs={prefs} wide />
                 ))}
               </div>
             </div>
@@ -210,7 +236,7 @@ export function KanbanView() {
                   loading={loading}
                   now={now}
                   where={where}
-                  heading={false}
+                  prefs={prefs}
                 />
               </motion.div>
             </AnimatePresence>
@@ -233,7 +259,10 @@ function ColumnDot({ id }: { id: KanbanColumn }) {
   );
 }
 
-/** `heading`: false on a phone, where the tab above already names the column and counts its cards. */
+/**
+ * One column. `wide`: on the board of a computer, with its heading and a width that can be changed; on a phone the
+ * tab above names the column and counts its cards, and the column takes the screen's width.
+ */
 function Column({
   id,
   label,
@@ -241,7 +270,8 @@ function Column({
   loading,
   now,
   where,
-  heading = true,
+  prefs,
+  wide = false,
 }: {
   id: KanbanColumn;
   label: string;
@@ -249,20 +279,46 @@ function Column({
   loading: boolean;
   now: number;
   where: Where;
-  heading?: boolean;
+  prefs: KanbanPrefs;
+  wide?: boolean;
 }) {
+  // The width while its grip is dragged; stored only when the drag ends.
+  const [dragged, setDragged] = useState<number>();
+  const width = dragged ?? columnWidth(prefs, id);
+  const compact = columnCompact(prefs, id);
+  const sort = prefs.sort[id];
+  const shown = arrangeCards(rows, sort);
   return (
-    <section aria-label={`${label}：${rows.length} 枚`} className={cn(TILE, "flex min-w-0 flex-col", !heading && "pt-2")} style={{ boxShadow: TILE_SHADOW }}>
-      {heading && (
-        <h2 className="flex items-center gap-2 px-3.5 pt-3 pb-2.5 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
-          <ColumnDot id={id} />
-          {label}
-          <Badge tone={rows.length > 0 ? COLUMN_LOOK[id].tone : "neutral"} className="ml-auto h-5 px-2">
-            {rows.length}
-          </Badge>
-        </h2>
+    <section
+      aria-label={`${label}：${rows.length} 枚`}
+      className={cn(TILE, "relative flex min-w-0 flex-col", wide ? "shrink-0" : "pt-2")}
+      style={{ boxShadow: TILE_SHADOW, ...(wide ? { width } : {}) }}
+    >
+      {wide && (
+        <>
+          <Grip
+            label={label}
+            width={width}
+            onDrag={setDragged}
+            onDone={(w) => {
+              setDragged(undefined);
+              setColumnWidth(id, w);
+            }}
+          />
+          <h2 className="flex items-center gap-2 px-3.5 pt-3 pb-2 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
+            <ColumnDot id={id} />
+            <span className="truncate">{label}</span>
+            <Badge tone={rows.length > 0 ? COLUMN_LOOK[id].tone : "neutral"} className="ml-auto h-5 px-2">
+              {rows.length}
+            </Badge>
+          </h2>
+        </>
       )}
-      <div className="flex flex-col gap-2 px-2 pb-2">
+      <div className="flex items-center gap-1.5 px-2.5 pb-2">
+        <SortMenu label={label} sort={sort} onChange={(next) => setColumnSort(id, next)} />
+        <ModeSwitch id={id} label={label} compact={compact} onChange={(c) => setColumnCompact(id, c)} />
+      </div>
+      <div className={cn("flex flex-col px-2 pb-2", compact ? "gap-1" : "gap-2")}>
         {loading ? (
           <>
             <CardSkeleton />
@@ -272,23 +328,228 @@ function Column({
           <p className="rounded-xl border border-dashed border-black/[0.08] px-3 py-5 text-center text-xs text-neutral-500 dark:border-white/[0.06] dark:text-neutral-600">なし</p>
         ) : (
           <AnimatePresence initial={false} mode="popLayout">
-            {rows.map((row) => (
+            {shown.map((row) => (
               <motion.div
                 key={`${row.machine.id}/${row.card.id}`}
-                layout
+                // Only the position glides: a width or a view that changes shows at once, without the card stretching.
+                layout="position"
                 layoutId={`kanban/${row.machine.id}/${row.card.id}`}
                 initial={{ opacity: 0, scale: 0.98 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.98 }}
                 transition={motionTransitions.springSmooth}
               >
-                <Card row={row} now={now} where={where} />
+                {compact ? <CompactCard row={row} now={now} where={where} /> : <Card row={row} now={now} where={where} />}
               </motion.div>
             ))}
           </AnimatePresence>
         )}
       </div>
     </section>
+  );
+}
+
+/** The grip on a column's right edge: drag it, or use ← → (with Shift, four times as far); a double click goes back. */
+function Grip({
+  label,
+  width,
+  onDrag,
+  onDone,
+}: {
+  label: string;
+  width: number;
+  /** The width while dragging; undefined when a press ends without a move. */
+  onDrag: (w: number | undefined) => void;
+  /** The width chosen; undefined goes back to the default one. */
+  onDone: (w: number | undefined) => void;
+}) {
+  const from = useRef<{ x: number; width: number } | null>(null);
+  const [active, setActive] = useState(false);
+  const at = (x: number) => clampWidth((from.current?.width ?? width) + x - (from.current?.x ?? x));
+  const end = (x: number) => {
+    if (!from.current) return;
+    const w = at(x);
+    const moved = w !== from.current.width;
+    from.current = null;
+    setActive(false);
+    document.body.style.removeProperty("cursor");
+    document.body.style.removeProperty("user-select");
+    // A press without a move keeps the width as it was, the default one included.
+    if (moved) onDone(w);
+    else onDrag(undefined);
+  };
+  return (
+    <div
+      role="separator"
+      tabIndex={0}
+      aria-orientation="vertical"
+      aria-label={`${label}の列の幅`}
+      aria-valuemin={COLUMN_WIDTH.min}
+      aria-valuemax={COLUMN_WIDTH.max}
+      aria-valuenow={width}
+      title="ドラッグか左右キーで幅を変える（ダブルクリックで元の幅）"
+      className={cn(
+        "absolute top-3 -right-[9px] bottom-3 z-10 w-1.5 cursor-col-resize touch-none rounded-full outline-none transition-colors hover:bg-white/20 focus-visible:bg-primary",
+        active && "bg-primary hover:bg-primary",
+      )}
+      onPointerDown={(e) => {
+        // preventDefault keeps text from being selected, but also keeps the grip from taking focus for ← →.
+        e.preventDefault();
+        e.currentTarget.focus();
+        from.current = { x: e.clientX, width };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setActive(true);
+        // The cursor stays a resize cursor, and no text is selected, while the pointer leaves the grip.
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+      onPointerMove={(e) => {
+        if (from.current) onDrag(at(e.clientX));
+      }}
+      onPointerUp={(e) => end(e.clientX)}
+      onPointerCancel={(e) => end(e.clientX)}
+      onDoubleClick={() => onDone(undefined)}
+      onKeyDown={(e) => {
+        const step = ({ ArrowLeft: -16, ArrowRight: 16 } as Record<string, number>)[e.key];
+        if (!step) return;
+        e.preventDefault();
+        onDone(clampWidth(width + step * (e.shiftKey ? 4 : 1)));
+      }}
+    />
+  );
+}
+
+const BAR_BUTTON =
+  "inline-flex h-6 cursor-pointer items-center gap-1 rounded-md border px-1.5 text-[11px] whitespace-nowrap transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
+
+/** The order of a column's cards: the default one, or Issue number, PR number or last update, either way. */
+function SortMenu({ label, sort, onChange }: { label: string; sort: KanbanSort | undefined; onChange: (sort: KanbanSort | undefined) => void }) {
+  const [open, setOpen] = useState(false);
+  const name = sort ? `${KANBAN_SORTS[sort.key].short} ${sort.desc ? "降順" : "昇順"}` : "既定の順";
+  const pick = (next: KanbanSort | undefined) => {
+    onChange(next);
+    setOpen(false);
+  };
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label={`${label}の並び：${name}`}
+          title={`並びを変える（今は${name}）`}
+          className={cn(
+            BAR_BUTTON,
+            sort
+              ? "border-border-hover bg-surface-raised text-foreground"
+              : "border-transparent text-neutral-500 hover:border-border hover:text-neutral-300 data-[state=open]:border-border data-[state=open]:text-neutral-300",
+          )}
+        >
+          <ArrowUpDown className="size-3.5" />
+          {sort && name}
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          sideOffset={6}
+          className="z-50 w-64 rounded-xl border border-border bg-surface p-1.5 text-xs shadow-xl outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+        >
+          <button
+            type="button"
+            aria-pressed={!sort}
+            onClick={() => pick(undefined)}
+            className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left text-neutral-300 hover:bg-surface-raised aria-pressed:text-foreground"
+          >
+            <Check className={cn("size-3.5", sort && "invisible")} />
+            既定の順
+            <span className="ml-auto text-[11px] text-muted-foreground">更新の古い順</span>
+          </button>
+          <div className="mt-1 space-y-0.5 border-t border-border pt-1">
+            {(Object.keys(KANBAN_SORTS) as KanbanSortKey[]).map((key) => (
+              <div key={key} role="group" aria-label={KANBAN_SORTS[key].label} className="flex items-center gap-2 px-2 py-1">
+                <Check className={cn("size-3.5 shrink-0", sort?.key !== key && "invisible")} />
+                <span className="flex-1 text-neutral-300">{KANBAN_SORTS[key].label}</span>
+                <span className="inline-flex rounded-md border border-border p-0.5">
+                  {[false, true].map((desc) => {
+                    const on = sort?.key === key && sort.desc === desc;
+                    return (
+                      <button
+                        key={String(desc)}
+                        type="button"
+                        aria-pressed={on}
+                        title={desc ? KANBAN_SORTS[key].desc : KANBAN_SORTS[key].asc}
+                        onClick={() => pick({ key, desc })}
+                        className={cn(
+                          "cursor-pointer rounded-[5px] px-2 py-0.5 text-[11px] transition-colors",
+                          on ? "bg-primary text-primary-foreground" : "text-neutral-400 hover:bg-surface-raised hover:text-foreground",
+                        )}
+                      >
+                        {desc ? "降順" : "昇順"}
+                      </button>
+                    );
+                  })}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="px-2 pt-1.5 pb-0.5 text-[11px] leading-relaxed text-muted-foreground">番号や更新の時刻が無いカードは、どちらの向きでも下に並べます。</p>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+/** 詳細 (the full card) or 簡潔 (one line), with a pill that slides to the one chosen. */
+function ModeSwitch({ id, label, compact, onChange }: { id: KanbanColumn; label: string; compact: boolean; onChange: (compact: boolean) => void }) {
+  return (
+    <div role="group" aria-label={`${label}の表示`} className="ml-auto inline-flex rounded-md border border-border p-0.5">
+      {[false, true].map((c) => {
+        const on = compact === c;
+        return (
+          <button
+            key={String(c)}
+            type="button"
+            aria-pressed={on}
+            title={c ? "1 行で表示する" : "理由・次にすること・印も表示する"}
+            onClick={() => onChange(c)}
+            className={cn("relative cursor-pointer rounded-[5px] px-2 py-0.5 text-[11px] transition-colors", on ? "text-foreground" : "text-neutral-500 hover:text-neutral-300")}
+          >
+            {on && <motion.span layoutId={`kanban-mode/${id}`} transition={motionTransitions.springMorph} className="absolute inset-0 rounded-[5px] bg-surface-raised" />}
+            <span className="relative">{c ? "簡潔" : "詳細"}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One line: the reason's icon, the name and the age; the rest shows when the pointer rests on it. */
+function CompactCard({ row: { machine, card }, now, where }: { row: PlacedCard; now: number; where: Where }) {
+  const reason = REASON_ICON[card.reason.kind];
+  const updated = card.updatedAt ? Date.parse(card.updatedAt) : undefined;
+  const next = nextStep(card);
+  const tip = [where.machines && machine.name, where.repos && card.repo, card.title, reasonText(card.reason), next && `次：${next}`]
+    .filter(Boolean)
+    .join("\n");
+  const body = (
+    <>
+      <reason.Icon className={cn("size-3.5 shrink-0", reason.className)} />
+      <span className="min-w-0 flex-1 truncate">{card.label}</span>
+      {updated !== undefined && <span className="shrink-0 text-[11px] text-neutral-500 tabular-nums">{relativeTime(updated, now)}</span>}
+    </>
+  );
+  const look = cn(
+    "flex min-w-0 items-center gap-2 rounded-lg border border-black/[0.06] bg-black/[0.015] px-2.5 py-1.5 text-xs text-neutral-800 transition-colors dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-neutral-200",
+    card.column === "done" && "opacity-70",
+  );
+  return card.pr ? (
+    <a href={card.pr.url} target="_blank" rel="noopener noreferrer" title={tip} className={cn(look, "hover:border-black/[0.12] hover:opacity-100 dark:hover:border-white/[0.12] dark:hover:bg-white/[0.035]")}>
+      {body}
+    </a>
+  ) : (
+    <div title={tip} className={look}>
+      {body}
+    </div>
   );
 }
 
