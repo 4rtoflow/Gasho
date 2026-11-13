@@ -97,7 +97,8 @@ export function cardsOf(m: RepoMaterial, byPath: Map<string, SessionLike[]>): Ka
     const shown = pr ?? closed;
     const issue = issueOf(t.branch);
     cards.push({
-      id: `${m.repo}:${t.path ?? `pr-${pr?.number}`}`,
+      // A pull request without a worktree shows once per clone of its repository, so the clone is part of its id.
+      id: `${m.repo}:${t.path ?? `${m.primary.path}#pr-${pr?.number}`}`,
       repo: m.repo,
       label: t.path ? path.basename(t.path) : `PR #${pr?.number}`,
       ...(t.path ? { path: t.path } : {}),
@@ -341,12 +342,10 @@ export class Kanban {
   /** The board with `sessions` as they are now (all Claude Code sessions of this machine). */
   board(sessions: readonly SessionLike[]): KanbanBoard {
     const live = sessions.filter((s) => s.status !== "unknown").map((s) => ({ ...s, cwd: this.real(s.cwd) }));
-    const cards: KanbanCard[] = [];
-    for (const p of this.wanted) {
-      const m = this.material.get(p);
-      if (!m) continue;
-      cards.push(...cardsOf(m, assignSessions(live, [m.primary.path, ...m.worktrees.values()])));
-    }
+    const read = this.wanted.flatMap((p) => this.material.get(p) ?? []);
+    // Across the repositories at once: a session in a repository inside another one goes to the inner one only.
+    const byPath = assignSessions(live, read.flatMap((m) => [m.primary.path, ...m.worktrees.values()]));
+    const cards = read.flatMap((m) => cardsOf(m, byPath));
     return {
       cards,
       errors: this.wanted.flatMap((p) => {
