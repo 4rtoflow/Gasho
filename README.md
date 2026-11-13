@@ -43,36 +43,18 @@ npm run hub:pair   # 登録コード（10分間有効、1回だけ使える）�
 
 ブラウザで `http://<Gasho サーバーの IP アドレス>:7740` を開き、登録の画面にコードを入れる。2台目からは、登録済みの端末の「端末」画面でもコードを出せる。
 
-### working server を登録する
+### working server に gasho-daemon を入れる
 
-working server になるマシンには、Node.js 24 以上とこのリポジトリがあればよい（`npm install` は要らない）。登録コードを出して、そのマシンで次を実行する。
+Claude Code を動かすマシン（working server）ごとに、gasho-daemon を1つ動かす。手順は [docs/daemon-setup.md](docs/daemon-setup.md) にまとめた。おおまかには次のとおり。
 
 ```bash
+git clone https://github.com/4rtoflow/Gasho.git ~/repos/Gasho && cd ~/repos/Gasho
 node apps/daemon/src/cli.ts register --server http://<Gasho サーバーの IP アドレス>:7740 --code <コード>
-npm run daemon     # または node apps/daemon/src/cli.ts run
+node apps/daemon/src/cli.ts doctor          # 要るものが揃っているかを確かめる
+node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル（Ubuntu は systemd、Mac は launchd）を書き出す
 ```
 
-登録は `~/.config/gasho/daemon.json` に保存される（本人だけが読める権限）。working server は、登録したときの名前で画面に出る。名前は「端末」画面で変えられる。
-
-### hooks（通知に使う）
-
-応答の完了・権限の確認待ち・入力待ちを通知するには、各 working server の Claude Code に hooks を入れる。
-
-```bash
-# 追加される内容を確かめる
-GASHO_HOOK_SECRET=<長いランダムな文字列> node apps/daemon/src/cli.ts hooks print
-# ~/.claude/settings.json に追記する（元のファイルはバックアップする）
-GASHO_HOOK_SECRET=<同じ値> node apps/daemon/src/cli.ts hooks install
-# daemon にも同じ値を渡して起動する
-GASHO_HOOK_SECRET=<同じ値> npm run daemon
-```
-
-- シークレットは設定ファイルに直接書き込まれる
-- 設定は、動いているセッションにも数秒で反映される
-- ユーザー設定の hooks は、そのマシンのすべてのセッションにかかる
-- daemon が止まっていても、hook の失敗は無視され、Claude Code の動きは変わらない
-
-hooks を入れなくても、セッションの一覧と会話の表示は使える。
+`npm install` は要らない。`doctor` は、Node.js、登録、Claude Code、zellij、git、GitHub CLI、通知の hooks が揃っているかを確かめ、足りないものがあれば、使えなくなる機能と直し方を示す。
 
 ### Gasho からセッションを起動して、入力する
 
@@ -146,6 +128,10 @@ npm run typecheck
 | `GASHO_HOOK_PORT` | daemon | `7741` |
 | `GASHO_HOOK_SECRET` | daemon・hooks install | なし |
 | `GASHO_CLAUDE_DIR` / `GASHO_CLAUDE_BIN` | daemon | `~/.claude` / `claude` |
+| `GASHO_GH_BIN` | daemon | `gh` |
+| `GASHO_POLL_MS` | daemon | `3000` |
+
+gasho-daemon の変数は、`~/.config/gasho/daemon.env` に `名前=値` の形で書いておくこともできる。gasho-daemon のコマンドは、起動するときにこのファイルを読む。端末で設定した値のほうが優先される。
 
 ## フォント
 
