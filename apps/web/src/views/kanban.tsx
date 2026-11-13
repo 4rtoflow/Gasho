@@ -168,8 +168,9 @@ export function KanbanView() {
             <AlertTitle>読めなかった repo があります</AlertTitle>
             <AlertDescription>
               <ul className="space-y-0.5">
-                {errors.map((e) => (
-                  <li key={`${e.machine.id}/${e.repo}`} className="break-words">
+                {errors.map((e, i) => (
+                  // Two clones of one repository have the same name.
+                  <li key={`${e.machine.id}/${i}`} className="break-words">
                     {ready.length > 1 && `${e.machine.name} · `}
                     <span className="text-neutral-200">{e.repo}</span>：{e.error}
                   </li>
@@ -520,7 +521,7 @@ function ModeSwitch({ id, label, compact, onChange }: { id: KanbanColumn; label:
             key={String(c)}
             type="button"
             aria-pressed={on}
-            title={c ? "1 行で表示する" : "理由・次にすること・印も表示する"}
+            title={c ? "1 行で表示する" : "PR の題・Issue・会話の状態も表示する"}
             onClick={() => onChange(c)}
             className={cn("relative cursor-pointer rounded-[5px] px-2 py-0.5 text-[11px] transition-colors", on ? "text-foreground" : "text-neutral-500 hover:text-neutral-300")}
           >
@@ -770,6 +771,14 @@ function ReposDialog({ open, onClose, machines }: { open: boolean; onClose: () =
     setQuery("");
     setOthers(false);
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    // A working server that connects while this is open starts from what it watches, so saving does not empty it.
+    setPicked((cur) => {
+      const added = machines.filter((m) => !(m.id in cur));
+      return added.length === 0 ? cur : { ...cur, ...Object.fromEntries(added.map((m) => [m.id, m.kanbanRepos ?? []])) };
+    });
+  }, [open, machines]);
 
   const toggle = (machine: string, p: string) =>
     setPicked((cur) => {
@@ -821,9 +830,9 @@ function ReposDialog({ open, onClose, machines }: { open: boolean; onClose: () =
             const list = picked[m.id] ?? [];
             const options = m.kanbanOptions ?? [];
             const onGitHub = options.filter((o) => o.github && matches(`${o.github} ${o.path}`));
-            const elsewhere = options.filter((o) => !o.github && matches(o.path));
-            // Chosen before, but no longer among the options: shown first so they can be taken off.
-            const gone = list.filter((p) => !options.some((o) => o.path === p) && matches(p));
+            const elsewhere = options.filter((o) => !o.github && !list.includes(o.path) && matches(o.path));
+            // Chosen before, but no longer among the options on GitHub: shown first so they can be taken off.
+            const gone = list.filter((p) => !options.some((o) => o.path === p && o.github) && matches(p));
             return (
               <section key={m.id} className="space-y-2">
                 <h3 className="flex items-center gap-2 text-xs font-medium text-neutral-700 dark:text-neutral-300">
@@ -839,7 +848,11 @@ function ReposDialog({ open, onClose, machines }: { open: boolean; onClose: () =
                       <DrawCheckbox
                         checked
                         onChange={() => toggle(m.id, p)}
-                        label={<span className="text-amber-700 dark:text-amber-300">見つからない repo</span>}
+                        label={
+                          <span className="text-amber-700 dark:text-amber-300">
+                            {options.some((o) => o.path === p) ? "GitHub にない repo" : "見つからない repo"}
+                          </span>
+                        }
                         description={<span className="font-mono break-all">{p}</span>}
                       />
                     </li>
@@ -955,6 +968,9 @@ async function instruct(row: PlacedCard, action: KanbanAction, notify: (n: Notic
  */
 function CardMenu({ row, onNotice, children }: { row: PlacedCard; onNotice: (n: Notice) => void; children: ReactElement }) {
   const { machine, card } = row;
+  const [open, setOpen] = useState(false);
+  // A touch opens the menu on a tap, not when the finger lands: a swipe over the cards must only scroll the page.
+  const touch = useRef(false);
   const sessions = gashoSessions(row);
   const actions = card.actions ?? [];
   const canStart = Boolean(card.path && machine.canLaunch);
@@ -965,8 +981,21 @@ function CardMenu({ row, onNotice, children }: { row: PlacedCard; onNotice: (n: 
       ? "この working server には zellij が無いので、セッションを起動できません。"
       : undefined;
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>{children}</DropdownMenu.Trigger>
+    <DropdownMenu.Root open={open} onOpenChange={setOpen}>
+      <DropdownMenu.Trigger
+        asChild
+        onPointerDown={(e) => {
+          touch.current = e.pointerType !== "mouse";
+          // Keeps Radix from opening the menu now.
+          if (touch.current) e.preventDefault();
+        }}
+        onClick={() => {
+          if (touch.current) setOpen((o) => !o);
+          touch.current = false;
+        }}
+      >
+        {children}
+      </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           align="start"
