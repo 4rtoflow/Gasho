@@ -1,6 +1,7 @@
 "use client";
-// From easyui.site (PromptInput). Changed for Gasho: user-visible strings are in Japanese, and the line under the box
-// can be laid out like EasyUI's preview (`showCount`: keyboard hint on the left, character count on the right).
+// From easyui.site (PromptInput). Changed for Gasho: user-visible strings are in Japanese, the line under the box
+// can be laid out like EasyUI's preview (`showCount`: keyboard hint on the left, character count on the right), and
+// what is typed can be kept outside the component (`draft`), so it is still there when the box is shown again.
 
 import {
   forwardRef,
@@ -15,6 +16,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion } from "framer-motion";
@@ -68,6 +70,37 @@ export interface PromptInputHandle {
   attach: (files: File[] | FileList) => void;
 }
 
+/** What is in the box (its text and files), and the texts sent from it, newest first (↑ recalls them). */
+export interface PromptDraft {
+  text: string;
+  attachments: PromptAttachment[];
+  history: string[];
+}
+
+/** Holds a PromptDraft outside the box (see `draft`). */
+export interface PromptDraftStore {
+  get: () => PromptDraft;
+  set: (next: PromptDraft) => void;
+  subscribe: (listener: () => void) => () => void;
+}
+
+export function createPromptDraft(): PromptDraftStore {
+  let value: PromptDraft = { text: "", attachments: [], history: [] };
+  const listeners = new Set<() => void>();
+  return {
+    get: () => value,
+    set: (next) => {
+      if (next === value) return;
+      value = next;
+      for (const l of listeners) l();
+    },
+    subscribe: (l) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+  };
+}
+
 export interface PromptInputProps {
   /**
    * Called when the user sends. Throw / reject to put their message back in the box.
@@ -112,6 +145,12 @@ export interface PromptInputProps {
    * EasyUI's preview). Without it the count appears next to the send button only near the limit.
    */
   showCount?: boolean;
+  /**
+   * Where the box keeps its text, files and sent texts (see createPromptDraft). One that outlives the component finds
+   * them again when the box is shown anew (after another screen); its files keep their previews meanwhile. A text put
+   * back after a failed send also goes there, even when the box has gone. Without one, the box keeps its own.
+   */
+  draft?: PromptDraftStore;
   className?: string;
 }
 
@@ -419,6 +458,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
     hint,
     safeArea = false,
     showCount = false,
+    draft,
     className = "",
   },
   ref,
@@ -432,8 +472,28 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const dragDepth = useRef(0);
   const errTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
+  // The text, files and sent texts live in a store (the caller's `draft`, or the box's own), so that a change made
+  // after the box has gone (a text put back after a failed send) still reaches it.
+  const [ownDraft] = useState(createPromptDraft);
+  const store = draft ?? ownDraft;
+  const { text, attachments } = useSyncExternalStore(store.subscribe, store.get, store.get);
+  const change = useCallback(
+    (patch: (d: PromptDraft) => Partial<PromptDraft>) => {
+      const cur = store.get();
+      const next = { ...cur, ...patch(cur) };
+      if (next.text !== cur.text || next.attachments !== cur.attachments || next.history !== cur.history) store.set(next);
+    },
+    [store],
+  );
+  const setText = useCallback(
+    (v: string | ((prev: string) => string)) => change((d) => ({ text: typeof v === "function" ? v(d.text) : v })),
+    [change],
+  );
+  const setAttachments = useCallback(
+    (v: PromptAttachment[] | ((prev: PromptAttachment[]) => PromptAttachment[])) =>
+      change((d) => ({ attachments: typeof v === "function" ? v(d.attachments) : v })),
+    [change],
+  );
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [modelId, setModelId] = useState(defaultModel ?? models[0]?.id ?? "");
@@ -539,7 +599,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
         flashError(uniq[0] + (uniq.length > 1 ? ` (+${uniq.length - 1} more)` : ""));
       }
     },
-    [accept, allowAttachments, disabled, flashError, maxFileSizeMB, maxFiles],
+    [accept, allowAttachments, disabled, flashError, maxFileSizeMB, maxFiles, setAttachments],
   );
 
   const removeAttachment = (id: string) =>
@@ -551,18 +611,21 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
 
   const live = useRef(attachments);
   live.current = attachments;
+  // Files kept in the caller's draft outlive the box, and keep their previews.
+  const ownsDraft = useRef(!draft);
+  ownsDraft.current = !draft;
   useEffect(
     () => () => {
-      live.current.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
+      if (ownsDraft.current) live.current.forEach((a) => a.previewUrl && URL.revokeObjectURL(a.previewUrl));
       clearTimeout(errTimer.current);
     },
     [],
   );
 
   /* --------------------------- history (↑ / ↓) ---------------------------- */
-  const history = useRef<string[]>([]);
+  // The sent texts themselves are in the draft (PromptDraft.history).
   const histIdx = useRef(-1);
-  const draft = useRef("");
+  const unsent = useRef("");
 
   /* -------------------------------- sending -------------------------------- */
   const canSend = !disabled && (text.trim().length > 0 || attachments.length > 0) && text.length <= maxLength;
@@ -571,10 +634,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
     if (streaming || !canSend) return;
     const payload: PromptSubmit = { text: text.trim(), files: attachments.map((a) => a.file), model: currentModel };
     const snapshot = { text, attachments };
-    if (payload.text) history.current = [payload.text, ...history.current.filter((t) => t !== payload.text)].slice(0, 30);
     histIdx.current = -1;
-    setText("");
-    setAttachments([]);
+    change((d) => ({
+      text: "",
+      attachments: [],
+      ...(payload.text ? { history: [payload.text, ...d.history.filter((t) => t !== payload.text)].slice(0, 30) } : {}),
+    }));
     setError(null);
     try {
       await onSend(payload);
@@ -585,7 +650,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
       setAttachments((a) => (a.length ? a : snapshot.attachments));
       flashError("送れませんでした。入力は欄に戻しました。");
     }
-  }, [attachments, canSend, currentModel, flashError, onSend, streaming, text]);
+  }, [attachments, canSend, change, currentModel, flashError, onSend, setAttachments, setText, streaming, text]);
 
   useImperativeHandle(
     ref,
@@ -598,7 +663,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
       setValue: (v: string) => setText(v),
       attach: (files) => addFiles(files),
     }),
-    [addFiles],
+    [addFiles, setAttachments, setText],
   );
   useEffect(() => {
     if (autoFocus) textRef.current?.focus({ preventScroll: true });
@@ -620,20 +685,21 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
       }
     }
     const el = e.currentTarget;
-    if (e.key === "ArrowUp" && history.current.length && el.selectionStart === 0 && el.selectionEnd === 0 && !e.shiftKey) {
-      if (histIdx.current === -1) draft.current = text;
-      const next = Math.min(histIdx.current + 1, history.current.length - 1);
-      if (next !== histIdx.current || text !== history.current[next]) {
+    const history = store.get().history;
+    if (e.key === "ArrowUp" && history.length && el.selectionStart === 0 && el.selectionEnd === 0 && !e.shiftKey) {
+      if (histIdx.current === -1) unsent.current = text;
+      const next = Math.min(histIdx.current + 1, history.length - 1);
+      if (next !== histIdx.current || text !== history[next]) {
         e.preventDefault();
         histIdx.current = next;
-        setText(history.current[next]);
+        setText(history[next]);
         requestAnimationFrame(() => el.setSelectionRange(0, 0));
       }
     } else if (e.key === "ArrowDown" && histIdx.current >= 0 && el.selectionStart === el.value.length && !e.shiftKey) {
       e.preventDefault();
       const next = histIdx.current - 1;
       histIdx.current = next;
-      setText(next < 0 ? draft.current : history.current[next]);
+      setText(next < 0 ? unsent.current : history[next]);
     }
   };
 

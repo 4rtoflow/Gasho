@@ -145,6 +145,19 @@ export function bannerModel(screen: string): string | undefined {
   return name && name.length <= 40 && /\d/.test(name) ? name : undefined;
 }
 
+/**
+ * Claude Code's question when it resumes a session whose last message is old and whose conversation is long: "This
+ * session is 3h 5m old and 120k tokens." with "Resume from summary (recommended)", "Resume full session as-is" and
+ * "Don't ask me again". Esc answers it without a choice: the full session is resumed as it is, nothing is summarized,
+ * and nothing is saved ("Don't ask me again" would turn the question off for every session). The question hides the
+ * prompt box; with the box at the bottom, the words are only quoted in the conversation (Esc there would do harm: a
+ * second one opens Claude Code's rewind menu).
+ */
+export function resumeQuestionOpen(screen: string): boolean {
+  if (promptBoxAtBottom(screenLines(screen))) return false;
+  return atBottom(screen, /This session is .+? old and .+? tokens\..*Resume full ?session/, 20);
+}
+
 /** Whether the output of the latest /model on the screen says the model was switched for this session only. */
 export function switchedForSession(screen: string): boolean {
   const flat = screen.replace(/\s+/g, " ");
@@ -197,7 +210,7 @@ export function promptBoxLines(screen: string): string[] | undefined {
 
 /**
  * Whether something at the bottom of the screen has the keys instead of the prompt box: the /model picker, the
- * question before a switch, a permission dialog or the trust dialog.
+ * question before a switch, a permission dialog, the trust dialog or the question when resuming an old session.
  */
 export function dialogOpen(screen: string): boolean {
   if (promptBoxAtBottom(screenLines(screen))) return false;
@@ -205,7 +218,8 @@ export function dialogOpen(screen: string): boolean {
     modelPickerOptions(screen).length > 0 ||
     switchQuestion(screen) !== undefined ||
     atBottom(screen, PERMISSION_PROMPT_RE) ||
-    atBottom(screen, TRUST_PROMPT_RE)
+    atBottom(screen, TRUST_PROMPT_RE) ||
+    resumeQuestionOpen(screen)
   );
 }
 
@@ -400,6 +414,40 @@ export interface ManagedSession {
   cwd: string;
   name: string;
   launchedAt: number;
+  /** A fork: the session it was forked from, and when (its transcript starts with a copy of that conversation). */
+  forkOf?: string;
+  forkedAt?: number;
+}
+
+/** Names of sessions started from Gasho: at most this many characters. */
+export const MAX_SESSION_NAME = 60;
+
+/**
+ * Checks a session's name for Gasho and for Claude Code's /rename, which takes the rest of its line. Returns the name
+ * without spaces around it, or an error message.
+ */
+export function sessionName(name: string): { name: string } | { error: string } {
+  const trimmed = name.trim();
+  if (!trimmed) return { error: "名前を入れてください。" };
+  if (trimmed.length > MAX_SESSION_NAME) return { error: `名前は${MAX_SESSION_NAME}文字までです。` };
+  if (/\p{Cc}/u.test(trimmed)) return { error: "名前に改行や制御文字は使えません。" };
+  return { name: trimmed };
+}
+
+/** What renames a session in Claude Code (and its Remote Control session, so in the official apps too). */
+export function renameCommand(name: string): string {
+  return `/rename ${name}`;
+}
+
+/** Whether an input is a /rename (or its alias /name). */
+export function isRename(text: string): boolean {
+  return /^\s*\/(?:re)?name(?=\s|$)/.test(text);
+}
+
+/** The name of a fork, when none is given: the session's name and "のフォーク", within the length allowed. */
+export function forkName(of: string): string {
+  const suffix = " のフォーク";
+  return `${of.slice(0, MAX_SESSION_NAME - suffix.length).trimEnd()}${suffix}`;
 }
 
 /**
@@ -426,7 +474,8 @@ export function zellijSessionName(label: string, suffix = randomBytes(2).toStrin
 
 /**
  * Arguments for `zellij` that start Claude Code with Remote Control in `cwd` inside a new background session.
- * The shell writes its PID and then execs, so the PID file ends up holding Claude Code's PID.
+ * The shell writes its PID and then execs, so the PID file ends up holding Claude Code's PID. `claudeArgs` go to
+ * Claude Code after the Remote Control name (a fork: `--resume <id> --fork-session`).
  */
 export function launchArgs(o: {
   zellijSession: string;
@@ -435,6 +484,7 @@ export function launchArgs(o: {
   claudeBin: string;
   rcName: string;
   env: Record<string, string>;
+  claudeArgs?: string[];
 }): string[] {
   const script = 'echo $$ > "$1" && cd "$2" && shift 2 && exec "$@"';
   const envPairs = Object.entries(o.env).map(([k, v]) => `${k}=${v}`);
@@ -455,6 +505,7 @@ export function launchArgs(o: {
     o.claudeBin,
     "--remote-control",
     o.rcName,
+    ...(o.claudeArgs ?? []),
   ];
 }
 
@@ -561,6 +612,26 @@ export class ManagedSessions {
     this.sessions.set(m.sessionId, m);
   }
 
+  /** Whether the name changed. */
+  setName(sessionId: string, name: string): boolean {
+    const m = this.sessions.get(sessionId);
+    if (!m || m.name === name) return false;
+    m.name = name;
+    return true;
+  }
+
+  /**
+   * Takes waiting inputs off the queue that `match`, except one whose Enter was pressed already (Claude Code may have
+   * taken it). Returns how many were taken off.
+   */
+  drop(sessionId: string, match: (input: QueuedInput) => boolean): number {
+    const q = this.queues.get(sessionId);
+    if (!q) return 0;
+    const kept = q.filter((input) => input.entered || !match(input));
+    this.queues.set(sessionId, kept);
+    return q.length - kept.length;
+  }
+
   remove(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.queues.delete(sessionId);
@@ -591,6 +662,11 @@ export class ManagedSessions {
   /** The input that is sent next, without taking it off the queue. */
   peek(sessionId: string): QueuedInput | undefined {
     return this.queues.get(sessionId)?.[0];
+  }
+
+  /** The inputs waiting, the next first. */
+  waiting(sessionId: string): readonly QueuedInput[] {
+    return this.queues.get(sessionId) ?? [];
   }
 }
 

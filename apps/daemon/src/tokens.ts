@@ -59,16 +59,22 @@ async function transcriptsIn(dir: string): Promise<string[]> {
   }
 }
 
-/** Counts the tokens of one session; `update` reads what was written since the last call. */
+/**
+ * Counts the tokens of one session; `update` reads what was written since the last call. `since` (ms): replies made
+ * before it are not counted. A fork's transcript starts with a copy of the conversation it was forked from, with the
+ * replies' times and usage; those tokens were used by that session, not by the fork.
+ */
 export class TokenCounter {
   private transcript: string;
+  private since: number;
   private replies = new Map<string, { hour: number; usage: TokenUsage }>();
   private total = emptyUsage();
   private byHour = new Map<number, TokenUsage>();
   private files = new Map<string, { offset: number; rest: Buffer }>();
 
-  constructor(transcript: string) {
+  constructor(transcript: string, { since = 0 }: { since?: number } = {}) {
     this.transcript = transcript;
+    this.since = since;
   }
 
   /** Reads the session's transcript and its subagents' from where the last call stopped; whether anything changed. */
@@ -108,7 +114,7 @@ export class TokenCounter {
       let changed = false;
       for (const line of data.subarray(0, lastNl + 1).toString("utf8").split("\n")) {
         const reply = usageOfLine(line);
-        if (reply && this.count(reply)) changed = true;
+        if (reply && reply.at >= this.since && this.count(reply)) changed = true;
       }
       return changed;
     } finally {

@@ -458,12 +458,30 @@ export type SessionCommand =
       ultracode?: boolean;
       files?: InputFile[];
     }
-  | { type: "session.interrupt"; sessionId: string };
+  | { type: "session.interrupt"; sessionId: string }
+  /**
+   * Renames a session started from Gasho: in Gasho at once, and in Claude Code with `/rename` (also the name in the
+   * official apps), typed like an input once the session is idle.
+   */
+  | { type: "session.rename"; sessionId: string; name: string }
+  /**
+   * Starts a copy of a session started from Gasho, with its conversation so far, in the same folder
+   * (`claude --resume <id> --fork-session`). The session itself goes on as it was.
+   */
+  | { type: "session.fork"; sessionId: string; name?: string }
+  /**
+   * Ends a session started from Gasho (its Claude Code, then its zellij session) and removes it from Gasho. Its
+   * conversation stays on the working server: `claude --resume` lists it.
+   */
+  | { type: "session.remove"; sessionId: string };
 
 export interface CommandResult {
   ok: boolean;
   error?: string;
-  /** session.launch: the new session; session.input: whether the input waits for the session to become idle. */
+  /**
+   * session.launch, session.fork: the new session. session.input: whether the input waits for the session to become
+   * idle; session.rename: whether `/rename` does.
+   */
   sessionId?: string;
   queued?: boolean;
   /** Sent, but something asked for did not happen (e.g. the model could not be switched). */

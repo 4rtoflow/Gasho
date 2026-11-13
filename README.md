@@ -43,47 +43,32 @@ npm run hub:pair   # 登録コード（10分間有効、1回だけ使える）�
 
 ブラウザで `http://<Gasho サーバーの IP アドレス>:7740` を開き、登録の画面にコードを入れる。2台目からは、登録済みの端末の「端末」画面でもコードを出せる。
 
-### working server を登録する
+### working server に gasho-daemon を入れる
 
-working server になるマシンには、Node.js 24 以上とこのリポジトリがあればよい（`npm install` は要らない）。登録コードを出して、そのマシンで次を実行する。
+Claude Code を動かすマシン（working server）ごとに、gasho-daemon を1つ動かす。手順は [docs/daemon-setup.md](docs/daemon-setup.md) にまとめた。おおまかには次のとおり。
 
 ```bash
+git clone https://github.com/4rtoflow/Gasho.git ~/repos/Gasho && cd ~/repos/Gasho
 node apps/daemon/src/cli.ts register --server http://<Gasho サーバーの IP アドレス>:7740 --code <コード>
-npm run daemon     # または node apps/daemon/src/cli.ts run
+node apps/daemon/src/cli.ts doctor          # 要るものが揃っているかを確かめる
+node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル（Ubuntu は systemd、Mac は launchd）を書き出す
 ```
 
-登録は `~/.config/gasho/daemon.json` に保存される（本人だけが読める権限）。working server は、登録したときの名前で画面に出る。名前は「端末」画面で変えられる。
-
-### hooks（通知に使う）
-
-応答の完了・権限の確認待ち・入力待ちを通知するには、各 working server の Claude Code に hooks を入れる。
-
-```bash
-# 追加される内容を確かめる
-GASHO_HOOK_SECRET=<長いランダムな文字列> node apps/daemon/src/cli.ts hooks print
-# ~/.claude/settings.json に追記する（元のファイルはバックアップする）
-GASHO_HOOK_SECRET=<同じ値> node apps/daemon/src/cli.ts hooks install
-# daemon にも同じ値を渡して起動する
-GASHO_HOOK_SECRET=<同じ値> npm run daemon
-```
-
-- シークレットは設定ファイルに直接書き込まれる
-- 設定は、動いているセッションにも数秒で反映される
-- ユーザー設定の hooks は、そのマシンのすべてのセッションにかかる
-- daemon が止まっていても、hook の失敗は無視され、Claude Code の動きは変わらない
-
-hooks を入れなくても、セッションの一覧と会話の表示は使える。
+`npm install` は要らない。`doctor` は、Node.js、登録、Claude Code、zellij、git、GitHub CLI、通知の hooks が揃っているかを確かめ、足りないものがあれば、使えなくなる機能と直し方を示す。
 
 ### Gasho からセッションを起動して、入力する
 
-ホームの「新しいセッション」で working server とフォルダーを選ぶと、そのマシンで `claude --remote-control <名前>` が起動する。このセッションには、セッション画面の入力欄から指示を送れる。公式アプリ（スマホ・Desktop）からも、同じセッションを操作できる。
+ホームの「新しいセッション」か、サイドバーのセッションの一覧の見出しにある「＋」を押して、working server とフォルダーを選ぶと、そのマシンで `claude --remote-control <名前>` が起動する。「＋」はどの画面からでも押せて、選ぶ項目はダイアログに出る。このセッションには、セッション画面の入力欄から指示を送れる。公式アプリ（スマホ・Desktop）からも、同じセッションを操作できる。
 
 画面に出すのは、こうして Gasho が起動したセッションだけ。端末や `claude rc` で起動したセッションは、一覧にも通知にも出さない。
+
+サイドバーには、これらのセッションを working server に分けずに1つの一覧で出し、最後に会話があったものから並べる。まだ会話がないセッションは、起動した時刻で並べる。オフラインの working server のセッションには「オフライン」と出す。セッションがまだないときも、一覧の見出しと「＋」は出す。
 
 - working server に zellij が要る（0.45 で確かめた）。セッションは、専用の zellij セッション（`gasho-<名前>-xxxx`）の中で動くので、SSH から `zellij attach <その名前>` で直接見ることもできる
 - フォルダーの一覧に出るのは、Claude Code がすでに信頼しているフォルダー。ほかのフォルダーは、端末で一度 `claude` を起動して信頼してから使う
 - 作業中は、送信ボタンが停止ボタンに変わる。押すと Esc を送って作業を止める
 - 送った時点で作業中になっていた指示（公式アプリからの発言と重なったときなど）は daemon が預かり、作業が終わってから順に送る
+- 送った指示は、すぐに会話の末尾に「送信中…」と出す。Claude Code が指示を会話に記録するのは、daemon が指示を入力したときで、モデルを先に切り替える（`/model`）ときなどは数秒かかる。記録されると、その記録に置き換わる。daemon が預かった指示は「送信待ち」と出す
 - 応答が始まる前に止めると、Claude Code は止めた指示を端末の入力欄に戻す。daemon は、次の指示を貼り付ける前に入力欄を空にする
 - Claude の返答は Markdown として表示する。HTML は表示せず、画像は読み込まずにリンクとして出す
 - 入力欄で、モデル（既定・Opus 5.5 など、Claude Code の選択画面と同じ名前）、Effort（Low〜Max）、Ultracode を選んで送ると、送る前にそのセッションだけ切り替える。全体の既定は変えない。会話の途中でモデルを変えると、次の返答では履歴を新しいモデルで読み直すので、時間とトークンが多くかかる
@@ -91,16 +76,42 @@ hooks を入れなくても、セッションの一覧と会話の表示は使�
 - 入力欄に `/model` や `/effort high` のように書いて送ることはできない。これらは、すべての新しいセッションの既定も変えてしまうため。`/effort ultracode on` と `off` は送れる
 - Effort と Ultracode の切り替えには、その working server の gasho-daemon が 0.6.0 以上である必要がある。0.5 の gasho-daemon ではモデルの切り替えと添付だけ、それより前のものでは文字の入力だけになり、扱えない操作は出ない
 - クリップのボタン、ドラッグ、貼り付けでファイルを添付できる（1回に5個、合わせて10MB まで）。ファイルは working server の `~/.local/share/gasho/attachments/` に保存され、Claude が読む。セッションが終わると消える
+- 入力欄に書きかけた文、添付したファイル、選んだモデル・Effort・Ultracode、↑ で呼び出せる送った文は、セッションごとに覚えておく。ほかのセッションやホームに移って戻っても残る。ページを開いているあいだだけ覚えるので、読み込み直すと消える
 - ホームでは、Gasho が起動したセッションが使ったトークンを、過去24時間の推移と内訳（入力、出力、キャッシュへの書き込み、キャッシュからの読み込み）で見られる。daemon が、セッションとそのサブエージェントの会話の記録（`~/.claude/projects/` の下）から、返答ごとに1回ずつ数える。キャッシュからの読み込みは、それまでの会話を毎回読み直した分で、たいてい全体の大部分を占める
 - `/exit` を送るか公式アプリで終了すると、daemon が zellij のセッションも閉じる
 - `claude rc` が起動したセッションには、外から入力する公式の手段がないので、Gasho からは入力できない。入力欄の下の「公式アプリで開く」から操作する
 
 起動したセッションの記録は `~/.config/gasho/managed.json` に残り、daemon を起動し直しても引き継ぐ。
 
+### セッションの名前の変更、フォーク、削除
+
+サイドバーのセッションを右クリックすると（スマホでは長押し）、名前の変更、フォーク、削除のメニューが開く。使えるのは、その working server の gasho-daemon が 0.9.0 以上で、つながっているときだけ。
+
+名前を変えると、Gasho での名前はすぐ変わる。
+
+- daemon が Claude Code に `/rename <名前>` を送り、Claude Code での名前も変える。Claude Code は Remote Control のセッション名も変えるので、公式アプリの表示も変わる想定（公式アプリの画面ではまだ確かめていない）
+- 作業中は、指示と同じように daemon が預かり、作業が終わってから送る
+- 端末で `/rename` したときも、Gasho の名前をそれに合わせる
+- 名前は1行で、60文字まで
+
+フォークすると、会話をそこまで引き継いだ新しいセッションが、同じフォルダーで起動する（`claude --remote-control <名前> --resume <ID> --fork-session`）。元のセッションは、そのまま使える。
+
+- 名前は、はじめ「<元の名前> のフォーク」になっていて、変えられる
+- Claude Code は、フォークした会話を、発言やコマンドが記録されるまでファイルに書き出さない。daemon は、起動した直後に `/rename` を送って名前を付け、引き継いだ会話をすぐ Gasho に出す
+- 前の発言から時間がたっていて会話も長いと、Claude Code が要約から始めるかを尋ねることがある。daemon は Esc で答え、会話をそのまま引き継ぐ。次の返答では会話をすべて読み直すので、時間とトークンが多くかかる
+- ホームのトークンの数には、引き継いだ会話の分を入れない
+- まだ会話がないセッションは、フォークできない
+
+削除すると、daemon が Claude Code を終了し、zellij のセッションを閉じて、Gasho の一覧から外す。会話の記録は working server に残るので、端末で `claude --resume` を使えば開き直せる。
+
+- 作業中なら、途中で止まる。待たせていた指示は送らず、添付ファイルは消える
+- daemon は Claude Code に SIGTERM を送り、8秒たっても終わらなければ zellij のセッションごと止める
+
 ### セッション画面とブランチグラフ
 
 - セッション画面のヘッダーは、右上のボタンで隠せる（スマホでは画面上部のバーの右端）。隠すと、セッション名と状態だけの1行になる。PC では、隠したかどうかをブラウザごとに覚える。スマホでは、セッション画面を開くたびに隠した状態から始まる
 - 会話の中のツールの呼び出し（コマンドの実行など）は、その結果と一緒に1つの折りたたみにまとめて出す
+- Bash の呼び出しが続くところは、全部を1つの折りたたみにまとめる。閉じたままでも、実行した回数、最後に実行したコマンド、エラーになった回数がわかる。開くと、コマンドごとの折りたたみが並ぶ
 - ヘッダーのブランチ名を押すと、ブランチグラフを開く。PC ではセッションの右にパネルとして並べ、スマホでは画面全体に出す。セッションのリポジトリのブランチと、全ブランチの新しいほうから300件のコミットを、枝分かれとマージの線で表示する
 - ブランチ名と最終更新のあいだの「Issues」「Pull requests」を押すと、リポジトリの開いている Issue と Pull request の一覧を、同じようにパネルで開く。一覧の項目を押すと、GitHub へは移らずに、本文とコメント（Pull request ではレビュー、チェック、変更したファイルも）を Gasho の中で読める。GitHub のページは、パネルの「GitHub」から開く。working server の GitHub CLI（gh）で読むので、working server で `gh auth login` を済ませておく。gh のログインを使うので、Gasho は GitHub のトークンを扱わない。その working server の gasho-daemon が 0.7.0 以上のときだけ出る。項目を Gasho の中で読むには 0.8.0 以上が要る（それより前のものでは、項目を押すと GitHub で開く）
 - ブランチの一覧には、ローカルのブランチ（push していないコミットの数など）と、リモートにだけあるブランチ（雲のアイコン）を並べる。見出しを押すと、一覧を折りたためる
@@ -146,6 +157,10 @@ npm run typecheck
 | `GASHO_HOOK_PORT` | daemon | `7741` |
 | `GASHO_HOOK_SECRET` | daemon・hooks install | なし |
 | `GASHO_CLAUDE_DIR` / `GASHO_CLAUDE_BIN` | daemon | `~/.claude` / `claude` |
+| `GASHO_GH_BIN` | daemon | `gh` |
+| `GASHO_POLL_MS` | daemon | `3000` |
+
+gasho-daemon の変数は、`~/.config/gasho/daemon.env` に `名前=値` の形で書いておくこともできる。gasho-daemon のコマンドは、起動するときにこのファイルを読む。端末で設定した値のほうが優先される。
 
 ## フォント
 

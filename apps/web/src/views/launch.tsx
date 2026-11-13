@@ -1,12 +1,39 @@
-// Starts a new session on a working server: `claude --remote-control` in its own zellij session.
+// Starts a new session on a working server: `claude --remote-control` in its own zellij session. The same form shows on
+// the home screen (LaunchPanel) and in a dialog opened from the sidebar's "＋" (LaunchDialog).
 import { Plus, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Dialog } from "radix-ui";
+import { useMemo, useState, type ReactNode } from "react";
+import { DIALOG_OVERLAY, DIALOG_PANEL } from "@/components/dialog-styles";
 import { go } from "@/lib/route";
 import { sendCommand, useAppState } from "@/lib/store";
+import { cn } from "@/lib/utils";
 
 const OTHER = "\u0000other";
+const TITLE = "新しいセッションを起動する";
 
-export function LaunchPanel({ onClose }: { onClose: () => void }) {
+function Description() {
+  return (
+    <>
+      working server で <code className="font-mono">claude --remote-control</code> を起動します。Gasho から入力でき、公式アプリからも操作できます。
+    </>
+  );
+}
+
+/**
+ * The form: working server, name and folder. Once the session has started, `onLaunched` is called and the session
+ * opens. `onBusyChange` tells whether a launch is waiting for its answer.
+ */
+function LaunchForm({
+  header,
+  className,
+  onLaunched,
+  onBusyChange,
+}: {
+  header: ReactNode;
+  className?: string;
+  onLaunched: () => void;
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const { machines } = useAppState();
   const candidates = useMemo(() => machines.filter((m) => m.connected && m.canLaunch), [machines]);
   const [machineId, setMachineId] = useState(candidates[0]?.id ?? "");
@@ -22,34 +49,26 @@ export function LaunchPanel({ onClose }: { onClose: () => void }) {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!machine || !cwd) return;
+    if (!machine || !cwd || busy) return;
     setBusy(true);
+    onBusyChange?.(true);
     setError(undefined);
     const r = await sendCommand(machine.id, { type: "session.launch", cwd, name: name.trim() || undefined }, 60_000);
     setBusy(false);
+    onBusyChange?.(false);
     if (!r.ok || !r.sessionId) {
       setError(r.error ?? "起動できませんでした。");
       return;
     }
-    onClose();
+    onLaunched();
     go({ name: "session", machine: machine.id, sessionId: r.sessionId });
   };
 
   const field = "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:border-border-hover";
 
   return (
-    <form onSubmit={submit} className="space-y-4 rounded-2xl border border-border bg-surface/50 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-medium">新しいセッションを起動する</h2>
-          <p className="text-xs text-muted-foreground">
-            working server で <code className="font-mono">claude --remote-control</code> を起動します。Gasho から入力でき、公式アプリからも操作できます。
-          </p>
-        </div>
-        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground" aria-label="閉じる">
-          <X className="size-4" />
-        </button>
-      </div>
+    <form onSubmit={submit} className={cn("space-y-4", className)}>
+      {header}
 
       {candidates.length === 0 ? (
         <p className="text-sm text-muted-foreground">
@@ -116,5 +135,82 @@ export function LaunchPanel({ onClose }: { onClose: () => void }) {
         </>
       )}
     </form>
+  );
+}
+
+/** The form on the home screen, under its "新しいセッション" button. */
+export function LaunchPanel({ onClose }: { onClose: () => void }) {
+  return (
+    <LaunchForm
+      className="rounded-2xl border border-border bg-surface/50 p-4"
+      onLaunched={onClose}
+      header={
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium">{TITLE}</h2>
+            <p className="text-xs text-muted-foreground">
+              <Description />
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground" aria-label="閉じる">
+            <X className="size-4" />
+          </button>
+        </div>
+      }
+    />
+  );
+}
+
+/**
+ * The form in a dialog, from any page (the sidebar's "＋"). While a launch waits for its answer, the dialog stays open:
+ * the answer opens the new session. `onLaunched` is called once it has started.
+ */
+export function LaunchDialog({ open, onClose, onLaunched }: { open: boolean; onClose: () => void; onLaunched?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className={DIALOG_OVERLAY} />
+        <Dialog.Content
+          className={cn(DIALOG_PANEL, "w-[min(36rem,calc(100vw-2rem))]")}
+          onOpenAutoFocus={(e) => {
+            // The first field rather than the close button; a select does not bring up a phone's keyboard.
+            const first = (e.currentTarget as HTMLElement | null)?.querySelector<HTMLElement>("select, input");
+            if (first) {
+              e.preventDefault();
+              first.focus();
+            }
+          }}
+        >
+          <LaunchForm
+            onBusyChange={setBusy}
+            onLaunched={() => {
+              onClose();
+              onLaunched?.();
+            }}
+            header={
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <Dialog.Title className="text-base font-semibold tracking-tight">{TITLE}</Dialog.Title>
+                  <Dialog.Description className="text-xs text-muted-foreground">
+                    <Description />
+                  </Dialog.Description>
+                </div>
+                <Dialog.Close asChild>
+                  <button type="button" disabled={busy} className="text-muted-foreground hover:text-foreground disabled:opacity-40" aria-label="閉じる">
+                    <X className="size-4" />
+                  </button>
+                </Dialog.Close>
+              </div>
+            }
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

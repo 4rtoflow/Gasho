@@ -56,7 +56,19 @@ const LAUNCH_TIMEOUT_MS = 45_000;
  * step checked on the screen; the browser waits a little longer than this.
  */
 const INPUT_TIMEOUT_MS = 150_000;
+/**
+ * A fork starts Claude Code like a launch (up to 30 s), waits for its prompt box (up to 15 s), then names the copy with
+ * `/rename`, checked on the screen like an input, and waits for its transcript.
+ */
+const FORK_TIMEOUT_MS = 90_000;
+/** A rename may type `/rename` at once, checked on the screen like an input. */
+const RENAME_TIMEOUT_MS = 45_000;
+/** Removing waits for Claude Code to end (it is stopped harder after a while). */
+const REMOVE_TIMEOUT_MS = 30_000;
 const MAX_INPUT = 20_000;
+/** Names of sessions started from Gasho. */
+const MAX_NAME = 60;
+const MAX_SESSION_ID = 100;
 const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]);
@@ -66,8 +78,26 @@ const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]
  * and carries files; older ones only type the text.
  */
 export function legacyFeatures(daemonVersion: string | undefined): InputFeature[] {
-  const [major = 0, minor = 0] = (daemonVersion ?? "").split(".").map((n) => Number.parseInt(n, 10) || 0);
-  return major > 0 || minor >= 5 ? ["model", "files"] : [];
+  return versionAtLeast(daemonVersion, 0, 5) ? ["model", "files"] : [];
+}
+
+/** Whether a gasho-daemon's version is at least `major.minor`. */
+export function versionAtLeast(version: string | undefined, major: number, minor: number): boolean {
+  const [a = 0, b = 0] = (version ?? "").split(".").map((n) => Number.parseInt(n, 10) || 0);
+  return a > major || (a === major && b >= minor);
+}
+
+/** gasho-daemon 0.9.0 renames, forks and removes sessions. */
+const SESSION_ACTIONS_SINCE: [number, number] = [0, 9];
+
+/** A session's name: an error message, or undefined when it is fine (or omitted where `required` is false). */
+function nameError(name: unknown, required: boolean): string | undefined {
+  if (name === undefined && !required) return undefined;
+  if (typeof name !== "string" || !name.trim()) return "名前を入れてください。";
+  if (name.trim().length > MAX_NAME) return `名前は${MAX_NAME}文字までです。`;
+  // One line: Claude Code's /rename takes the rest of the line.
+  if (/\p{Cc}/u.test(name)) return "名前に改行や制御文字は使えません。";
+  return undefined;
 }
 /** Files sent with one input: how many, and their size in all. */
 export const MAX_FILES = 5;
@@ -88,6 +118,9 @@ interface PendingCommand {
 
 /** Checks a command from a browser; returns an error message or undefined. */
 export function validateCommand(cmd: SessionCommand): string | undefined {
+  if ("sessionId" in cmd && (typeof cmd.sessionId !== "string" || !cmd.sessionId || cmd.sessionId.length > MAX_SESSION_ID)) {
+    return "セッションの指定が正しくありません。";
+  }
   switch (cmd.type) {
     case "session.launch":
       if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
@@ -119,7 +152,12 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       return undefined;
     }
     case "session.interrupt":
+    case "session.remove":
       return undefined;
+    case "session.rename":
+      return nameError(cmd.name, true);
+    case "session.fork":
+      return nameError(cmd.name, false);
     default:
       return "不明な命令です。";
   }
@@ -372,7 +410,10 @@ export class Hub {
         break;
       case "session.launch":
       case "session.input":
-      case "session.interrupt": {
+      case "session.interrupt":
+      case "session.rename":
+      case "session.fork":
+      case "session.remove": {
         const { requestId: clientRequestId, machine, ...cmd } = msg;
         this.relayCommand(peer, clientRequestId, machine, cmd);
         break;
@@ -388,28 +429,23 @@ export class Hub {
     if (!daemon) return reply({ ok: false, error: "この working server はオフラインです。" });
     // Audit trail of what browsers asked working servers to do.
     const sessionId = "sessionId" in cmd ? cmd.sessionId : "";
-    const summary =
-      cmd.type === "session.input"
-        ? [
-            cmd.text.slice(0, 300),
-            cmd.model && `[model: ${cmd.model}]`,
-            cmd.effort && `[effort: ${cmd.effort}]`,
-            cmd.ultracode !== undefined && `[ultracode: ${cmd.ultracode ? "on" : "off"}]`,
-            ...(cmd.files ?? []).map((f) => `[file: ${f.name.slice(0, 100)}, ${Math.ceil(base64Bytes(f.data) / 1024)}KB]`),
-          ]
-            .filter(Boolean)
-            .join(" ")
-        : cmd.type === "session.launch"
-          ? cmd.cwd
-          : "";
+    const summary = this.summaryOf(machine, cmd);
     const event: MachineHookEvent = { machine, sessionId, event: `Gasho:${cmd.type}`, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` };
     this.store.addEvent(event);
     // Browsers show the latest operations on the home screen.
     this.broadcast({ type: "event", event });
 
     const requestId = randomUUID();
-    // Launching waits for Claude Code to start; an input may switch the model, effort and ultracode first.
-    const timeout = cmd.type === "session.interrupt" ? REQUEST_TIMEOUT_MS : cmd.type === "session.input" ? INPUT_TIMEOUT_MS : LAUNCH_TIMEOUT_MS;
+    // Launching and forking wait for Claude Code to start; an input may switch the model, effort and ultracode first;
+    // removing waits for Claude Code to end.
+    const timeout = {
+      "session.launch": LAUNCH_TIMEOUT_MS,
+      "session.input": INPUT_TIMEOUT_MS,
+      "session.interrupt": REQUEST_TIMEOUT_MS,
+      "session.rename": RENAME_TIMEOUT_MS,
+      "session.fork": FORK_TIMEOUT_MS,
+      "session.remove": REMOVE_TIMEOUT_MS,
+    }[cmd.type];
     const timer = setTimeout(() => {
       if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
     }, timeout);
@@ -419,10 +455,47 @@ export class Hub {
     daemon.send({ requestId, ...cmd });
   }
 
-  /** An input that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
+  /**
+   * The audit log's words for a command: an input's text (with what it switches and the names and sizes of its files,
+   * never their contents), the folder of a launch, or a session's name (the new one for a rename, the copy's for a fork,
+   * the removed session's for a removal).
+   */
+  private summaryOf(machine: string, cmd: SessionCommand): string {
+    switch (cmd.type) {
+      case "session.input":
+        return [
+          cmd.text.slice(0, 300),
+          cmd.model && `[model: ${cmd.model}]`,
+          cmd.effort && `[effort: ${cmd.effort}]`,
+          cmd.ultracode !== undefined && `[ultracode: ${cmd.ultracode ? "on" : "off"}]`,
+          ...(cmd.files ?? []).map((f) => `[file: ${f.name.slice(0, 100)}, ${Math.ceil(base64Bytes(f.data) / 1024)}KB]`),
+        ]
+          .filter(Boolean)
+          .join(" ");
+      case "session.launch":
+        return cmd.cwd;
+      case "session.rename":
+        return cmd.name.trim();
+      case "session.fork":
+        return cmd.name?.trim() ?? "";
+      case "session.remove": {
+        // Once removed, the session is gone from the list: the record keeps its name.
+        const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
+        return s?.name ?? s?.title ?? "";
+      }
+      case "session.interrupt":
+        return "";
+    }
+  }
+
+  /** A command that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
-    if (cmd.type !== "session.input") return undefined;
     const m = this.machines.get(machine);
+    if (cmd.type === "session.rename" || cmd.type === "session.fork" || cmd.type === "session.remove") {
+      if (!m || versionAtLeast(m.daemonVersion, ...SESSION_ACTIONS_SINCE)) return undefined;
+      return "この working server の gasho-daemon は古いため、セッションの名前の変更、フォーク、削除を扱えません。gasho-daemon を更新してください。";
+    }
+    if (cmd.type !== "session.input") return undefined;
     const features = m?.features ?? legacyFeatures(m?.daemonVersion);
     const missing = [
       cmd.model !== undefined && !features.includes("model") && "モデル",

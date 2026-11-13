@@ -1,6 +1,6 @@
 import { ArrowLeft, CircleDot, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import type { EffortLevel, InputFeature, MachineInfo, SessionInfo, SessionModel } from "@gasho/protocol";
+import type { CommandResult, InputFeature, MachineInfo, SessionInfo, SessionModel } from "@gasho/protocol";
 import { RepoPicker } from "@/components/repo-picker";
 import { EffortPicker, UltracodeToggle } from "@/components/session-controls";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
@@ -17,6 +17,8 @@ import {
   sessionLabel,
   waitingLabel,
 } from "@/lib/format";
+import { promptDraft, usePicks } from "@/lib/drafts";
+import { addPending, noneWaiting, pendingShown, removePending, settlePending, usePending } from "@/lib/pending";
 import { go, type SessionPanel } from "@/lib/route";
 import { closeSessionHeaderOnPhone, useSessionHeaderShown } from "@/lib/session-header";
 import { daemonAtLeast } from "@/lib/sessions";
@@ -32,6 +34,8 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
   const m = machines.find((x) => x.id === machine);
   const s = m?.sessions.find((x) => x.sessionId === sessionId);
   const t = transcripts[transcriptKey(machine, sessionId)];
+  // Messages sent from here that the conversation does not show yet.
+  const sent = usePending(transcriptKey(machine, sessionId));
   // Gasho shows only the sessions it started.
   const shown = s?.managed === true;
 
@@ -66,6 +70,7 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
   const branch = only ? only.branch : branchLabel(s);
   const repoText = github ? `${github.owner}/${github.name}` : only ? only.path : repoLabel(s);
   const status = m.connected ? <StatusBadge status={s.status} /> : <span className="text-xs text-muted-foreground">オフライン</span>;
+  const pending = sent.filter((p) => pendingShown(p, t?.entries ?? [], t?.start ?? 0, s.pendingInputs ?? 0, now));
 
   return (
     <div className="flex h-full flex-col">
@@ -194,8 +199,9 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
         <Transcript
           key={`${machine}/${sessionId}`}
           state={t}
+          pending={pending}
           onLoadOlder={() => loadTranscript(machine, sessionId, true)}
-          footer={<Composer machine={m} session={s} />}
+          footer={<Composer machine={m} session={s} entries={t?.total ?? 0} />}
         />
       </div>
     </div>
@@ -300,26 +306,36 @@ function toBase64(file: File): Promise<string> {
   });
 }
 
-/** The chat box. It floats over the bottom of the conversation (see the footer of Transcript). */
-function Composer({ machine, session: s }: { machine: MachineInfo; session: SessionInfo }) {
+/**
+ * The chat box. It floats over the bottom of the conversation (see the footer of Transcript). What is typed and picked
+ * in it is kept per session (see lib/drafts), and a message sent shows in the conversation at once (see lib/pending).
+ * `entries`: how many entries the conversation has.
+ */
+function Composer({ machine, session: s, entries }: { machine: MachineInfo; session: SessionInfo; entries: number }) {
+  const key = transcriptKey(machine.id, s.sessionId);
   const [error, setError] = useState<string>();
   const [warning, setWarning] = useState<string>();
-  const [picked, setPicked] = useState<SessionModel>();
-  const [pickedEffort, setPickedEffort] = useState<EffortLevel>();
-  const [pickedUltracode, setPickedUltracode] = useState<boolean>();
+  const [picks, setPicks] = usePicks(key);
+  const { model: picked, effort: pickedEffort, ultracode: pickedUltracode } = picks;
   const current = currentModel(machine, s.model);
   const ultracode = Boolean(s.ultracode);
   const features = machine.features ?? legacyFeatures(machine.daemonVersion);
   // Once the session runs with what was picked, follow the session again.
   useEffect(() => {
-    if (picked && picked === current) setPicked(undefined);
-  }, [picked, current]);
+    if (picked && picked === current) setPicks((p) => (p.model === current ? { ...p, model: undefined } : p));
+  }, [picked, current, setPicks]);
   useEffect(() => {
-    if (pickedEffort && pickedEffort === s.effort) setPickedEffort(undefined);
-  }, [pickedEffort, s.effort]);
+    if (pickedEffort && pickedEffort === s.effort) setPicks((p) => (p.effort === s.effort ? { ...p, effort: undefined } : p));
+  }, [pickedEffort, s.effort, setPicks]);
   useEffect(() => {
-    if (pickedUltracode !== undefined && pickedUltracode === ultracode) setPickedUltracode(undefined);
-  }, [pickedUltracode, ultracode]);
+    if (pickedUltracode !== undefined && pickedUltracode === ultracode) {
+      setPicks((p) => (p.ultracode === ultracode ? { ...p, ultracode: undefined } : p));
+    }
+  }, [pickedUltracode, ultracode, setPicks]);
+  // Messages that waited on the working server have been typed into the session once it has none waiting.
+  useEffect(() => {
+    if (!s.pendingInputs) noneWaiting(key);
+  }, [key, s.pendingInputs]);
   const url = claudeUrl(s);
 
   if (!s.managed) {
@@ -375,29 +391,42 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
           const switchTo = picked && picked !== current ? picked : undefined;
           const effort = pickedEffort && pickedEffort !== s.effort ? pickedEffort : undefined;
           const ultra = pickedUltracode !== undefined && pickedUltracode !== ultracode ? pickedUltracode : undefined;
-          const encoded = await Promise.all(files.map(async (f) => ({ name: f.name, data: await toBase64(f) })));
-          const r = await sendCommand(
-            machine.id,
-            {
-              type: "session.input",
-              sessionId: s.sessionId,
-              text,
-              ...(switchTo ? { model: switchTo } : {}),
-              ...(effort ? { effort } : {}),
-              ...(ultra !== undefined ? { ultracode: ultra } : {}),
-              ...(encoded.length > 0 ? { files: encoded } : {}),
-            },
-            // A little longer than the Gasho server waits for the working server.
-            160_000,
-          );
-          if (!r.ok) fail(r.error ?? "送れませんでした。");
+          // Shown at the end of the conversation at once: Claude Code records the message only once it is typed into
+          // the session, after switching the model (/model) and the like.
+          const pending = addPending(key, { text, files: files.map((f) => f.name), after: entries });
+          let r: CommandResult;
+          try {
+            const encoded = await Promise.all(files.map(async (f) => ({ name: f.name, data: await toBase64(f) })));
+            r = await sendCommand(
+              machine.id,
+              {
+                type: "session.input",
+                sessionId: s.sessionId,
+                text,
+                ...(switchTo ? { model: switchTo } : {}),
+                ...(effort ? { effort } : {}),
+                ...(ultra !== undefined ? { ultracode: ultra } : {}),
+                ...(encoded.length > 0 ? { files: encoded } : {}),
+              },
+              // A little longer than the Gasho server waits for the working server.
+              160_000,
+            );
+          } catch (e) {
+            removePending(key, pending);
+            throw e;
+          }
+          if (!r.ok) {
+            removePending(key, pending);
+            fail(r.error ?? "送れませんでした。");
+          }
+          settlePending(key, pending, r.queued ? "queued" : "sent");
           if (r.warning) setWarning(r.warning);
           // What could not be switched stays as the session has it: drop the pick, so the control shows that again.
           // A pick changed while this was being sent is for the next message, and stays.
           for (const field of r.unapplied ?? []) {
-            if (field === "model") setPicked((p) => (p === switchTo ? undefined : p));
-            else if (field === "effort") setPickedEffort((p) => (p === effort ? undefined : p));
-            else setPickedUltracode((p) => (p === ultra ? undefined : p));
+            if (field === "model") setPicks((p) => (p.model === switchTo ? { ...p, model: undefined } : p));
+            else if (field === "effort") setPicks((p) => (p.effort === effort ? { ...p, effort: undefined } : p));
+            else setPicks((p) => (p.ultracode === ultra ? { ...p, ultracode: undefined } : p));
           }
         }}
         // While Claude is working, the send button turns into a stop button (Esc also stops).
@@ -406,17 +435,28 @@ function Composer({ machine, session: s }: { machine: MachineInfo; session: Sess
         disabled={offline}
         models={features.includes("model") ? modelOptions(machine, current, s.model, picked) : []}
         model={picked ?? current ?? "default"}
-        onModelChange={(id) => setPicked(id === KEEP_MODEL ? undefined : (id as SessionModel))}
+        onModelChange={(id) => setPicks((p) => ({ ...p, model: id === KEEP_MODEL ? undefined : (id as SessionModel) }))}
         actions={
           <>
             {features.includes("effort") && (
-              <EffortPicker value={pickedEffort ?? s.effort} current={s.effort} onChange={setPickedEffort} disabled={offline} />
+              <EffortPicker
+                value={pickedEffort ?? s.effort}
+                current={s.effort}
+                onChange={(level) => setPicks((p) => ({ ...p, effort: level }))}
+                disabled={offline}
+              />
             )}
             {features.includes("ultracode") && (
-              <UltracodeToggle value={pickedUltracode ?? ultracode} current={ultracode} onChange={setPickedUltracode} disabled={offline} />
+              <UltracodeToggle
+                value={pickedUltracode ?? ultracode}
+                current={ultracode}
+                onChange={(on) => setPicks((p) => ({ ...p, ultracode: on }))}
+                disabled={offline}
+              />
             )}
           </>
         }
+        draft={promptDraft(key)}
         allowAttachments={features.includes("files")}
         maxFiles={5}
         maxFileSizeMB={10}
