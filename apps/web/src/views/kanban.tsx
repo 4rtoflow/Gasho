@@ -219,7 +219,7 @@ export function KanbanView() {
           <LayoutGroup>
             {/* layoutScroll: cards that move between columns start from where they show, however far the board scrolled. */}
             <motion.div layoutScroll className="-mx-4 min-h-0 flex-1 overflow-x-auto pb-2 pl-4 md:-mx-6 md:pl-6">
-              <div className="flex h-full w-max items-start gap-3 pr-4 md:pr-6">
+              <div className="flex h-full w-max gap-3 pr-4 md:pr-6">
                 {KANBAN_COLUMNS.map((col) => (
                   <Column key={col.id} id={col.id} label={col.label} rows={byColumn(col.id)} loading={loading} now={now} where={where} prefs={prefs} wide />
                 ))}
@@ -291,31 +291,20 @@ function Column({
   const compact = columnCompact(prefs, id);
   const sort = prefs.sort[id];
   const shown = arrangeCards(rows, sort);
-  return (
+  const column = (
     <section
       aria-label={`${label}：${rows.length} 枚`}
-      className={cn(TILE, "relative flex min-w-0 flex-col", wide ? "max-h-full shrink-0" : "pt-2")}
-      style={{ boxShadow: TILE_SHADOW, ...(wide ? { width } : {}) }}
+      className={cn(TILE, "relative flex min-w-0 flex-col", wide ? "max-h-full min-h-0" : "pt-2")}
+      style={{ boxShadow: TILE_SHADOW }}
     >
       {wide && (
-        <>
-          <Grip
-            label={label}
-            width={width}
-            onDrag={setDragged}
-            onDone={(w) => {
-              setDragged(undefined);
-              setColumnWidth(id, w);
-            }}
-          />
-          <h2 className="flex shrink-0 items-center gap-2 px-3.5 pt-3 pb-2 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
-            <ColumnDot id={id} />
-            <span className="truncate">{label}</span>
-            <Badge tone={rows.length > 0 ? COLUMN_LOOK[id].tone : "neutral"} className="ml-auto h-5 px-2">
-              {rows.length}
-            </Badge>
-          </h2>
-        </>
+        <h2 className="flex shrink-0 items-center gap-2 px-3.5 pt-3 pb-2 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
+          <ColumnDot id={id} />
+          <span className="truncate">{label}</span>
+          <Badge tone={rows.length > 0 ? COLUMN_LOOK[id].tone : "neutral"} className="ml-auto h-5 px-2">
+            {rows.length}
+          </Badge>
+        </h2>
       )}
       <div className="flex shrink-0 items-center gap-1.5 px-2.5 pb-2">
         <SortMenu label={label} sort={sort} onChange={(next) => setColumnSort(id, next)} />
@@ -356,6 +345,23 @@ function Column({
         )}
       </motion.div>
     </section>
+  );
+  if (!wide) return column;
+  // On the board, the grip sits beside the column in a box as tall as the board, so it is as long in every column
+  // however many cards each holds.
+  return (
+    <div className="relative flex shrink-0 flex-col" style={{ width }}>
+      {column}
+      <Grip
+        label={label}
+        width={width}
+        onDrag={setDragged}
+        onDone={(w) => {
+          setDragged(undefined);
+          setColumnWidth(id, w);
+        }}
+      />
+    </div>
   );
 }
 
