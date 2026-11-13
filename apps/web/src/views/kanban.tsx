@@ -1,30 +1,26 @@
-// The kanban: the worktrees and my pull requests of the watched repositories, in the column of whoever has to move
-// next (after 4rtoflow/Dashboard). Each working server's gasho-daemon reads its repositories and decides the columns;
-// the repositories are chosen here, per working server, from the repositories in the folders Claude Code trusts there.
-// The look follows easyui.site: dark tiles with hairline borders, color only where it tells a state (the column's dot,
-// the reason's icon, the next step), and cards that glide to their new column with a spring. On a phone one column shows at a time, picked with a sliding pill.
+// The kanban: the worktrees and my pull requests of the watched repositories (after 4rtoflow/Dashboard), read by
+// each working server's gasho-daemon from the repositories chosen here. Nothing decides the columns yet, so every card
+// is in the first one; the columns, their widths, views and orders are ready for that. Pressing a card opens its menu:
+// instructions sent in one press to Claude in its worktree, its Gasho sessions, and its pull request. The look follows easyui.site: dark tiles with hairline borders,
+// color only where it tells a state, and springs. On a phone one column shows at a time, picked with a sliding pill.
 import {
-  ArrowRight,
   ArrowUpDown,
   Check,
   ChevronDown,
-  CircleCheck,
-  CircleX,
   ExternalLink,
-  Eye,
   FolderGit2,
-  GitCompareArrows,
+  GitBranch,
   GitMerge,
+  GitPullRequest,
   GitPullRequestClosed,
-  GitPullRequestCreateArrow,
   GitPullRequestDraft,
   Hand,
   LoaderCircle,
-  MessageSquareWarning,
   Moon,
+  Plus,
   RefreshCw,
-  RotateCw,
   Search,
+  Send,
   Server,
   Settings2,
   SquareKanban,
@@ -33,10 +29,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { AnimatePresence, LayoutGroup, motion, MotionConfig } from "framer-motion";
-import { Dialog, Popover } from "radix-ui";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { KanbanCard, KanbanColumn, KanbanReason, MachineInfo } from "@gasho/protocol";
-import { DIALOG_OVERLAY, DIALOG_PANEL } from "@/components/dialog-styles";
+import { Dialog, DropdownMenu, Popover } from "radix-ui";
+import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import type { KanbanAction, KanbanCard, KanbanColumn, MachineInfo, SessionInfo } from "@gasho/protocol";
+import { DIALOG_OVERLAY, DIALOG_PANEL, MENU, MENU_ITEM } from "@/components/dialog-styles";
 import { StatusDot } from "@/components/status-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
@@ -47,14 +43,11 @@ import { TILE, TILE_SHADOW } from "@/components/ui/stat-card";
 import { relativeTime, sessionLabel } from "@/lib/format";
 import {
   arrangeCards,
-  badges,
   COLUMN_WIDTH,
   KANBAN_COLUMNS,
   KANBAN_SORTS,
   kanbanCards,
   kanbanReady,
-  nextStep,
-  reasonText,
   type KanbanSort,
   type KanbanSortKey,
   type PlacedCard,
@@ -72,7 +65,7 @@ import {
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { motionTransitions } from "@/lib/motion-tokens";
 import { go } from "@/lib/route";
-import { refreshKanban, useAppState, watchKanbanRepos } from "@/lib/store";
+import { refreshKanban, sendCommand, useAppState, watchKanbanRepos } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 
@@ -92,22 +85,6 @@ const COLUMN_LOOK: Record<KanbanColumn, { dot: string; tone: BadgeTone; pulse?: 
   done: { dot: "bg-neutral-500", tone: "neutral" },
 };
 
-const REASON_ICON: Record<KanbanReason["kind"], { Icon: LucideIcon; className: string }> = {
-  agent_waiting: { Icon: Hand, className: "text-amber-400" },
-  agent_working: { Icon: Zap, className: "text-emerald-400" },
-  merged: { Icon: GitMerge, className: "text-violet-400" },
-  closed: { Icon: GitPullRequestClosed, className: "text-neutral-500" },
-  no_pr: { Icon: GitPullRequestCreateArrow, className: "text-neutral-400" },
-  conflict: { Icon: GitCompareArrows, className: "text-red-400" },
-  ci_failed: { Icon: CircleX, className: "text-red-400" },
-  changes_requested: { Icon: MessageSquareWarning, className: "text-red-400" },
-  ci_running: { Icon: LoaderCircle, className: "text-sky-400 motion-safe:animate-spin" },
-  draft: { Icon: GitPullRequestDraft, className: "text-neutral-400" },
-  rereview: { Icon: RotateCw, className: "text-neutral-400" },
-  approved: { Icon: CircleCheck, className: "text-emerald-400" },
-  review_waiting: { Icon: Eye, className: "text-neutral-400" },
-};
-
 const time = (ms: number): string => new Date(ms).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 
 interface Where {
@@ -122,6 +99,8 @@ export function KanbanView() {
   const [choosing, setChoosing] = useState(false);
   const [asked, setAsked] = useState(false);
   const [tab, setTab] = useState<KanbanColumn>("mine");
+  // What a card's menu is doing or did: starting a session, sending an instruction.
+  const [notice, setNotice] = useState<Notice>();
 
   const prefs = useKanbanPrefs();
   const cards = useMemo(() => kanbanCards(machines), [machines]);
@@ -221,7 +200,18 @@ export function KanbanView() {
             <motion.div layoutScroll className="-mx-4 min-h-0 flex-1 overflow-x-auto pb-2 pl-4 md:-mx-6 md:pl-6">
               <div className="flex h-full w-max gap-3 pr-4 md:pr-6">
                 {KANBAN_COLUMNS.map((col) => (
-                  <Column key={col.id} id={col.id} label={col.label} rows={byColumn(col.id)} loading={loading} now={now} where={where} prefs={prefs} wide />
+                  <Column
+                    key={col.id}
+                    id={col.id}
+                    label={col.label}
+                    rows={byColumn(col.id)}
+                    loading={loading}
+                    now={now}
+                    where={where}
+                    prefs={prefs}
+                    onNotice={setNotice}
+                    wide
+                  />
                 ))}
               </div>
             </motion.div>
@@ -239,6 +229,7 @@ export function KanbanView() {
                   now={now}
                   where={where}
                   prefs={prefs}
+                  onNotice={setNotice}
                 />
               </motion.div>
             </AnimatePresence>
@@ -246,6 +237,7 @@ export function KanbanView() {
         )}
 
         <ReposDialog open={choosing} onClose={() => setChoosing(false)} machines={ready} />
+        <Toast notice={notice} onClose={() => setNotice(undefined)} />
       </div>
     </MotionConfig>
   );
@@ -274,6 +266,7 @@ function Column({
   now,
   where,
   prefs,
+  onNotice,
   wide = false,
 }: {
   id: KanbanColumn;
@@ -283,6 +276,7 @@ function Column({
   now: number;
   where: Where;
   prefs: KanbanPrefs;
+  onNotice: (n: Notice) => void;
   wide?: boolean;
 }) {
   // The width while its grip is dragged; stored only when the drag ends.
@@ -338,7 +332,7 @@ function Column({
                 exit={{ opacity: 0, scale: 0.98 }}
                 transition={motionTransitions.springSmooth}
               >
-                {compact ? <CompactCard row={row} now={now} where={where} /> : <Card row={row} now={now} where={where} />}
+                {compact ? <CompactCard row={row} now={now} where={where} onNotice={onNotice} /> : <Card row={row} now={now} where={where} onNotice={onNotice} />}
               </motion.div>
             ))}
           </AnimatePresence>
@@ -539,109 +533,125 @@ function ModeSwitch({ id, label, compact, onChange }: { id: KanbanColumn; label:
   );
 }
 
-/** One line: the reason's icon, the name and the age; the rest shows when the pointer rests on it. */
-function CompactCard({ row: { machine, card }, now, where }: { row: PlacedCard; now: number; where: Where }) {
-  const reason = REASON_ICON[card.reason.kind];
-  const updated = card.updatedAt ? Date.parse(card.updatedAt) : undefined;
-  const next = nextStep(card);
-  const tip = [where.machines && machine.name, where.repos && card.repo, card.title, reasonText(card.reason), next && `次：${next}`]
-    .filter(Boolean)
-    .join("\n");
-  const body = (
-    <>
-      <reason.Icon className={cn("size-3.5 shrink-0", reason.className)} />
-      <span className="min-w-0 flex-1 truncate">{card.label}</span>
-      {updated !== undefined && <span className="shrink-0 text-[11px] text-neutral-500 tabular-nums">{relativeTime(updated, now)}</span>}
-    </>
-  );
-  const look = cn(
-    "flex min-w-0 items-center gap-2 rounded-lg border border-black/[0.06] bg-black/[0.015] px-2.5 py-1.5 text-xs text-neutral-800 transition-colors dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-neutral-200",
-    card.column === "done" && "opacity-70",
-  );
-  return card.pr ? (
-    <a href={card.pr.url} target="_blank" rel="noopener noreferrer" title={tip} className={cn(look, "hover:border-black/[0.12] hover:opacity-100 dark:hover:border-white/[0.12] dark:hover:bg-white/[0.035]")}>
-      {body}
-    </a>
-  ) : (
-    <div title={tip} className={look}>
-      {body}
-    </div>
+/** The pull request's state, as an icon in GitHub's colors: none yet, open, draft, merged or closed. */
+function prLook(card: KanbanCard): { Icon: LucideIcon; className: string; label: string } {
+  if (!card.pr) return { Icon: GitBranch, className: "text-neutral-500", label: "PR なし" };
+  if (card.pr.state === "merged") return { Icon: GitMerge, className: "text-violet-400", label: "マージ済み" };
+  if (card.pr.state === "closed") return { Icon: GitPullRequestClosed, className: "text-red-400", label: "クローズ済み" };
+  if (card.pr.draft) return { Icon: GitPullRequestDraft, className: "text-neutral-400", label: "Draft" };
+  return { Icon: GitPullRequest, className: "text-emerald-400", label: "開いている PR" };
+}
+
+/** The pull request's state as an icon, named when the pointer rests on it. */
+function PrIcon({ card, className }: { card: KanbanCard; className?: string }) {
+  const look = prLook(card);
+  return (
+    <span title={look.label} className={cn("inline-flex shrink-0", className)}>
+      <look.Icon className={cn("size-3.5", look.className)} aria-label={look.label} />
+    </span>
   );
 }
 
-function Card({ row: { machine, card }, now, where }: { row: PlacedCard; now: number; where: Where }) {
-  const next = nextStep(card);
-  const reason = REASON_ICON[card.reason.kind];
+/** What a Claude Code session started outside Gasho is doing; Gasho's own show with their names instead. */
+const AGENT: Record<"busy" | "waiting" | "idle", { Icon: LucideIcon; text: string }> = {
+  busy: { Icon: Zap, text: "Claude Code 作業中" },
+  waiting: { Icon: Hand, text: "Claude Code 答え待ち" },
+  idle: { Icon: Moon, text: "Claude Code 指示待ち" },
+};
+
+/** One line: the pull request's state, the name and the age. Pressing it opens the card's menu. */
+function CompactCard({ row, now, where, onNotice }: { row: PlacedCard; now: number; where: Where; onNotice: (n: Notice) => void }) {
+  const { machine, card } = row;
   const updated = card.updatedAt ? Date.parse(card.updatedAt) : undefined;
-  // The reason already says when Claude Code works or waits; an idle one is noted, like the Dashboard's "指示待ち".
-  const idle = card.sessions.some((s) => !s.managed && s.status === "idle");
+  const tip = [where.machines && machine.name, where.repos && card.repo, card.title].filter(Boolean).join("\n");
+  return (
+    <CardMenu row={row} onNotice={onNotice}>
+      <button
+        type="button"
+        title={tip}
+        className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-black/[0.06] bg-black/[0.015] px-2.5 py-1.5 text-left text-xs text-neutral-800 transition-colors outline-none hover:border-black/[0.12] focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=open]:border-border-hover dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-neutral-200 dark:hover:border-white/[0.12] dark:hover:bg-white/[0.035]"
+      >
+        <PrIcon card={card} />
+        <span className="min-w-0 flex-1 truncate">{card.label}</span>
+        {card.sessions.some((s) => s.status === "busy" || s.status === "waiting") && (
+          <StatusDot status={card.sessions.some((s) => s.status === "waiting") ? "waiting" : "busy"} />
+        )}
+        {updated !== undefined && <span className="shrink-0 text-[11px] text-neutral-500 tabular-nums">{relativeTime(updated, now)}</span>}
+      </button>
+    </CardMenu>
+  );
+}
+
+/**
+ * The full card. Pressing it anywhere but its links and buttons opens the card's menu: a button covers the card under
+ * its content, and only the links and buttons of the content take the pointer.
+ */
+function Card({ row, now, where, onNotice }: { row: PlacedCard; now: number; where: Where; onNotice: (n: Notice) => void }) {
+  const { machine, card } = row;
+  const updated = card.updatedAt ? Date.parse(card.updatedAt) : undefined;
   const managed = card.sessions.flatMap((s) => {
     const info = s.managed ? machine.sessions.find((x) => x.sessionId === s.sessionId) : undefined;
     return info ? [{ s, info }] : [];
   });
   return (
-    <article
-      className={cn(
-        "flex min-w-0 flex-col gap-2 rounded-xl border border-black/[0.06] bg-black/[0.015] p-3 transition-colors hover:border-black/[0.12] dark:border-white/[0.06] dark:bg-white/[0.02] dark:hover:border-white/[0.12] dark:hover:bg-white/[0.035]",
-        card.column === "done" && "opacity-70 hover:opacity-100",
-      )}
-    >
-      <div className="flex items-baseline gap-2">
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-neutral-900 dark:text-neutral-100" title={card.path ?? card.branch}>
-          {card.label}
-        </span>
-        {updated !== undefined && (
-          <span className="shrink-0 text-[11px] text-neutral-500 tabular-nums" title="PR の最終更新">
-            {relativeTime(updated, now)}
+    <article className="relative flex min-w-0 flex-col rounded-xl border border-black/[0.06] bg-black/[0.015] transition-colors hover:border-black/[0.12] dark:border-white/[0.06] dark:bg-white/[0.02] dark:hover:border-white/[0.12] dark:hover:bg-white/[0.035]">
+      <CardMenu row={row} onNotice={onNotice}>
+        <button
+          type="button"
+          aria-label={`${card.label} のメニュー`}
+          className="absolute inset-0 cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=open]:ring-1 data-[state=open]:ring-border-hover"
+        />
+      </CardMenu>
+      <div className="pointer-events-none relative flex flex-col gap-2 p-3">
+        <div className="flex items-baseline gap-2">
+          <PrIcon card={card} className="self-center" />
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-neutral-900 dark:text-neutral-100" title={card.path ?? card.branch}>
+            {card.label}
           </span>
-        )}
-      </div>
-      {card.pr ? (
-        <a
-          href={card.pr.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="-mt-1 line-clamp-2 text-xs break-words text-neutral-600 transition-colors hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200"
-        >
-          {card.title}
-        </a>
-      ) : (
-        <p className="-mt-1 truncate font-mono text-[11px] text-neutral-500">{card.title}</p>
-      )}
-      <p className="flex items-start gap-1.5 text-xs text-neutral-700 dark:text-neutral-300">
-        <reason.Icon className={cn("mt-px size-3.5 shrink-0", reason.className)} />
-        <span className="min-w-0 break-words">{reasonText(card.reason)}</span>
-      </p>
-      {next && (
-        <p className="flex items-start gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-400">
-          <ArrowRight className="mt-px size-3.5 shrink-0" />
-          {next}
-        </p>
-      )}
-      <Chips machine={machine} card={card} where={where} idle={idle}>
-        {managed.map(({ s, info }) => (
-          <button
-            key={s.sessionId}
-            type="button"
-            onClick={() => go({ name: "session", machine: machine.id, sessionId: s.sessionId })}
-            className={cn(CHIP, "max-w-full cursor-pointer text-neutral-700 hover:bg-black/[0.08] dark:text-neutral-300 dark:hover:bg-white/[0.1]")}
-            title="このセッションを開く"
+          {updated !== undefined && (
+            <span className="shrink-0 text-[11px] text-neutral-500 tabular-nums" title="PR の最終更新">
+              {relativeTime(updated, now)}
+            </span>
+          )}
+        </div>
+        {card.pr ? (
+          <a
+            href={card.pr.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="pointer-events-auto -mt-1 line-clamp-2 text-xs break-words text-neutral-600 transition-colors hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200"
           >
-            <StatusDot status={s.status} />
-            <span className="truncate">{sessionLabel(info)}</span>
-          </button>
-        ))}
-      </Chips>
+            {card.title}
+          </a>
+        ) : (
+          <p className="-mt-1 truncate font-mono text-[11px] text-neutral-500">{card.title}</p>
+        )}
+        <Chips machine={machine} card={card} where={where}>
+          {managed.map(({ s, info }) => (
+            <button
+              key={s.sessionId}
+              type="button"
+              onClick={() => go({ name: "session", machine: machine.id, sessionId: s.sessionId })}
+              className={cn(CHIP, "pointer-events-auto max-w-full cursor-pointer text-neutral-700 hover:bg-black/[0.08] dark:text-neutral-300 dark:hover:bg-white/[0.1]")}
+              title="このセッションを開く"
+            >
+              <StatusDot status={s.status} />
+              <span className="truncate">{sessionLabel(info)}</span>
+            </button>
+          ))}
+        </Chips>
+      </div>
     </article>
   );
 }
 
 const CHIP = "inline-flex h-5 items-center gap-1 rounded-full bg-black/[0.05] px-2 text-[11px] whitespace-nowrap text-neutral-600 dark:bg-white/[0.06] dark:text-neutral-400";
 
-function Chips({ machine, card, where, idle, children }: { machine: MachineInfo; card: KanbanCard; where: Where; idle: boolean; children: ReactNode }) {
+function Chips({ machine, card, where, children }: { machine: MachineInfo; card: KanbanCard; where: Where; children: ReactNode }) {
   const pr = card.pr && card.label !== `PR #${card.pr.number}` ? card.pr : undefined;
-  const marks = badges(card);
-  const any = where.machines || where.repos || pr || card.issue !== undefined || marks.length > 0 || idle || card.sessions.some((s) => s.managed);
+  // Sessions Gasho did not start, once per state.
+  const others = [...new Set(card.sessions.filter((s) => !s.managed && s.status !== "unknown").map((s) => s.status as keyof typeof AGENT))];
+  const any = where.machines || where.repos || pr || card.issue !== undefined || !card.path || others.length > 0 || card.sessions.some((s) => s.managed);
   if (!any) return null;
   return (
     <div className="flex flex-wrap items-center gap-1">
@@ -658,23 +668,22 @@ function Chips({ machine, card, where, idle, children }: { machine: MachineInfo;
         </span>
       )}
       {pr && (
-        <a href={pr.url} target="_blank" rel="noopener noreferrer" className={cn(CHIP, "hover:text-neutral-900 dark:hover:text-neutral-200")}>
+        <a href={pr.url} target="_blank" rel="noopener noreferrer" className={cn(CHIP, "pointer-events-auto hover:text-neutral-900 dark:hover:text-neutral-200")}>
           PR #{pr.number}
           <ExternalLink className="size-3" />
         </a>
       )}
       {card.issue !== undefined && <span className={CHIP}>Issue #{card.issue}</span>}
-      {marks.map((b) => (
-        <span key={b} className={cn(CHIP, "bg-transparent ring-1 ring-black/[0.1] ring-inset dark:bg-transparent dark:ring-white/[0.1]")}>
-          {b}
-        </span>
-      ))}
-      {idle && (
-        <span className={CHIP}>
-          <Moon className="size-3" />
-          Claude Code 指示待ち
-        </span>
-      )}
+      {!card.path && <span className={cn(CHIP, "bg-transparent ring-1 ring-black/[0.1] ring-inset dark:bg-transparent dark:ring-white/[0.1]")}>worktree なし</span>}
+      {others.map((status) => {
+        const a = AGENT[status];
+        return (
+          <span key={status} className={CHIP}>
+            <a.Icon className={cn("size-3", status === "waiting" && "text-amber-400", status === "busy" && "text-emerald-400")} />
+            {a.text}
+          </span>
+        );
+      })}
       {children}
     </div>
   );
@@ -895,5 +904,175 @@ function ReposDialog({ open, onClose, machines }: { open: boolean; onClose: () =
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+/** How a session started from Gasho was last used: its latest activity, or for one with no conversation, its start. */
+const lastUsed = (s: SessionInfo): number => s.lastActivityAt ?? s.startedAt ?? 0;
+
+/** The sessions Gasho started in a card's worktree, the one used last first. Only these take input from Gasho. */
+function gashoSessions({ machine, card }: PlacedCard): SessionInfo[] {
+  const ids = new Set(card.sessions.filter((s) => s.managed).map((s) => s.sessionId));
+  return machine.sessions.filter((s) => ids.has(s.sessionId)).sort((a, b) => lastUsed(b) - lastUsed(a));
+}
+
+/** What a card's menu is doing or did, shown at the bottom of the page. */
+interface Notice {
+  text: string;
+  tone?: "danger";
+  /** Still going: the notice stays until it is done. */
+  busy?: boolean;
+  /** The session it went to, to open from the notice. */
+  session?: { machine: string; sessionId: string };
+}
+
+/** Starts a session in a card's worktree; its id, or undefined (with the reason noticed) when it could not start. */
+async function startSession({ machine, card }: PlacedCard, notify: (n: Notice) => void): Promise<string | undefined> {
+  if (!card.path) return undefined;
+  notify({ text: `${card.label} でセッションを起動しています…`, busy: true });
+  const r = await sendCommand(machine.id, { type: "session.launch", cwd: card.path }, 60_000);
+  if (r.ok && r.sessionId) return r.sessionId;
+  notify({ text: r.error ?? "セッションを起動できませんでした。", tone: "danger" });
+  return undefined;
+}
+
+/** Sends one of a card's instructions to the Gasho session used last in its worktree, or to one started there for it. */
+async function instruct(row: PlacedCard, action: KanbanAction, notify: (n: Notice) => void): Promise<void> {
+  const sessionId = gashoSessions(row)[0]?.sessionId ?? (await startSession(row, notify));
+  if (!sessionId) return;
+  notify({ text: `「${action.label}」を送っています…`, busy: true });
+  // A little longer than the Gasho server waits for the working server.
+  const r = await sendCommand(row.machine.id, { type: "session.input", sessionId, text: action.prompt }, 160_000);
+  const session = { machine: row.machine.id, sessionId };
+  if (!r.ok) notify({ text: r.error ?? "指示を送れませんでした。", tone: "danger", session });
+  else notify({ text: r.queued ? `「${action.label}」を預けました。作業が終わってから送ります。` : `「${action.label}」を送りました。`, session });
+}
+
+/**
+ * The menu that opens from a card, from the edge nearest it (after EasyUI's OriginDropdown): the card's instructions,
+ * sent in one press to Claude in its worktree; its Gasho sessions to open, or one to start there and open; and its pull
+ * request on GitHub. Free instructions are written in the session itself.
+ */
+function CardMenu({ row, onNotice, children }: { row: PlacedCard; onNotice: (n: Notice) => void; children: ReactElement }) {
+  const { machine, card } = row;
+  const sessions = gashoSessions(row);
+  const actions = card.actions ?? [];
+  const canStart = Boolean(card.path && machine.canLaunch);
+  const reachable = sessions.length > 0 || canStart;
+  const hint = !card.path
+    ? "worktree が無いので、Claude に指示を送れません。"
+    : !reachable
+      ? "この working server には zellij が無いので、セッションを起動できません。"
+      : undefined;
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>{children}</DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          sideOffset={6}
+          collisionPadding={12}
+          className={cn(
+            MENU,
+            "origin-(--radix-dropdown-menu-content-transform-origin) data-[side=bottom]:slide-in-from-top-1.5 data-[side=left]:slide-in-from-right-1.5 data-[side=right]:slide-in-from-left-1.5 data-[side=top]:slide-in-from-bottom-1.5",
+          )}
+        >
+          <DropdownMenu.Label className="truncate px-2.5 pt-1 pb-1.5 text-xs text-muted-foreground">{card.label}</DropdownMenu.Label>
+          {actions.length > 0 && (
+            <>
+              {actions.map((a) => (
+                <DropdownMenu.Item key={a.label} disabled={!reachable} onSelect={() => void instruct(row, a, onNotice)} className={MENU_ITEM} title={a.prompt}>
+                  <Send />
+                  <span className="truncate">{a.label}</span>
+                </DropdownMenu.Item>
+              ))}
+              <DropdownMenu.Separator className="mx-1 my-1 h-px bg-border" />
+            </>
+          )}
+          {sessions.map((s) => (
+            <DropdownMenu.Item key={s.sessionId} onSelect={() => go({ name: "session", machine: machine.id, sessionId: s.sessionId })} className={MENU_ITEM}>
+              <span className="flex size-4 items-center justify-center">
+                <StatusDot status={s.status} />
+              </span>
+              <span className="truncate">{sessionLabel(s)} を開く</span>
+            </DropdownMenu.Item>
+          ))}
+          {sessions.length === 0 && (
+            <DropdownMenu.Item
+              disabled={!canStart}
+              onSelect={() =>
+                void startSession(row, onNotice).then((sessionId) => {
+                  if (!sessionId) return;
+                  onNotice({ text: `${card.label} でセッションを起動しました。`, session: { machine: machine.id, sessionId } });
+                  go({ name: "session", machine: machine.id, sessionId });
+                })
+              }
+              className={MENU_ITEM}
+            >
+              <Plus />
+              セッションを起動して開く
+            </DropdownMenu.Item>
+          )}
+          {card.pr && (
+            <DropdownMenu.Item asChild className={MENU_ITEM}>
+              <a href={card.pr.url} target="_blank" rel="noopener noreferrer">
+                <ExternalLink />
+                PR #{card.pr.number} を GitHub で開く
+              </a>
+            </DropdownMenu.Item>
+          )}
+          {hint && <p className="max-w-64 px-2.5 pt-1.5 pb-1 text-xs text-muted-foreground">{hint}</p>}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+/** A notice at the bottom of the page (after EasyUI's VelocityToast); it goes after a few seconds once nothing is going on. */
+function Toast({ notice, onClose }: { notice: Notice | undefined; onClose: () => void }) {
+  useEffect(() => {
+    if (!notice || notice.busy) return;
+    const t = setTimeout(onClose, 6000);
+    return () => clearTimeout(t);
+    // Restarts only for a new notice.
+  }, [notice]);
+  return (
+    <AnimatePresence>
+      {notice && (
+        <motion.div
+          key={notice.text}
+          role={notice.tone === "danger" ? "alert" : "status"}
+          initial={{ opacity: 0, y: 16, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 8, scale: 0.98 }}
+          transition={motionTransitions.springSnappy}
+          className={cn(
+            "fixed bottom-4 left-1/2 z-[95] flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-xl border bg-surface px-4 py-2.5 text-sm shadow-xl",
+            notice.tone === "danger" ? "border-red-500/40 text-red-300" : "border-border text-foreground",
+          )}
+        >
+          {notice.busy && <LoaderCircle className="size-4 shrink-0 text-muted-foreground motion-safe:animate-spin" />}
+          <span className="min-w-0">{notice.text}</span>
+          {notice.session && !notice.busy && (
+            <button
+              type="button"
+              onClick={() => {
+                const { machine, sessionId } = notice.session ?? {};
+                onClose();
+                if (machine && sessionId) go({ name: "session", machine, sessionId });
+              }}
+              className="shrink-0 cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              セッションを開く
+            </button>
+          )}
+          {!notice.busy && (
+            <button type="button" onClick={onClose} aria-label="閉じる" className="shrink-0 cursor-pointer text-muted-foreground hover:text-foreground">
+              <X className="size-3.5" />
+            </button>
+          )}
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

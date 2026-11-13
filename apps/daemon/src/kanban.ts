@@ -1,21 +1,11 @@
-// The kanban, after 4rtoflow/Dashboard: each worktree of the watched repositories, with its branch's pull request and
-// the Claude Code sessions in it, goes in the column of whoever has to move next. The rules are tried in order and the
-// first that matches wins: the sessions first (an answer is awaited even after a merge), then what only I can move (a
-// conflict, a failed CI, changes asked for), then what moves by itself (CI running), then what waits for people (a
-// draft, the review). It only reads: git and `gh` with the login of whoever runs gasho-daemon.
+// The kanban: the worktrees of the watched repositories, each with its branch's pull request and the Claude Code
+// sessions in it, and my open pull requests that have no worktree. It only reads: git, and `gh` with the login of
+// whoever runs gasho-daemon. Nothing decides the columns yet; every card goes in the first one.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type {
-  KanbanBoard,
-  KanbanCard,
-  KanbanColumn,
-  KanbanReason,
-  KanbanRepoOption,
-  KanbanSession,
-  SessionStatus,
-} from "@gasho/protocol";
+import type { KanbanBoard, KanbanCard, KanbanRepoOption, KanbanSession, SessionStatus } from "@gasho/protocol";
 import { githubRepoOf } from "./git.ts";
 import { ghError } from "./github.ts";
 import { log } from "./util.ts";
@@ -29,42 +19,19 @@ const REFRESH_MIN_MS = 10_000;
 /** Repositories read at the same time. */
 const PARALLEL = 4;
 const PR_LIMIT = 100;
-const PR_FIELDS = "number,title,url,headRefName,headRefOid,isDraft,mergeable,reviews,statusCheckRollup,updatedAt";
+const PR_FIELDS = "number,title,url,headRefName,isDraft,updatedAt";
 const CLOSED_FIELDS = "number,headRefName,state,title,url";
-const FAILED = new Set(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "ERROR"]);
 /** A number between separators (/ - _ #), so versions such as release/2.1 are not taken for an issue. */
 const ISSUE_NUMBER = /(?:^|[/_#-])(\d+)(?=$|[/_-])/;
 
 // ---- what `gh pr list --json` gives ----
-
-export interface GhCheck {
-  __typename?: string;
-  name?: string;
-  context?: string;
-  workflowName?: string;
-  status?: string;
-  conclusion?: string | null;
-  state?: string;
-  detailsUrl?: string;
-}
-
-export interface GhReview {
-  author?: { login?: string } | null;
-  state?: string;
-  submittedAt?: string;
-  commit?: { oid?: string } | null;
-}
 
 export interface GhPr {
   number: number;
   title: string;
   url: string;
   headRefName: string;
-  headRefOid?: string;
   isDraft?: boolean;
-  mergeable?: string;
-  reviews?: GhReview[];
-  statusCheckRollup?: GhCheck[];
   updatedAt?: string;
 }
 
@@ -80,7 +47,6 @@ export interface GhClosedPr {
 export interface RepoMaterial {
   /** OWNER/REPO */
   repo: string;
-  me: string;
   primary: { path: string; branch?: string };
   /** Worktrees other than the primary checkout, by branch. */
   worktrees: Map<string, string>;
@@ -95,120 +61,14 @@ export interface SessionLike {
   sessionId: string;
   cwd: string;
   status: SessionStatus;
-  waitingFor?: string;
   managed?: boolean;
 }
 
-// ---- the rules ----
+// ---- the cards ----
 
 export function issueOf(branch: string | undefined): number | undefined {
   const m = ISSUE_NUMBER.exec(branch ?? "");
   return m?.[1] ? Number(m[1]) : undefined;
-}
-
-const login = (r: GhReview): string => r.author?.login ?? "";
-
-function runId(url: string | undefined): number {
-  const m = /\/actions\/runs\/(\d+)/.exec(url ?? "");
-  return m?.[1] ? Number(m[1]) : 0;
-}
-
-/** The failed checks. Of the same check, only its latest run counts (a re-run that passed is not a failure). */
-export function failedChecks(pr: GhPr): string[] {
-  const latest = new Map<string, { run: number; result?: string | null }>();
-  for (const c of pr.statusCheckRollup ?? []) {
-    if (c.__typename === "StatusContext") {
-      latest.set(`status/${c.context ?? ""}`, { run: 0, result: c.state });
-      continue;
-    }
-    const key = `${c.workflowName ?? ""}/${c.name ?? ""}`;
-    const run = runId(c.detailsUrl);
-    const seen = latest.get(key);
-    if (!seen || run >= seen.run) latest.set(key, { run, result: c.conclusion });
-  }
-  return [...latest].filter(([, v]) => v.result && FAILED.has(v.result)).map(([k]) => k);
-}
-
-export function runningChecks(pr: GhPr): string[] {
-  const names: string[] = [];
-  for (const c of pr.statusCheckRollup ?? []) {
-    if (c.__typename === "StatusContext") {
-      if (c.state === "PENDING" || c.state === "EXPECTED") names.push(c.context ?? "");
-    } else if (c.status !== "COMPLETED") {
-      names.push(`${c.workflowName ?? ""}/${c.name ?? ""}`);
-    }
-  }
-  return names;
-}
-
-/** Each reviewer's (but mine) latest approval, request for changes or dismissal; reviews of comments only do not count. */
-export function reviewers(pr: GhPr, me: string): Map<string, GhReview> {
-  const last = new Map<string, GhReview>();
-  const sorted = [...(pr.reviews ?? [])].sort((a, b) => (a.submittedAt ?? "").localeCompare(b.submittedAt ?? ""));
-  for (const r of sorted) {
-    if (login(r) !== me && (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "DISMISSED")) last.set(login(r), r);
-  }
-  return last;
-}
-
-/** Who still asks for changes: on the current head, or before something was pushed after it. */
-export function changeRequests(pr: GhPr, me: string): { onHead: string[]; pushed: string[] } {
-  const onHead: string[] = [];
-  const pushed: string[] = [];
-  for (const [who, r] of [...reviewers(pr, me)].sort(([a], [b]) => a.localeCompare(b))) {
-    if (r.state !== "CHANGES_REQUESTED") continue;
-    const oid = r.commit?.oid;
-    (oid === undefined || oid === pr.headRefOid ? onHead : pushed).push(who);
-  }
-  return { onHead, pushed };
-}
-
-/**
- * GitHub says UNKNOWN while it computes `mergeable` again; meanwhile the last value is kept, so a conflict does not
- * come and go. `memory` (pull request number → value) is kept per repository between readings.
- */
-export function settle(prs: GhPr[], memory: Map<number, string>): GhPr[] {
-  const out = prs.map((pr) => {
-    let now = pr.mergeable || "UNKNOWN";
-    if (now === "UNKNOWN") now = memory.get(pr.number) ?? "UNKNOWN";
-    memory.set(pr.number, now);
-    return { ...pr, mergeable: now };
-  });
-  const open = new Set(prs.map((p) => p.number));
-  for (const n of [...memory.keys()]) if (!open.has(n)) memory.delete(n);
-  return out;
-}
-
-interface Turn {
-  column: KanbanColumn;
-  reason: KanbanReason;
-}
-
-/** What the sessions in a worktree decide: a session awaiting an answer before one that works. */
-export function agentTurn(sessions: readonly SessionLike[]): Turn | undefined {
-  const waiting = sessions.find((s) => s.status === "waiting");
-  if (waiting) return { column: "mine", reason: { kind: "agent_waiting", ...(waiting.waitingFor ? { waitingFor: waiting.waitingFor } : {}) } };
-  if (sessions.some((s) => s.status === "busy")) return { column: "agent", reason: { kind: "agent_working" } };
-  return undefined;
-}
-
-/** The column of a worktree: `pr` is its branch's open pull request, `closed` its latest closed one. */
-export function judge(pr: GhPr | undefined, closed: GhClosedPr | undefined, me: string, sessions: readonly SessionLike[] = []): Turn {
-  const byAgent = agentTurn(sessions);
-  if (byAgent) return byAgent;
-  if (!pr && closed) return { column: "done", reason: { kind: closed.state === "MERGED" ? "merged" : "closed", pr: closed.number } };
-  if (!pr) return { column: "mine", reason: { kind: "no_pr" } };
-  if (pr.mergeable === "CONFLICTING") return { column: "mine", reason: { kind: "conflict" } };
-  const failed = failedChecks(pr);
-  if (failed.length > 0) return { column: "mine", reason: { kind: "ci_failed", checks: failed.slice(0, 2) } };
-  const { onHead, pushed } = changeRequests(pr, me);
-  if (onHead.length > 0) return { column: "mine", reason: { kind: "changes_requested", who: onHead } };
-  const running = runningChecks(pr);
-  if (running.length > 0) return { column: "github", reason: { kind: "ci_running", checks: running.slice(0, 2) } };
-  if (pr.isDraft) return { column: "mine", reason: { kind: "draft" } };
-  if (pushed.length > 0) return { column: "review", reason: { kind: "rereview", who: pushed } };
-  if ([...reviewers(pr, me).values()].some((r) => r.state === "APPROVED")) return { column: "mine", reason: { kind: "approved" } };
-  return { column: "review", reason: { kind: "review_waiting" } };
 }
 
 /** Each session goes to the deepest of `paths` that holds its folder; sessions outside all of them are left out. */
@@ -234,7 +94,6 @@ export function cardsOf(m: RepoMaterial, byPath: Map<string, SessionLike[]>): Ka
   trees.push({ branch: m.primary.branch, path: m.primary.path, primary: true });
   const cards: KanbanCard[] = [];
   const card = (t: { branch?: string; path?: string; primary: boolean }, pr: GhPr | undefined, closed: GhClosedPr | undefined, sessions: SessionLike[]) => {
-    const { column, reason } = judge(pr, closed, m.me, sessions);
     const shown = pr ?? closed;
     const issue = issueOf(t.branch);
     cards.push({
@@ -252,15 +111,14 @@ export function cardsOf(m: RepoMaterial, byPath: Map<string, SessionLike[]>): Ka
           ? { pr: { number: closed.number, url: closed.url, state: closed.state === "MERGED" ? ("merged" as const) : ("closed" as const) } }
           : {}),
       ...(pr?.updatedAt ? { updatedAt: pr.updatedAt } : {}),
-      column,
-      reason,
+      column: "mine",
       sessions: sessions.map(cardSession),
     });
   };
   for (const t of trees) {
     const pr = t.branch === undefined ? undefined : open.get(t.branch);
     const sessions = byPath.get(t.path) ?? [];
-    if (t.primary && !pr && !agentTurn(sessions)) continue;
+    if (t.primary && !pr && !sessions.some((s) => s.status === "busy" || s.status === "waiting")) continue;
     card(t, pr, pr || t.branch === undefined ? undefined : m.closed.get(t.branch), sessions);
   }
   const taken = new Set(trees.map((t) => t.branch));
@@ -354,7 +212,7 @@ export async function repoOptions(folders: readonly string[]): Promise<KanbanRep
 class KanbanError extends Error {}
 
 /** Reads one watched repository: its worktrees, and my open and closed pull requests. */
-async function readRepo(gh: string, option: KanbanRepoOption, me: string, mergeable: Map<number, string>): Promise<RepoMaterial> {
+async function readRepo(gh: string, option: KanbanRepoOption): Promise<RepoMaterial> {
   if (!option.github) throw new KanbanError("origin が GitHub の repo ではないので、見られません。");
   const porcelain = await git(option.path, ["worktree", "list", "--porcelain"]).catch((e: unknown) => {
     throw new KanbanError(`Git の情報を読めませんでした：${String(e instanceof Error ? e.message : e).split("\n")[0]}`);
@@ -368,10 +226,9 @@ async function readRepo(gh: string, option: KanbanRepoOption, me: string, mergea
   });
   return {
     repo: option.github,
-    me,
     primary: { path: realPath(primary.path), ...(primary.branch ? { branch: primary.branch } : {}) },
     worktrees: new Map([...worktrees].map(([b, p]) => [b, realPath(p)])),
-    prs: settle(parsePrs(open), mergeable),
+    prs: parsePrs(open),
     closed: parseClosed(closed),
   };
 }
@@ -388,8 +245,6 @@ export class Kanban {
   private options: KanbanRepoOption[] = [];
   private material = new Map<string, RepoMaterial>();
   private errors = new Map<string, string>();
-  private mergeable = new Map<string, Map<number, string>>();
-  private me: string | undefined;
   private updatedAt: number | undefined;
   private checking = false;
   private again = false;
@@ -414,7 +269,7 @@ export class Kanban {
     const next = [...new Set(paths.filter((p) => typeof p === "string"))];
     if (JSON.stringify(next) === JSON.stringify(this.wanted)) return;
     this.wanted = next;
-    for (const map of [this.material, this.errors, this.mergeable]) {
+    for (const map of [this.material, this.errors]) {
       for (const p of [...map.keys()]) if (!next.includes(p)) map.delete(p);
     }
     this.onChange();
@@ -442,18 +297,6 @@ export class Kanban {
     this.startedAt = Date.now();
     this.onChange();
     try {
-      let me = this.me;
-      let meError: string | undefined;
-      if (!me) {
-        me = await execFileP(this.gh, ["api", "user", "--jq", ".login"], { timeout: 20_000, env: { ...process.env, GH_PROMPT_DISABLED: "1" } }).then(
-          (r) => r.stdout.trim() || undefined,
-          (e: unknown) => {
-            meError = ghError(e);
-            return undefined;
-          },
-        );
-        this.me = me;
-      }
       const queue = [...this.wanted];
       let read = false;
       const worker = async () => {
@@ -461,10 +304,7 @@ export class Kanban {
           const option = this.options.find((o) => o.path === p);
           try {
             if (!option) throw new KanbanError("Claude Code が信頼しているフォルダーの repo ではないので、見られません。");
-            if (!me) throw new KanbanError(meError ?? "GitHub のログイン名を読めませんでした。");
-            const memory = this.mergeable.get(p) ?? new Map<number, string>();
-            this.mergeable.set(p, memory);
-            const material = await readRepo(this.gh, option, me, memory);
+            const material = await readRepo(this.gh, option);
             if (!this.wanted.includes(p)) continue;
             this.material.set(p, material);
             this.errors.delete(p);

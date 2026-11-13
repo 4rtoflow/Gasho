@@ -411,7 +411,6 @@ export class Daemon {
       sessionId: info.sessionId,
       cwd: info.cwd,
       status: info.status,
-      ...(info.waitingFor ? { waitingFor: info.waitingFor } : {}),
       ...(this.managed.has(info.sessionId) ? { managed: true } : {}),
     }));
     const board = this.kanban.board(sessions);

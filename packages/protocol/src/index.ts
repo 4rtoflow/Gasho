@@ -156,27 +156,18 @@ export interface MachineInfo {
   kanban?: KanbanBoard;
 }
 
-// ---- kanban: the worktrees and pull requests of the watched repositories, by whose move it is ----
+// ---- kanban: the worktrees and pull requests of the watched repositories, in columns by whose move it is ----
 
 /** The columns, in their order: my move, the agent works, GitHub works (CI), the reviewers' move, done. */
 export type KanbanColumn = "mine" | "agent" | "github" | "review" | "done";
 
-/** Why a card is in its column; Gasho words it, and the next step when the move is mine. */
-export type KanbanReason =
-  | { kind: "agent_waiting"; waitingFor?: string }
-  | { kind: "agent_working" }
-  | { kind: "merged"; pr: number }
-  | { kind: "closed"; pr: number }
-  | { kind: "no_pr" }
-  | { kind: "conflict" }
-  /** `checks`: up to two of them, as "workflow/job". */
-  | { kind: "ci_failed"; checks: string[] }
-  | { kind: "changes_requested"; who: string[] }
-  | { kind: "ci_running"; checks: string[] }
-  | { kind: "draft" }
-  | { kind: "rereview"; who: string[] }
-  | { kind: "approved" }
-  | { kind: "review_waiting" };
+/** An instruction sent from a card in one press, to Claude in the card's worktree. */
+export interface KanbanAction {
+  /** What the menu shows. */
+  label: string;
+  /** What Claude receives. */
+  prompt: string;
+}
 
 /** A Claude Code session working in a card's worktree: any session on the working server, not only Gasho's. */
 export interface KanbanSession {
@@ -206,9 +197,11 @@ export interface KanbanCard {
   pr?: { number: number; url: string; state: "open" | "merged" | "closed"; draft?: boolean };
   /** When the open pull request last changed (ISO 8601). */
   updatedAt?: string;
+  /** Nothing decides the columns yet: every card is in the first one. */
   column: KanbanColumn;
-  reason: KanbanReason;
   sessions: KanbanSession[];
+  /** The instructions the card's menu offers. Nothing gives any yet: what fits a worktree differs between people. */
+  actions?: KanbanAction[];
 }
 
 /** A repository that can be watched: one in the folders Claude Code trusts on the working server. */

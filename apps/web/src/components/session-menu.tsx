@@ -5,7 +5,7 @@ import { GitFork, Pencil, Trash2 } from "lucide-react";
 import { AlertDialog, ContextMenu, Dialog } from "radix-ui";
 import { useRef, useState, type FormEvent, type ReactElement, type ReactNode } from "react";
 import type { MachineInfo, SessionInfo } from "@gasho/protocol";
-import { BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SECONDARY, DIALOG_OVERLAY, DIALOG_PANEL } from "@/components/dialog-styles";
+import { BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SECONDARY, DIALOG_OVERLAY, DIALOG_PANEL, MENU, MENU_ITEM } from "@/components/dialog-styles";
 import { sessionLabel } from "@/lib/format";
 import { go, useRoute } from "@/lib/route";
 import { forkName, MAX_SESSION_NAME, nameProblem } from "@/lib/session-names";
@@ -30,10 +30,6 @@ const RENAME_WAIT_MS = 50_000;
 const FORK_WAIT_MS = 95_000;
 const REMOVE_WAIT_MS = 50_000;
 
-const MENU =
-  "z-[100] min-w-52 max-w-[min(18rem,calc(100vw-24px))] rounded-xl border border-border bg-surface p-1.5 text-sm shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95";
-const MENU_ITEM =
-  "flex w-full cursor-default items-center gap-2.5 rounded-lg px-2.5 py-1.5 outline-none select-none data-[highlighted]:bg-surface-raised data-[disabled]:pointer-events-none data-[disabled]:opacity-40 [&>svg]:size-4 [&>svg]:shrink-0";
 
 /** The menu of a session in the sidebar; `children` is the item's button, which opens it. */
 export function SessionContextMenu({

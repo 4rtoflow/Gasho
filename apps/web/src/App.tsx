@@ -5,7 +5,6 @@ import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } fr
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
-import { kanbanCards } from "@/lib/kanban";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { go, useRoute, type SessionPanel } from "@/lib/route";
 import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
@@ -99,13 +98,11 @@ export function App() {
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
   // The sessions of all working servers in one list, the one used last first.
   const sessions = sessionsByLastUse(machines);
-  // The cards whose move is mine.
-  const mine = kanbanCards(machines).filter((c) => c.card.column === "mine").length;
   const sections: SidebarSection[] = [
     {
       items: [
         { id: "home", label: "ホーム", icon: <Home />, badge: unread || undefined },
-        { id: "kanban", label: "カンバン", icon: <SquareKanban />, badge: mine || undefined },
+        { id: "kanban", label: "カンバン", icon: <SquareKanban /> },
         { id: "devices", label: "端末", icon: <KeyRound /> },
       ],
     },
