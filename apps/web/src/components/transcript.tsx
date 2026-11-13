@@ -8,6 +8,7 @@ import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { MarkdownText } from "@/components/markdown";
 import { clockTime } from "@/lib/format";
 import type { TranscriptState } from "@/lib/store";
+import { transcriptItems, type ToolUse } from "@/lib/transcript-items";
 import { cn } from "@/lib/utils";
 
 export function toolSummary(input: string): string {
@@ -43,16 +44,31 @@ const ToolResults = createContext<{ of: (id: string | undefined) => ToolResult |
   called: () => false,
 });
 
-/** A fold of the conversation (a tool call), closed by default. Its parts are labelled, each scrolls on its own. */
-function Fold({ summary, parts }: { summary: ReactNode; parts: { label: string; text: string; tone?: "error" }[] }) {
+const FOLD_BOX = "rounded-lg border border-border/60 bg-surface/60 text-xs";
+const FOLD_SUMMARY =
+  "flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden";
+
+/**
+ * A fold of the conversation (a tool call), closed by default. Its parts are labelled, each scrolls on its own.
+ * A nested fold is a row of a group of folds (see CommandsFold), indented under the group's icon.
+ */
+function Fold({
+  summary,
+  parts,
+  nested = false,
+}: {
+  summary: ReactNode;
+  parts: { label: string; text: string; tone?: "error" }[];
+  nested?: boolean;
+}) {
   return (
-    <details className="group rounded-lg border border-border/60 bg-surface/60 text-xs">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
+    <details className={cn("group", nested ? "border-t border-border/60" : FOLD_BOX)}>
+      <summary className={cn(FOLD_SUMMARY, nested && "pl-8")}>
         <ChevronRight className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
         {summary}
       </summary>
       {parts.map((p) => (
-        <div key={p.label} className="border-t border-border/60">
+        <div key={p.label} className={cn("border-t border-border/60", nested && "ml-8")}>
           <div className={cn("px-3 pt-2 text-[10.5px] text-muted-foreground", p.tone === "error" && "text-red-400")}>{p.label}</div>
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all px-3 pt-1 pb-2 font-mono text-[11px] leading-relaxed text-foreground/80">
             {p.text}
@@ -68,15 +84,20 @@ function resultLabel(r: ToolResult): string {
   return `${r.isError ? "エラー" : "結果"}（${r.content.length.toLocaleString()} 文字）`;
 }
 
-/** A tool call and, once it has come, its result, in one fold. */
-function ToolFold({ block }: { block: Extract<TranscriptBlock, { type: "tool_use" }> }) {
+/** A tool call and, once it has come, its result, in one fold. In a group, the group shows the tool's name. */
+function ToolFold({ block, nested = false }: { block: ToolUse; nested?: boolean }) {
   const result = useContext(ToolResults).of(block.id);
   return (
     <Fold
+      nested={nested}
       summary={
         <span className="flex min-w-0 flex-1 items-center gap-2">
-          <Wrench className={cn("size-3.5 shrink-0", result?.isError && "text-red-400")} />
-          <span className="shrink-0 font-mono font-medium text-foreground/90">{block.name}</span>
+          {!nested && (
+            <>
+              <Wrench className={cn("size-3.5 shrink-0", result?.isError && "text-red-400")} />
+              <span className="shrink-0 font-mono font-medium text-foreground/90">{block.name}</span>
+            </>
+          )}
           <span className="truncate font-mono">{block.summary ?? toolSummary(block.input)}</span>
           {result?.isError && <span className="ml-auto shrink-0 text-red-400">エラー</span>}
         </span>
@@ -88,6 +109,36 @@ function ToolFold({ block }: { block: Extract<TranscriptBlock, { type: "tool_use
           : { label: "結果", text: "（まだありません）" },
       ]}
     />
+  );
+}
+
+/**
+ * Bash calls that came in a row, in one fold: how many, the latest command (the one running, while the agent works)
+ * and how many failed. Opened, it lists the calls, each in a fold of its own. The group is named so that its open
+ * state does not reach the folds inside it, which use the plain group.
+ */
+function CommandsFold({ calls }: { calls: ToolUse[] }) {
+  const results = useContext(ToolResults);
+  const errors = calls.filter((c) => results.of(c.id)?.isError).length;
+  const latest = calls.at(-1);
+  return (
+    <details className={cn("group/commands", FOLD_BOX)}>
+      <summary className={FOLD_SUMMARY}>
+        <ChevronRight className="size-3.5 shrink-0 transition-transform group-open/commands:rotate-90" />
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <Wrench className={cn("size-3.5 shrink-0", errors > 0 && "text-red-400")} />
+          <span className="shrink-0 font-mono font-medium text-foreground/90">{latest?.name}</span>
+          <span className="shrink-0 tabular-nums">{calls.length} 回</span>
+          {latest && (
+            <span className="truncate font-mono group-open/commands:hidden">{latest.summary ?? toolSummary(latest.input)}</span>
+          )}
+          {errors > 0 && <span className="ml-auto shrink-0 text-red-400">エラー {errors} 回</span>}
+        </span>
+      </summary>
+      {calls.map((c, i) => (
+        <ToolFold key={c.id ?? i} block={c} nested />
+      ))}
+    </details>
   );
 }
 
@@ -159,8 +210,8 @@ function OrphanResult({ block }: { block: ToolResult }) {
   );
 }
 
+/** An entry of the conversation. Entries that would show nothing are left out beforehand (see transcriptItems). */
 function EntryView({ entry }: { entry: TranscriptEntry }) {
-  const results = useContext(ToolResults);
   const time = clockTime(entry.ts);
   if (entry.interrupted) {
     return (
@@ -174,8 +225,6 @@ function EntryView({ entry }: { entry: TranscriptEntry }) {
     return <div className="text-xs italic text-muted-foreground">{entry.blocks.map((b, i) => <BlockView key={i} block={b} />)}</div>;
   }
   const onlyResults = entry.blocks.every((b) => b.type === "tool_result");
-  // Results that are all shown inside their calls' folds leave nothing to show here.
-  if (onlyResults && entry.blocks.every((b) => b.type === "tool_result" && results.called(b.toolUseId))) return null;
   if (entry.role === "user" && !onlyResults) {
     return (
       <div className="flex justify-end">
@@ -190,12 +239,16 @@ function EntryView({ entry }: { entry: TranscriptEntry }) {
   }
   return (
     <div className={cn("space-y-2 text-sm", onlyResults && "pl-5")}>
-      {entry.isSidechain && <div className="text-[10px] uppercase tracking-wide text-muted-foreground">サブエージェント</div>}
+      {entry.isSidechain && <SidechainLabel />}
       {entry.blocks.map((b, i) => (
         <BlockView key={i} block={b} markdown={entry.role === "assistant"} />
       ))}
     </div>
   );
+}
+
+function SidechainLabel() {
+  return <div className="text-[10px] uppercase tracking-wide text-muted-foreground">サブエージェント</div>;
 }
 
 export function Transcript({
@@ -228,6 +281,8 @@ export function Transcript({
       called: (id: string | undefined) => Boolean(id && calls.has(id)),
     };
   }, [entries]);
+  const start = state?.start ?? 0;
+  const items = useMemo(() => transcriptItems(entries, start, toolResults.called), [entries, start, toolResults]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -286,9 +341,16 @@ export function Transcript({
             <p className="text-center text-sm text-muted-foreground">まだ会話がありません</p>
           ) : (
             <ToolResults.Provider value={toolResults}>
-              {entries.map((e, i) => (
-                <EntryView key={e.uuid || `i${state.start + i}`} entry={e} />
-              ))}
+              {items.map((item) =>
+                item.kind === "entry" ? (
+                  <EntryView key={item.key} entry={item.entry} />
+                ) : (
+                  <div key={item.key} className="space-y-2 text-sm">
+                    {item.isSidechain && <SidechainLabel />}
+                    <CommandsFold calls={item.calls} />
+                  </div>
+                ),
+              )}
             </ToolResults.Provider>
           )}
         </div>
