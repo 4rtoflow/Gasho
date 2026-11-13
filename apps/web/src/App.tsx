@@ -6,7 +6,7 @@ import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/comp
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { go, useRoute, type SessionPanel } from "@/lib/route";
-import { notificationShown, shownSessions } from "@/lib/sessions";
+import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { DevicesView } from "@/views/devices";
@@ -89,6 +89,8 @@ export function App() {
   if (auth === "unregistered") return <PairView />;
 
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
+  // The sessions of all working servers in one list, the one used last first.
+  const sessions = sessionsByLastUse(machines);
   const sections: SidebarSection[] = [
     {
       items: [
@@ -96,15 +98,19 @@ export function App() {
         { id: "devices", label: "端末", icon: <KeyRound /> },
       ],
     },
-    ...machines.map((m) => ({
-      title: m.connected ? m.name : `${m.name}（オフライン）`,
-      items: shownSessions(m).map((s) => ({
-        id: [m.id, s.sessionId].join(SEP),
-        label: sessionLabel(s),
-        icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
-        badge: m.connected && s.status === "waiting" ? "確認" : undefined,
-      })),
-    })),
+    ...(sessions.length > 0
+      ? [
+          {
+            title: "セッション",
+            items: sessions.map(({ machine: m, session: s }) => ({
+              id: [m.id, s.sessionId].join(SEP),
+              label: sessionLabel(s),
+              icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
+              badge: !m.connected ? "オフライン" : s.status === "waiting" ? "確認" : undefined,
+            })),
+          },
+        ]
+      : []),
   ];
   const activeId = route.name === "session" ? [route.machine, route.sessionId].join(SEP) : route.name;
   const panel = route.name === "session" ? route.panel : undefined;

@@ -7,6 +7,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef,
 import type { TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { MarkdownText } from "@/components/markdown";
 import { clockTime } from "@/lib/format";
+import type { PendingMessage } from "@/lib/pending";
 import type { TranscriptState } from "@/lib/store";
 import { transcriptItems, type ToolUse } from "@/lib/transcript-items";
 import { cn } from "@/lib/utils";
@@ -159,10 +160,7 @@ function UserText({ text }: { text: string }) {
     <>
       {parts.map((p, i) =>
         p.kind === "file" ? (
-          <span key={i} title={p.path} className="mr-1.5 mb-1 inline-flex max-w-full items-center gap-1.5 rounded-lg bg-white/[0.06] px-2 py-1 text-xs">
-            <Paperclip className="size-3.5 shrink-0" />
-            <span className="truncate">{p.name}</span>
-          </span>
+          <FileChip key={i} name={p.name} title={p.path} />
         ) : p.text.trim() ? (
           <p key={i} className="whitespace-pre-wrap break-words leading-relaxed">
             {p.text.replace(/^\n+|\n+$/g, "")}
@@ -170,6 +168,15 @@ function UserText({ text }: { text: string }) {
         ) : null,
       )}
     </>
+  );
+}
+
+function FileChip({ name, title }: { name: string; title?: string }) {
+  return (
+    <span title={title} className="mr-1.5 mb-1 inline-flex max-w-full items-center gap-1.5 rounded-lg bg-white/[0.06] px-2 py-1 text-xs">
+      <Paperclip className="size-3.5 shrink-0" />
+      <span className="truncate">{name}</span>
+    </span>
   );
 }
 
@@ -251,12 +258,35 @@ function SidechainLabel() {
   return <div className="text-[10px] uppercase tracking-wide text-muted-foreground">サブエージェント</div>;
 }
 
+/**
+ * A message sent from here that the conversation does not show yet (see lib/pending), in the place and look of the
+ * user's own entries, with how far it has got instead of the time.
+ */
+function PendingView({ message: p }: { message: PendingMessage }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[85%] space-y-2 rounded-2xl rounded-br-md bg-primary/10 px-3.5 py-2.5 text-sm">
+        {p.text && <p className="whitespace-pre-wrap break-words leading-relaxed">{p.text}</p>}
+        {p.files.map((name, i) => (
+          <FileChip key={i} name={name} />
+        ))}
+        <div className="text-right text-[10px] text-muted-foreground">
+          {p.state === "queued" ? "送信待ち（作業が終わったら送ります）" : "送信中…"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** `pending`: messages sent from here that the conversation does not show yet; they come after its entries. */
 export function Transcript({
   state,
+  pending,
   onLoadOlder,
   footer,
 }: {
   state: TranscriptState | undefined;
+  pending?: PendingMessage[];
   onLoadOlder: () => void;
   footer?: ReactNode;
 }) {
@@ -299,6 +329,15 @@ export function Transcript({
     prev.current = { first, count: entries.length, height: el.scrollHeight };
   }, [entries]);
 
+  // A message just sent from here: show it, wherever the conversation was scrolled to.
+  const pendingCount = pending?.length ?? 0;
+  const prevPending = useRef(pendingCount);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el && pendingCount > prevPending.current) el.scrollTop = el.scrollHeight;
+    prevPending.current = pendingCount;
+  }, [pendingCount]);
+
   // The chat box grows with its text and status line. While at the bottom, keep the newest entry above it.
   const hasFooter = footer !== undefined;
   useEffect(() => {
@@ -338,7 +377,7 @@ export function Transcript({
           {!state || (state.loading && entries.length === 0) ? (
             <p className="text-center text-sm text-muted-foreground">読み込み中…</p>
           ) : entries.length === 0 && !state.error ? (
-            <p className="text-center text-sm text-muted-foreground">まだ会話がありません</p>
+            pendingCount === 0 && <p className="text-center text-sm text-muted-foreground">まだ会話がありません</p>
           ) : (
             <ToolResults.Provider value={toolResults}>
               {items.map((item) =>
@@ -353,6 +392,9 @@ export function Transcript({
               )}
             </ToolResults.Provider>
           )}
+          {pending?.map((p) => (
+            <PendingView key={p.id} message={p} />
+          ))}
         </div>
         {hasFooter && (
           <div
