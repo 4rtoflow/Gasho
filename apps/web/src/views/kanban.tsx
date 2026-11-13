@@ -148,7 +148,8 @@ export function KanbanView() {
 
   return (
     <MotionConfig reducedMotion="user">
-      <div className="flex flex-col gap-4 p-4 md:p-6">
+      {/* On a computer the board fills the page's height and each column scrolls by itself; on a phone the page scrolls. */}
+      <div className={cn("flex flex-col gap-4 p-4 md:p-6", wide && watched > 0 && "h-full min-h-0")}>
         <header className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold tracking-tight">カンバン</h1>
@@ -216,13 +217,14 @@ export function KanbanView() {
           <EmptyState canChoose={ready.length > 0} onChoose={() => setChoosing(true)} />
         ) : wide ? (
           <LayoutGroup>
-            <div className="-mx-4 overflow-x-auto pb-2 pl-4 md:-mx-6 md:pl-6">
-              <div className="flex w-max items-start gap-3 pr-4 md:pr-6">
+            {/* layoutScroll: cards that move between columns start from where they show, however far the board scrolled. */}
+            <motion.div layoutScroll className="-mx-4 min-h-0 flex-1 overflow-x-auto pb-2 pl-4 md:-mx-6 md:pl-6">
+              <div className="flex h-full w-max items-start gap-3 pr-4 md:pr-6">
                 {KANBAN_COLUMNS.map((col) => (
                   <Column key={col.id} id={col.id} label={col.label} rows={byColumn(col.id)} loading={loading} now={now} where={where} prefs={prefs} wide />
                 ))}
               </div>
-            </div>
+            </motion.div>
           </LayoutGroup>
         ) : (
           <div className="flex flex-col gap-3">
@@ -260,8 +262,9 @@ function ColumnDot({ id }: { id: KanbanColumn }) {
 }
 
 /**
- * One column. `wide`: on the board of a computer, with its heading and a width that can be changed; on a phone the
- * tab above names the column and counts its cards, and the column takes the screen's width.
+ * One column. `wide`: on the board of a computer, with its heading, a width that can be changed, and its own scroll
+ * once its cards pass the bottom of the page; on a phone the tab above names the column and counts its cards, and the
+ * column takes the screen's width.
  */
 function Column({
   id,
@@ -291,7 +294,7 @@ function Column({
   return (
     <section
       aria-label={`${label}：${rows.length} 枚`}
-      className={cn(TILE, "relative flex min-w-0 flex-col", wide ? "shrink-0" : "pt-2")}
+      className={cn(TILE, "relative flex min-w-0 flex-col", wide ? "max-h-full shrink-0" : "pt-2")}
       style={{ boxShadow: TILE_SHADOW, ...(wide ? { width } : {}) }}
     >
       {wide && (
@@ -305,7 +308,7 @@ function Column({
               setColumnWidth(id, w);
             }}
           />
-          <h2 className="flex items-center gap-2 px-3.5 pt-3 pb-2 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
+          <h2 className="flex shrink-0 items-center gap-2 px-3.5 pt-3 pb-2 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
             <ColumnDot id={id} />
             <span className="truncate">{label}</span>
             <Badge tone={rows.length > 0 ? COLUMN_LOOK[id].tone : "neutral"} className="ml-auto h-5 px-2">
@@ -314,11 +317,18 @@ function Column({
           </h2>
         </>
       )}
-      <div className="flex items-center gap-1.5 px-2.5 pb-2">
+      <div className="flex shrink-0 items-center gap-1.5 px-2.5 pb-2">
         <SortMenu label={label} sort={sort} onChange={(next) => setColumnSort(id, next)} />
         <ModeSwitch id={id} label={label} compact={compact} onChange={(c) => setColumnCompact(id, c)} />
       </div>
-      <div className={cn("flex flex-col px-2 pb-2", compact ? "gap-1" : "gap-2")}>
+      <motion.div
+        layoutScroll
+        className={cn(
+          "relative flex flex-col px-2 pb-2",
+          compact ? "gap-1" : "gap-2",
+          wide && "min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:thin]",
+        )}
+      >
         {loading ? (
           <>
             <CardSkeleton />
@@ -344,7 +354,7 @@ function Column({
             ))}
           </AnimatePresence>
         )}
-      </div>
+      </motion.div>
     </section>
   );
 }
