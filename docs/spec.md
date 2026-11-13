@@ -24,7 +24,7 @@ Gasho は、Mac と Ubuntu Server で動く Claude Code のセッションと、
 
 | 番号 | 機能 | 対象 | 取得・操作の方法 |
 |---|---|---|---|
-| S1 | 全 working server のセッションの一覧と状態（busy・waiting・idle、待っているもの、題名、リポジトリ、ブランチ） | すべて（画面に出すのは Gasho が起動したものだけ） | `claude agents --json`、トランスクリプト |
+| S1 | 全 working server のセッションの一覧と状態（busy・waiting・idle、待っているもの、題名、リポジトリ、ブランチ） | すべて（画面に出すのは Gasho が起動したものだけ。カンバンのカードには、ほかのセッションの状態も出す） | `claude agents --json`、トランスクリプト |
 | S2 | 会話の履歴（ツールの呼び出しと割り込みを含む） | すべて | トランスクリプト |
 | S3 | 通知（ツールの実行、応答の完了、権限の確認待ち、入力待ち） | すべて | hooks |
 | S4 | 権限の確認への許可と拒否 | すべて | PermissionRequest hook |

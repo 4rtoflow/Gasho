@@ -120,19 +120,19 @@ export async function doctor(o: { claudeBin: string; ghBin: string; hookPort: nu
   checks.push(
     git
       ? { level: "ok", name: "git", detail: (versionOf(git) ?? []).join(".") }
-      : { level: "warn", name: "git", detail: "ありません", hint: "ブランチグラフに使います" },
+      : { level: "warn", name: "git", detail: "ありません", hint: "ブランチグラフとカンバンに使います" },
   );
 
   const gh = await run(o.ghBin, ["--version"]);
   if (!gh || gh === "error") {
-    checks.push({ level: "warn", name: "GitHub CLI", detail: "ありません", hint: "Issues と Pull requests のパネルに使います。gh を入れて gh auth login でログインしてください" });
+    checks.push({ level: "warn", name: "GitHub CLI", detail: "ありません", hint: "Issues と Pull requests のパネルと、カンバンに使います。gh を入れて gh auth login でログインしてください" });
   } else {
     const auth = await run(o.ghBin, ["auth", "status"]);
     const loggedIn = auth !== undefined && /Logged in to/i.test(auth);
     checks.push(
       loggedIn
         ? { level: "ok", name: "GitHub CLI", detail: `${(versionOf(gh) ?? []).join(".")}、ログイン済み` }
-        : { level: "warn", name: "GitHub CLI", detail: "ログインしていません", hint: "Issues と Pull requests のパネルに使います。gh auth login でログインしてください" },
+        : { level: "warn", name: "GitHub CLI", detail: "ログインしていません", hint: "Issues と Pull requests のパネルと、カンバンに使います。gh auth login でログインしてください" },
     );
   }
 

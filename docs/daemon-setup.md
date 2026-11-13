@@ -18,8 +18,8 @@ gasho-daemon は、Claude Code を動かすマシン（working server）ごと�
 | Node.js 24 以上 | gasho-daemon そのもの | 動かない |
 | Claude Code（`claude`）、ログイン済み | セッションを見る、起動する | 動かない |
 | zellij 0.45 以上 | Gasho からセッションを起動し、指示を送る | セッションを見るだけになる |
-| git | ブランチグラフ | ブランチグラフが出ない |
-| GitHub CLI（`gh`）、ログイン済み | Issues と Pull requests のパネル | パネルが出ない |
+| git | ブランチグラフ、カンバン | ブランチグラフが出ない。カンバンが repo を読めない |
+| GitHub CLI（`gh`）、ログイン済み | Issues と Pull requests のパネル、カンバン | パネルが出ない。カンバンが repo を読めない |
 | Claude Code の hooks | 通知（応答の完了、確認待ち、入力待ち） | 通知が来ない |
 
 Mac では、Homebrew で `brew install node zellij gh` のように入れられる。Ubuntu では、Node.js は公式のバイナリかバージョン管理のツール（nvm など）、zellij は公式のリリースのバイナリ、gh は公式の apt リポジトリから入れる。どれも、`which claude zellij gh` で見つかる場所に置く。
