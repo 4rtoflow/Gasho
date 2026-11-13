@@ -9,6 +9,7 @@ import type {
   HubToDaemon,
   InputFeature,
   InputFile,
+  KanbanRepoOption,
   ModelOption,
   SessionInfo,
   SessionModel,
@@ -19,6 +20,7 @@ import type {
 import type { DaemonConfig } from "./config.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
 import { ghError, listGitHub, viewGitHub } from "./github.ts";
+import { Kanban, repoOptions, type SessionLike } from "./kanban.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
@@ -65,7 +67,7 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.9.0";
+export const DAEMON_VERSION = "0.10.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -153,6 +155,10 @@ export class Daemon {
   private managed: ManagedSessions;
   private canLaunch = false;
   private folders: string[] = [];
+  /** The repositories in `folders` the kanban can watch. */
+  private kanbanOptions: KanbanRepoOption[] = [];
+  private kanban: Kanban;
+  private lastKanban = "";
   private flushing = new Set<string>();
   /** Until when input must wait after an interrupt, so Claude Code has put the stopped prompt back first. */
   private settleUntil = new Map<string, number>();
@@ -173,13 +179,16 @@ export class Daemon {
     this.enterWaitMs = opts.enterWaitMs ?? ENTER_WAIT_MS;
     this.zellij = new Zellij(cleanEnv());
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
+    this.kanban = new Kanban(cfg.ghBin, () => this.emitKanban());
     this.hub = new HubClient({
       url: cfg.hubUrl,
       hello: () => ({ type: "hello", machineId: cfg.machineId, token: cfg.token, daemonVersion: DAEMON_VERSION }),
       onReady: () => {
         this.lastSent = "";
+        this.lastKanban = "";
         this.emitSessions();
         this.emitCapabilities();
+        this.emitKanban();
       },
       onMessage: (m) => void this.onHubMessage(m),
       onRejected: (reason) => {
@@ -204,6 +213,7 @@ export class Daemon {
       .catch(() => undefined);
     await this.refreshFolders();
     setInterval(() => void this.refreshFolders(), FOLDERS_REFRESH_MS).unref();
+    this.kanban.start();
 
     this.hub.connect();
     startHookServer({
@@ -259,6 +269,7 @@ export class Daemon {
       await this.readManagedScreens();
       await this.countTokens();
       this.emitSessions();
+      this.emitKanban();
       for (const m of this.managed.all()) {
         if (this.managed.pending(m.sessionId) === 0) continue;
         // A failure leaves the input on the queue for the next try.
@@ -383,9 +394,31 @@ export class Daemon {
   private async refreshFolders(): Promise<void> {
     const cwds = [...this.tracked.values()].map((t) => t.info.cwd);
     const folders = await launchableFolders(os.homedir(), cwds);
-    if (JSON.stringify(folders) === JSON.stringify(this.folders)) return;
+    const options = await repoOptions(folders).catch((e: unknown) => {
+      log("could not list the repositories of the trusted folders", e);
+      return this.kanbanOptions;
+    });
+    this.kanban.setOptions(options);
+    if (JSON.stringify([folders, options]) === JSON.stringify([this.folders, this.kanbanOptions])) return;
     this.folders = folders;
+    this.kanbanOptions = options;
     this.emitCapabilities();
+  }
+
+  /** The kanban with the sessions as they are now, when it changed. */
+  private emitKanban(): void {
+    const sessions: SessionLike[] = [...this.tracked.values()].map(({ info }) => ({
+      sessionId: info.sessionId,
+      cwd: info.cwd,
+      status: info.status,
+      ...(info.waitingFor ? { waitingFor: info.waitingFor } : {}),
+      ...(this.managed.has(info.sessionId) ? { managed: true } : {}),
+    }));
+    const board = this.kanban.board(sessions);
+    const json = JSON.stringify(board);
+    if (json === this.lastKanban || !this.hub.connected) return;
+    this.lastKanban = json;
+    this.hub.send({ type: "kanban", board });
   }
 
   private emitCapabilities(): void {
@@ -397,6 +430,7 @@ export class Daemon {
       models: this.models?.options,
       modelsAt: this.models?.at,
       features: [...INPUT_FEATURES],
+      kanbanOptions: this.kanbanOptions,
     });
   }
 
@@ -613,6 +647,12 @@ export class Daemon {
         return this.sendGitHubList(m);
       case "github.item.get":
         return this.sendGitHubItem(m);
+      case "kanban.watch":
+        this.kanban.watch(Array.isArray(m.paths) ? m.paths : []);
+        return;
+      case "kanban.refresh":
+        this.kanban.refresh();
+        return;
       case "session.launch":
       case "session.input":
       case "session.interrupt":

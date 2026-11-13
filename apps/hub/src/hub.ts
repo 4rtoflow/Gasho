@@ -72,6 +72,9 @@ const MAX_SESSION_ID = 100;
 const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]);
+/** Repositories one working server's kanban can watch, and the length of their paths. */
+const MAX_KANBAN_REPOS = 30;
+const MAX_PATH = 500;
 
 /**
  * What a gasho-daemon that does not list its features (older than 0.6.0) can do with an input: 0.5 switches the model
@@ -89,6 +92,15 @@ export function versionAtLeast(version: string | undefined, major: number, minor
 
 /** gasho-daemon 0.9.0 renames, forks and removes sessions. */
 const SESSION_ACTIONS_SINCE: [number, number] = [0, 9];
+/** gasho-daemon 0.10.0 reads the kanban. */
+const kanbanReady = (version: string | undefined): boolean => versionAtLeast(version, 0, 10);
+
+/** The repositories chosen for a kanban: absolute paths, each once; undefined when the list is not one. */
+function kanbanPaths(paths: unknown): string[] | undefined {
+  if (!Array.isArray(paths) || paths.length > MAX_KANBAN_REPOS) return undefined;
+  if (!paths.every((p) => typeof p === "string" && p.startsWith("/") && p.length <= MAX_PATH)) return undefined;
+  return [...new Set(paths as string[])];
+}
 
 /** A session's name: an error message, or undefined when it is fine (or omitted where `required` is false). */
 function nameError(name: unknown, required: boolean): string | undefined {
@@ -197,6 +209,7 @@ export class Hub {
       this.store.saveMachine(m);
       this.store.touchDevice(device.id);
       peer.send({ type: "welcome" });
+      if (kanbanReady(msg.daemonVersion)) peer.send({ type: "kanban.watch", paths: m.kanbanRepos ?? [] });
       this.broadcast({ type: "machine", machine: m });
       return;
     }
@@ -227,6 +240,16 @@ export class Hub {
           : undefined;
         m.modelsAt = typeof msg.modelsAt === "number" && Number.isFinite(msg.modelsAt) ? msg.modelsAt : undefined;
         m.features = Array.isArray(msg.features) ? [...new Set(msg.features.filter((f) => FEATURES.has(f)))] : undefined;
+        m.kanbanOptions = Array.isArray(msg.kanbanOptions)
+          ? msg.kanbanOptions
+              .filter((o) => typeof o?.path === "string" && o.path.length <= MAX_PATH && (o.github === undefined || typeof o.github === "string"))
+              .map((o) => ({ path: o.path, ...(o.github ? { github: o.github } : {}) }))
+          : undefined;
+        this.broadcast({ type: "machine", machine: m });
+        break;
+      case "kanban":
+        if (!Array.isArray(msg.board?.cards) || !Array.isArray(msg.board.errors)) break;
+        m.kanban = msg.board;
         this.broadcast({ type: "machine", machine: m });
         break;
       case "command.result": {
@@ -304,6 +327,8 @@ export class Hub {
     if (m) {
       m.connected = false;
       m.lastSeen = Date.now();
+      // Its sessions can no longer be told; the kanban shows the working server as offline instead.
+      m.kanban = undefined;
       this.store.saveMachine(m);
       this.broadcast({ type: "machine", machine: m });
     }
@@ -404,6 +429,19 @@ export class Hub {
         daemon.send({ type: "github.item.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind, number });
         break;
       }
+      case "kanban.watch": {
+        const m = this.machines.get(msg.machine);
+        const paths = kanbanPaths(msg.paths);
+        if (!m || !paths) return;
+        this.store.saveKanbanRepos(m.id, paths);
+        m.kanbanRepos = paths;
+        this.broadcast({ type: "machine", machine: m });
+        if (kanbanReady(m.daemonVersion)) this.daemons.get(m.id)?.send({ type: "kanban.watch", paths });
+        break;
+      }
+      case "kanban.refresh":
+        for (const [id, daemon] of this.daemons) if (kanbanReady(this.machines.get(id)?.daemonVersion)) daemon.send({ type: "kanban.refresh" });
+        break;
       case "notification.read":
         this.store.markRead(msg.ids);
         this.broadcast({ type: "notification.read", ids: msg.ids });

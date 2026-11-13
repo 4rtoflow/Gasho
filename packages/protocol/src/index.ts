@@ -148,6 +148,85 @@ export interface MachineInfo {
    * older than 0.6.0, which can switch the model and carry files, but not the effort level or ultracode.
    */
   features?: InputFeature[];
+  /** The repositories the kanban watches on this machine (their primary checkouts), as chosen on Gasho. */
+  kanbanRepos?: string[];
+  /** The repositories that can be chosen for the kanban (gasho-daemon 0.10.0 or later). */
+  kanbanOptions?: KanbanRepoOption[];
+  /** The kanban of the watched repositories, while gasho-daemon is connected. */
+  kanban?: KanbanBoard;
+}
+
+// ---- kanban: the worktrees and pull requests of the watched repositories, by whose move it is ----
+
+/** The columns, in their order: my move, the agent works, GitHub works (CI), the reviewers' move, done. */
+export type KanbanColumn = "mine" | "agent" | "github" | "review" | "done";
+
+/** Why a card is in its column; Gasho words it, and the next step when the move is mine. */
+export type KanbanReason =
+  | { kind: "agent_waiting"; waitingFor?: string }
+  | { kind: "agent_working" }
+  | { kind: "merged"; pr: number }
+  | { kind: "closed"; pr: number }
+  | { kind: "no_pr" }
+  | { kind: "conflict" }
+  /** `checks`: up to two of them, as "workflow/job". */
+  | { kind: "ci_failed"; checks: string[] }
+  | { kind: "changes_requested"; who: string[] }
+  | { kind: "ci_running"; checks: string[] }
+  | { kind: "draft" }
+  | { kind: "rereview"; who: string[] }
+  | { kind: "approved" }
+  | { kind: "review_waiting" };
+
+/** A Claude Code session working in a card's worktree: any session on the working server, not only Gasho's. */
+export interface KanbanSession {
+  sessionId: string;
+  status: SessionStatus;
+  /** Started by Gasho, so the card can open it. */
+  managed?: boolean;
+}
+
+/** One worktree with its branch's pull request, or an open pull request of mine without a worktree. */
+export interface KanbanCard {
+  /** Unique on its working server. */
+  id: string;
+  /** OWNER/REPO */
+  repo: string;
+  /** The worktree's folder name; "PR #12" for a pull request without a worktree. */
+  label: string;
+  path?: string;
+  branch?: string;
+  /** The repository's primary checkout, shown only while it has an open pull request or a session needs it. */
+  primary?: boolean;
+  /** The pull request's title, or else the branch. */
+  title: string;
+  /** The issue number in the branch name (feat/12-x → 12). */
+  issue?: number;
+  /** The open pull request of the branch, or else its latest closed one. */
+  pr?: { number: number; url: string; state: "open" | "merged" | "closed"; draft?: boolean };
+  /** When the open pull request last changed (ISO 8601). */
+  updatedAt?: string;
+  column: KanbanColumn;
+  reason: KanbanReason;
+  sessions: KanbanSession[];
+}
+
+/** A repository that can be watched: one in the folders Claude Code trusts on the working server. */
+export interface KanbanRepoOption {
+  /** Its primary checkout. */
+  path: string;
+  /** OWNER/REPO on GitHub; absent when its origin is not on GitHub (it cannot be watched). */
+  github?: string;
+}
+
+/** What gasho-daemon read for the kanban. A repository that could not be read keeps its cards as last read. */
+export interface KanbanBoard {
+  cards: KanbanCard[];
+  errors: { repo: string; error: string }[];
+  /** When a repository was last read (ms since the epoch). */
+  updatedAt?: number;
+  /** Reading the repositories now. */
+  checking?: boolean;
 }
 
 /** Something registered with the Gasho server: a browser or a working server. */
@@ -337,7 +416,9 @@ export type DaemonToHub =
       models?: ModelOption[];
       modelsAt?: number;
       features?: InputFeature[];
+      kanbanOptions?: KanbanRepoOption[];
     }
+  | { type: "kanban"; board: KanbanBoard }
   | { type: "command.result"; requestId: string; result: CommandResult }
   | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
   | {
@@ -367,6 +448,10 @@ export type HubToDaemon =
   | { type: "git.graph.get"; requestId: string; sessionId: string; repo?: string }
   | { type: "github.list.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind }
   | { type: "github.item.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
+  /** The repositories the kanban watches (sent after welcome and whenever they change); only kanbanOptions are read. */
+  | { type: "kanban.watch"; paths: string[] }
+  /** Read the watched repositories now, without waiting for the next time. */
+  | { type: "kanban.refresh" }
   | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
@@ -416,6 +501,10 @@ export type ClientToHub =
   /** One issue or pull request of that repository, with its text and conversation. */
   | { type: "github.item.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
   | { type: "notification.read"; ids: string[] }
+  /** Chooses the repositories the kanban watches on a working server (paths from its kanbanOptions). */
+  | { type: "kanban.watch"; machine: string; paths: string[] }
+  /** Has every connected working server read its watched repositories now. */
+  | { type: "kanban.refresh" }
   | ({ requestId: string; machine: string } & SessionCommand);
 
 /** Models a session started from Gasho can switch to, as Claude Code's /model picker lists them. */

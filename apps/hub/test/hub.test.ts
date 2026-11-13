@@ -501,3 +501,22 @@ test("a session's name must be one line of 1 to 60 characters; a fork may leave 
   assert.match(validateCommand({ type: "session.remove", sessionId: "" }) ?? "", /セッションの指定/);
   assert.match(validateCommand({ type: "session.remove", sessionId: 7 } as never) ?? "", /セッションの指定/);
 });
+
+test("the kanban's repositories are kept per working server, sent to its daemon now and after every hello, and a bad list is ignored", () => {
+  const { hub, machineId, machineToken, store } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  assert.deepEqual(d.sent.at(-1), { type: "kanban.watch", paths: [] });
+  const c = fakePeer<HubToClient>("b");
+  hub.onClientConnect(c);
+  hub.onClientMessage(c, { type: "kanban.watch", machine: machineId, paths: ["/home/rg/repos/Gasho", "/home/rg/repos/Gasho"] });
+  assert.deepEqual(d.sent.at(-1), { type: "kanban.watch", paths: ["/home/rg/repos/Gasho"] });
+  hub.onClientMessage(c, { type: "kanban.watch", machine: machineId, paths: ["relative/path"] });
+  assert.deepEqual(d.sent.at(-1), { type: "kanban.watch", paths: ["/home/rg/repos/Gasho"] });
+
+  // After the Gasho server restarts, the daemon gets the same repositories when it says hello again.
+  const again = new Hub(store);
+  const d2 = fakePeer<HubToDaemon>();
+  again.onDaemonMessage(d2, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  assert.deepEqual(d2.sent.at(-1), { type: "kanban.watch", paths: ["/home/rg/repos/Gasho"] });
+});

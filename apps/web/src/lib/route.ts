@@ -16,10 +16,12 @@ export interface SessionPanel {
 export type Route =
   | { name: "home" }
   | { name: "devices" }
+  | { name: "kanban" }
   | { name: "session"; machine: string; sessionId: string; panel?: SessionPanel };
 
 export function parseHash(hash: string): Route {
   if (hash === "#/devices") return { name: "devices" };
+  if (hash === "#/kanban") return { name: "kanban" };
   // …/graph, …/issues, …/pulls (with /<repo>); one issue or pull request: …/issue/<number>, …/pull/<number> (with /<repo>).
   const m = hash.match(/^#\/s\/([^/]+)\/([^/]+)(?:\/(graph|issues|pulls)(?:\/([^/]+))?|\/(issue|pull)\/([1-9]\d{0,8})(?:\/([^/]+))?)?$/);
   if (m?.[1] && m[2]) {
@@ -36,6 +38,7 @@ export function parseHash(hash: string): Route {
 export function hrefOf(r: Route): string {
   if (r.name === "home") return "#/";
   if (r.name === "devices") return "#/devices";
+  if (r.name === "kanban") return "#/kanban";
   const base = `#/s/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.sessionId)}`;
   if (!r.panel) return base;
   // A repository path such as "org/app" is one segment, its slashes encoded.

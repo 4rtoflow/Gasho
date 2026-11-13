@@ -1,10 +1,11 @@
-import { Home, KeyRound, Plus } from "lucide-react";
+import { Home, KeyRound, Plus, SquareKanban } from "lucide-react";
 import { useState, type ReactElement } from "react";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
+import { kanbanCards } from "@/lib/kanban";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { go, useRoute, type SessionPanel } from "@/lib/route";
 import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
@@ -15,6 +16,7 @@ import { GitHubItemPanel } from "@/views/github-item";
 import { GitHubListPanel } from "@/views/github-list";
 import { GraphPanel } from "@/views/graph";
 import { HomeView } from "@/views/home";
+import { KanbanView } from "@/views/kanban";
 import { LaunchDialog } from "@/views/launch";
 import { PairView } from "@/views/pair";
 import { SessionView } from "@/views/session";
@@ -97,10 +99,13 @@ export function App() {
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
   // The sessions of all working servers in one list, the one used last first.
   const sessions = sessionsByLastUse(machines);
+  // The cards whose move is mine.
+  const mine = kanbanCards(machines).filter((c) => c.card.column === "mine").length;
   const sections: SidebarSection[] = [
     {
       items: [
         { id: "home", label: "ホーム", icon: <Home />, badge: unread || undefined },
+        { id: "kanban", label: "カンバン", icon: <SquareKanban />, badge: mine || undefined },
         { id: "devices", label: "端末", icon: <KeyRound /> },
       ],
     },
@@ -131,7 +136,7 @@ export function App() {
         sections={sections}
         activeId={activeId}
         onActiveChange={(id) => {
-          if (id === "home" || id === "devices") return go({ name: id });
+          if (id === "home" || id === "kanban" || id === "devices") return go({ name: id });
           const [machine, sessionId] = id.split(SEP);
           if (machine && sessionId) go({ name: "session", machine, sessionId });
         }}
@@ -156,6 +161,7 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
             {route.name === "home" && <HomeView />}
+            {route.name === "kanban" && <KanbanView />}
             {route.name === "devices" && <DevicesView />}
             {route.name === "session" && (desktop || !panel) && (
               <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} panel={panel} />

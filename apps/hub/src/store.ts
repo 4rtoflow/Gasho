@@ -1,5 +1,6 @@
 // Persists what the Gasho server must remember across restarts: registered devices, pairing codes,
-// the last known sessions of each machine, recent hook events and notifications. Uses node:sqlite.
+// the last known sessions of each machine, the repositories its kanban watches, recent hook events and notifications.
+// Uses node:sqlite.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -15,7 +16,6 @@ import type {
 } from "@gasho/protocol";
 import { hashSecret, newPairingCode, newToken, normalizeCode, PAIRING_CODE_TTL_MS, sameHash } from "./auth.ts";
 
-const SCHEMA_VERSION = 2;
 const EVENT_TTL_MS = 7 * 24 * 3600_000;
 const NOTIFICATION_TTL_MS = 30 * 24 * 3600_000;
 
@@ -48,7 +48,19 @@ export class Store {
 
   private migrate(): void {
     const version = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version);
-    if (version >= SCHEMA_VERSION) return;
+    if (version < 2) this.migrateTo2();
+    if (version < 3) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS kanban_repos (
+          machine_id TEXT PRIMARY KEY,
+          paths TEXT NOT NULL
+        );
+        PRAGMA user_version = 3;
+      `);
+    }
+  }
+
+  private migrateTo2(): void {
     // Version 1 keyed machines (and the events and notifications that point at them) by host name.
     // Nothing from it can be mapped to registered machines, so it is dropped.
     this.db.exec(`
@@ -90,7 +102,7 @@ export class Store {
         data TEXT NOT NULL
       );
       CREATE INDEX notifications_at ON notifications(at);
-      PRAGMA user_version = ${SCHEMA_VERSION};
+      PRAGMA user_version = 2;
     `);
   }
 
@@ -142,6 +154,7 @@ export class Store {
     const res = this.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(now, id);
     if (Number(res.changes) === 0) return false;
     this.db.prepare("DELETE FROM machines WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM kanban_repos WHERE machine_id = ?").run(id);
     return true;
   }
 
@@ -185,8 +198,8 @@ export class Store {
   loadMachines(): MachineInfo[] {
     const rows = this.db
       .prepare(
-        `SELECT d.id, d.name, m.last_seen, m.daemon_version, m.sessions
-         FROM devices d LEFT JOIN machines m ON m.id = d.id
+        `SELECT d.id, d.name, m.last_seen, m.daemon_version, m.sessions, k.paths AS kanban_repos
+         FROM devices d LEFT JOIN machines m ON m.id = d.id LEFT JOIN kanban_repos k ON k.machine_id = d.id
          WHERE d.kind = 'machine' AND d.revoked_at IS NULL ORDER BY d.name`,
       )
       .all() as Row[];
@@ -197,7 +210,15 @@ export class Store {
       lastSeen: r.last_seen == null ? 0 : Number(r.last_seen),
       daemonVersion: r.daemon_version == null ? undefined : String(r.daemon_version),
       sessions: r.sessions == null ? [] : (JSON.parse(String(r.sessions)) as SessionInfo[]),
+      ...(r.kanban_repos == null ? {} : { kanbanRepos: JSON.parse(String(r.kanban_repos)) as string[] }),
     }));
+  }
+
+  /** The repositories (primary checkouts) the kanban watches on a machine. */
+  saveKanbanRepos(machineId: string, paths: string[]): void {
+    this.db
+      .prepare("INSERT INTO kanban_repos (machine_id, paths) VALUES (?, ?) ON CONFLICT(machine_id) DO UPDATE SET paths = excluded.paths")
+      .run(machineId, JSON.stringify(paths));
   }
 
   // ---- events and notifications ----

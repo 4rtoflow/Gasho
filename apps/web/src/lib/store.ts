@@ -376,6 +376,16 @@ export function loadTranscript(machine: string, sessionId: string, older = false
   }
 }
 
+/** Chooses the repositories the kanban watches on a working server. */
+export function watchKanbanRepos(machine: string, paths: string[]): void {
+  send({ type: "kanban.watch", machine, paths });
+}
+
+/** Has every connected working server read its kanban's repositories now. */
+export function refreshKanban(): void {
+  send({ type: "kanban.refresh" });
+}
+
 export function markRead(ids: string[]): void {
   if (ids.length > 0) send({ type: "notification.read", ids });
 }
