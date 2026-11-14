@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/cli.ts run",
     "dev": "node --watch src/cli.ts run",
-    "hooks:print": "node src/cli.ts hooks print"
+    "hooks:print": "node src/cli.ts hooks print",
+    "pack": "node scripts/pack.ts"
   },
   "dependencies": {
     "@gasho/protocol": "*"
