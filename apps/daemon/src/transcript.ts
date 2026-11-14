@@ -4,7 +4,12 @@ import fs from "node:fs/promises";
 import type { EffortLevel, PrLink, TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { clip, inputSummary, str } from "./util.ts";
 
-const MAX_TEXT = 4000;
+/**
+ * What Claude and the person wrote is sent whole: an answer with diagrams and tables runs to 9,000 characters, and a
+ * message sent from Gasho to 20,000. The limit only stops a runaway text: the screen loads 80 entries at a time, and
+ * 80 texts this long still fit in the WebSocket's 16 MB.
+ */
+const MAX_TEXT = 40000;
 const MAX_TOOL = 2000;
 /** A compaction's summary is long (10,000 to 25,000 characters) and is read only when its fold is opened. */
 const MAX_SUMMARY = 40000;
