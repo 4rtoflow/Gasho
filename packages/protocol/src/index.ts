@@ -1,8 +1,31 @@
 // Data shapes and messages shared by gasho-daemon, gasho-hub and gasho-web.
 // This package contains types only, so every import of it must be `import type`.
 
-/** Status reported by `claude agents --json`. */
+/**
+ * Status reported by `claude agents --json`. Claude Code reports "busy" also after Claude's turn has ended while work
+ * it started runs on in the background; gasho-daemon reports "idle" when only shells and monitors run on then (see
+ * SessionInfo.background).
+ */
 export type SessionStatus = "busy" | "waiting" | "idle" | "unknown";
+
+/** What a background task is: a shell command, a monitor (a command whose output wakes Claude), a subagent, a workflow. */
+export type BackgroundTaskKind = "shell" | "monitor" | "agent" | "workflow";
+
+/**
+ * Work that Claude Code runs in the background for a session (a tool called with `run_in_background`, a monitor, a
+ * subagent, a workflow). It runs on after Claude's turn has ended, until it finishes or is stopped.
+ */
+export interface BackgroundTask {
+  /** Claude Code's id for it (a shell's task id, a subagent's agentId). */
+  id: string;
+  kind: BackgroundTaskKind;
+  /** What it is for: the description Claude gave it, or else what it runs. */
+  title: string;
+  /** Shells and monitors: the command. */
+  command?: string;
+  /** When Claude started it (ms). */
+  startedAt?: number;
+}
 
 /**
  * How the session is reachable from the official apps.
@@ -94,6 +117,12 @@ export interface SessionInfo {
    * answered from Gasho (`permission.answer`), or in the terminal or the official apps, which removes them here.
    */
   permissionRequests?: PermissionRequestInfo[];
+  /**
+   * Work Claude Code runs in the background for the session, oldest first, as its transcript records it; absent when
+   * none runs, and from a gasho-daemon that does not read it. Sessions started from Gasho can stop it
+   * (`session.stopTask`).
+   */
+  background?: BackgroundTask[];
 }
 
 /** A permission Claude Code asks for before using a tool. */
@@ -800,7 +829,16 @@ export type SessionCommand =
       /** Sent by a plugin (its id), for the operations log. */
       via?: string;
     }
+  /**
+   * Stops Claude's turn (Esc). When the turn has ended and Claude waits only for its subagents and workflows in the
+   * background, stops those instead (Claude Code's "stop background agents").
+   */
   | { type: "session.interrupt"; sessionId: string }
+  /**
+   * Stops work running in the background in a session started from Gasho: the task `taskId` (one of its `background`),
+   * or without it, all of them. Done in Claude Code's list of background tasks, as when stopped there by hand.
+   */
+  | { type: "session.stopTask"; sessionId: string; taskId?: string }
   /**
    * Renames a session started from Gasho: in Gasho at once, and in Claude Code with `/rename` (also the name in the
    * official apps), typed like an input once the session is idle.

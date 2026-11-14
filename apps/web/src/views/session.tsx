@@ -1,6 +1,7 @@
 import { ArrowLeft, ExternalLink, FolderOpen, GitBranch, GitPullRequest } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { CommandResult, InputFeature, MachineInfo, SessionInfo, SessionModel } from "@gasho/protocol";
+import { BackgroundTasks } from "@/components/background-tasks";
 import { RepoPicker } from "@/components/repo-picker";
 import { EffortPicker, UltracodeToggle } from "@/components/session-controls";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
@@ -392,13 +393,17 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
         : undefined;
 
   const stop = async () => {
-    const r = await sendCommand(machine.id, { type: "session.interrupt", sessionId: s.sessionId });
+    // While Claude only waits for its subagents, stopping goes through Claude Code's list of background tasks, one at a
+    // time: a little longer than the Gasho server waits.
+    const r = await sendCommand(machine.id, { type: "session.interrupt", sessionId: s.sessionId }, 70_000);
     if (!r.ok) setError(r.error);
+    else if (r.warning) setWarning(r.warning);
   };
 
   return (
     <div>
       <PermissionRequests machine={machine} session={s} />
+      <BackgroundTasks machine={machine} session={s} />
       <PromptInput
         onSend={async ({ text, files }) => {
           setError(undefined);
