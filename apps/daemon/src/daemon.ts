@@ -30,7 +30,7 @@ import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { isInside, statusLineLaunch, statusLineOf, userStatusLine } from "./statusline.ts";
 import { HubClient } from "./hub-client.ts";
-import { answersMessage, OPEN_QUESTION, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
+import { answersMessage, dialogCall, OPEN_DIALOG, OPEN_QUESTION, openPermissionRequest, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
 import {
   atBottom,
   bannerModel,
@@ -38,6 +38,7 @@ import {
   cleanEnv,
   clearPromptKeys,
   dialogOpen,
+  permissionDialog,
   EFFORT_LEVELS,
   forkName,
   isAlive,
@@ -586,7 +587,7 @@ export class Daemon {
           name: m?.name ?? t.info.name,
           managed: m ? true : undefined,
           pendingInputs: pending || undefined,
-          permissionRequests: this.permissions.of(t.info.sessionId) ?? this.openQuestion(t),
+          permissionRequests: this.permissions.of(t.info.sessionId) ?? this.openQuestion(t) ?? this.openPermission(t),
         };
       })
       .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
@@ -954,6 +955,10 @@ export class Daemon {
             case "permission.answer": {
               if (m.permissionId.startsWith(OPEN_QUESTION)) {
                 result = await this.answerQuestion(m);
+                break;
+              }
+              if (m.permissionId.startsWith(OPEN_DIALOG)) {
+                result = await this.answerDialog(m);
                 break;
               }
               const error = this.permissions.answer(m.sessionId, m.permissionId, m.decision, { answers: m.answers, mode: m.mode, message: m.message });
@@ -2151,6 +2156,54 @@ export class Daemon {
     this.scheduleRefresh(500);
     this.emitSessions();
     log(`${s.name}: closed Claude's question${message ? "; the answers go as the next message" : ""}`);
+    return { ok: true, ...(message ? { queued: true } : {}) };
+  }
+
+  /**
+   * A permission dialog that gasho-daemon holds no hook for (see openPermissionRequest): shown from the transcript
+   * while a session started from Gasho waits on a permission prompt.
+   */
+  private openPermission(t: Tracked): PermissionRequestInfo[] | undefined {
+    if (t.info.status !== "waiting" || t.info.waitingFor !== "permission prompt" || !this.managed.has(t.info.sessionId)) return undefined;
+    const c = dialogCall(t.meta.openCalls);
+    return c ? [openPermissionRequest(c)] : undefined;
+  }
+
+  /**
+   * Answers a permission shown from the transcript (see openPermission) with the keys of Claude Code's dialog: "allow"
+   * puts the cursor on "Yes" and presses Enter; "deny" presses Esc, as "No" in the terminal: Claude stops, and a
+   * message given goes as the next message. Nothing is pressed unless the session still waits and its screen shows
+   * the dialog.
+   */
+  private async answerDialog(m: Extract<HubToDaemon, { type: "permission.answer" }>): Promise<CommandResult> {
+    const gone: CommandResult = { ok: false, error: "この確認には、すでに答えられています。" };
+    const s = this.managed.get(m.sessionId);
+    const t = this.tracked.get(m.sessionId);
+    const shown = t && this.openPermission(t)?.[0];
+    if (!s || shown?.id !== m.permissionId) return gone;
+    if (m.decision === "always") return { ok: false, error: "この確認では、今後も許可することはできません。" };
+    if ((await this.currentStatus(s.pid)) !== "waiting") return gone;
+    const read = async () => permissionDialog((await this.terminals.screen(s.terminal).catch(() => undefined))?.plain ?? "");
+    let options = await read();
+    const missing: CommandResult = { ok: false, error: "端末に確認の画面が見当たらないため、答えられませんでした。端末か公式アプリで答えてください。" };
+    if (!options) return missing;
+    const message = m.decision === "deny" ? m.message?.trim() : undefined;
+    if (m.decision === "deny") {
+      await this.terminals.keys(s.terminal, "Esc");
+    } else {
+      for (let i = 0; options && !options[0]!.selected && i < options.length; i++) {
+        await this.terminals.keys(s.terminal, "Up");
+        await sleep(150);
+        options = await read();
+      }
+      if (!options?.[0]?.selected) return missing;
+      await this.terminals.keys(s.terminal, "Enter");
+    }
+    this.settleUntil.set(m.sessionId, Date.now() + INTERRUPT_SETTLE_MS);
+    if (message) this.managed.enqueue(m.sessionId, { id: m.requestId, text: message });
+    this.scheduleRefresh(500);
+    this.emitSessions();
+    log(`${s.name}: answered Claude Code's permission dialog (${m.decision}) by its keys`);
     return { ok: true, ...(message ? { queued: true } : {}) };
   }
 }

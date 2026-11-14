@@ -163,6 +163,35 @@ export function openQuestionRequest(q: { toolUseId: string; input: Record<string
   };
 }
 
+/** How the id of a permission shown from the transcript starts (see openPermissionRequest). */
+export const OPEN_DIALOG = "dialog:";
+
+/** Tools whose dialog is not a permission to use them, or that do not ask for one. */
+const NOT_ASKING = new Set(["AskUserQuestion", "ExitPlanMode", "Agent", "Task"]);
+
+/**
+ * The call that Claude Code's permission dialog is about when gasho-daemon holds no hook for it (it restarted while
+ * the dialog was open, or the hook timed out): the latest of the calls without a result, leaving out the tools that
+ * ask nothing (a subagent's call is in its own transcript).
+ */
+export function dialogCall<C extends { name: string }>(calls: C[] | undefined): C | undefined {
+  return calls?.filter((c) => !NOT_ASKING.has(c.name)).at(-1);
+}
+
+/**
+ * That call as a request that Gasho can answer by pressing the keys of Claude Code's dialog. Without the hook,
+ * "allow from now on" is not offered: Claude Code's suggestion of a rule came with the hook.
+ */
+export function openPermissionRequest(c: { toolUseId: string; name: string; input: Record<string, unknown>; at?: number }): PermissionRequestInfo {
+  return {
+    id: `${OPEN_DIALOG}${c.toolUseId}`,
+    toolName: c.name,
+    input: clip(JSON.stringify(c.input, null, 2), MAX_INPUT),
+    summary: inputSummary(c.input, 200),
+    at: c.at ?? 0,
+  };
+}
+
 /**
  * The message that answers Claude's questions once their dialog has been closed: each question (on one line) and its
  * answer, as questionAnswers makes them. Written to Claude on the person's behalf, in the language of Gasho's screens.
