@@ -21,6 +21,7 @@ import type { DaemonConfig } from "./config.ts";
 import { listDir, readFileAt, writeFileAt } from "./files.ts";
 import { cloneRepo, createFolder } from "./folders.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
+import { GitHubProxy } from "./github.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
@@ -74,7 +75,7 @@ import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.13.0";
+export const DAEMON_VERSION = "0.14.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -206,6 +207,7 @@ export class Daemon {
       session: (id) => this.pluginSession(id),
       folders: () => this.folders,
       dataDir: cfg.pluginDataDir,
+      github: new GitHubProxy({ ghBin: cfg.ghBin }),
       enabled: cfg.runPlugins,
       log: (s) => log(s),
     });

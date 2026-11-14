@@ -3,17 +3,19 @@
 // keeps it in its cache, and runs each daemon part in a process of its own (plugin-host.ts). Calls from the plugins'
 // web parts come as "plugin.request" and are answered with "plugin.response". A new version is started beside the
 // old one and takes the calls once it is ready; the old one ends when its calls have (hot reload). What runs is told
-// to the Gasho server with "plugin.status", which also tells it that this gasho-daemon runs plugins at all.
+// to the Gasho server with "plugin.status", which also tells it that this gasho-daemon runs plugins at all. What the
+// daemon parts ask gh for (ctx.github) is run here, by one GitHubProxy for all of them (github.ts).
 import { fork, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DaemonPluginEntry, DaemonPluginStatus, DaemonToHub, HubToDaemon } from "@gasho/protocol";
-import type { FromHost, LocalWire, MachineWire, SessionWire, ToHost } from "./plugin-ipc.ts";
+import type { GitHubProxy } from "./github.ts";
+import type { FromHost, GitHubAnswer, LocalWire, MachineWire, SessionWire, ToHost } from "./plugin-ipc.ts";
 
 /** The plugin API this gasho-daemon runs plugins of. */
-export const PLUGIN_API = "1.1";
+export const PLUGIN_API = "1.2";
 /** The process of a daemon part: next to this file (.ts when run from the repository, .js in the npm package). */
 const HOST_FILE = fileURLToPath(new URL(`./plugin-host${path.extname(fileURLToPath(import.meta.url))}`, import.meta.url));
 /** How long a new process may take to import the plugin and run its `start`. */
@@ -34,6 +36,7 @@ const CODE_MS = 30_000;
 
 const NOT_RUNNING = "このプラグインは、この working server では動いていません。";
 const FAILED = "処理に失敗しました。詳しくは、working server の gasho-daemon のログを見てください。";
+const READ_ONLY = "GitHub を変える操作（ctx.github.write）は、gasho-plugin.json の kind が write のメソッドの中でだけできます。";
 
 type Answer = { ok: true; data?: unknown } | { ok: false; error: string; user: boolean };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -42,7 +45,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 class HostProcess {
   readonly hash: string;
   private child: ChildProcess;
-  private calls = new Map<number, { resolve: (a: Answer) => void; timer: NodeJS.Timeout }>();
+  private calls = new Map<number, { resolve: (a: Answer) => void; timer: NodeJS.Timeout; write: boolean }>();
   private nextId = 1;
   private exitCode: number | null | undefined;
   private exitWaiters: (() => void)[] = [];
@@ -50,7 +53,14 @@ class HostProcess {
   /** Called once when the process ends. */
   onExit: (code: number | null) => void = () => undefined;
 
-  constructor(id: string, hash: string, codeFile: string, init: { machine: MachineWire; settings: Record<string, unknown>; local: LocalWire }, log: (s: string) => void) {
+  constructor(
+    id: string,
+    hash: string,
+    codeFile: string,
+    init: { machine: MachineWire; settings: Record<string, unknown>; local: LocalWire },
+    github: Pick<GitHubProxy, "read" | "write">,
+    log: (s: string) => void,
+  ) {
     this.hash = hash;
     this.child = fork(HOST_FILE, [codeFile], {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -86,6 +96,8 @@ class HostProcess {
           clearTimeout(c.timer);
           this.calls.delete(m.id);
           c.resolve(m.ok ? { ok: true, data: m.data } : { ok: false, error: m.error, user: m.user });
+        } else if (m.t === "github") {
+          void this.gh(m, github).then((a) => this.send({ t: "github.result", id: m.id, ...a }));
         }
       });
       this.child.on("exit", (code) => {
@@ -128,7 +140,28 @@ class HostProcess {
     this.send({ t: "folders", folders });
   }
 
-  call(method: string, params: unknown, session: SessionWire | undefined, settings: Record<string, unknown>, timeoutMs: number): Promise<Answer> {
+  /** Runs what the daemon part asked gh for; a write only in a call of a write method, so that the operations log has it. */
+  private async gh(m: Extract<FromHost, { t: "github" }>, github: Pick<GitHubProxy, "read" | "write">): Promise<GitHubAnswer> {
+    const write = m.write === true;
+    if (write && !(m.call !== undefined && this.calls.get(m.call)?.write)) return { ok: false, error: READ_ONLY, stdout: "", stderr: "", user: true };
+    const ask = { args: m.args, repo: m.repo, maxAgeSeconds: m.maxAgeSeconds, timeoutMs: m.timeoutMs, maxBuffer: m.maxBuffer };
+    try {
+      const r = write ? await github.write(ask) : await github.read(ask);
+      return { ok: true, stdout: r.stdout, stderr: r.stderr };
+    } catch (e) {
+      const err = (e ?? {}) as { message?: unknown; code?: unknown; killed?: unknown; stdout?: unknown; stderr?: unknown };
+      return {
+        ok: false,
+        error: typeof err.message === "string" ? err.message : String(e),
+        ...(typeof err.code === "number" || typeof err.code === "string" ? { code: err.code } : {}),
+        ...(typeof err.killed === "boolean" ? { killed: err.killed } : {}),
+        stdout: typeof err.stdout === "string" ? err.stdout : "",
+        stderr: typeof err.stderr === "string" ? err.stderr : "",
+      };
+    }
+  }
+
+  call(method: string, params: unknown, session: SessionWire | undefined, settings: Record<string, unknown>, timeoutMs: number, write: boolean): Promise<Answer> {
     return new Promise((resolve) => {
       if (!this.alive) {
         resolve({ ok: false, error: NOT_RUNNING, user: true });
@@ -140,7 +173,7 @@ class HostProcess {
         this.send({ t: "abort", id });
         resolve({ ok: false, error: "working server から応答がありません。", user: true });
       }, timeoutMs);
-      this.calls.set(id, { resolve, timer });
+      this.calls.set(id, { resolve, timer, write });
       this.send({ t: "call", id, method, params, ...(session ? { session } : {}), settings });
     });
   }
@@ -205,6 +238,8 @@ export interface PluginRunnerOptions {
   folders: () => string[];
   /** Where each daemon part keeps its own files, one folder per plugin. */
   dataDir: string;
+  /** Runs gh for the daemon parts (ctx.github). */
+  github: Pick<GitHubProxy, "read" | "write">;
   /** False when GASHO_PLUGINS=none: no daemon part runs here. */
   enabled: boolean;
   log: (s: string) => void;
@@ -278,7 +313,7 @@ export class PluginRunner {
     if (typeof proc === "string") return reply({ error: proc });
     slot.running++;
     try {
-      const a = await proc.call(m.method, m.params, session, slot.entry.settings, timeoutMs);
+      const a = await proc.call(m.method, m.params, session, slot.entry.settings, timeoutMs, m.write === true);
       if (a.ok) reply({ result: a.data });
       else {
         if (!a.user) this.opts.log(`plugin ${slot.id}: ${m.method} failed: ${a.error}`);
@@ -359,7 +394,7 @@ export class PluginRunner {
     }
     if (slot.entry.hash !== hash || !slot.entry.run || slot.starting?.hash === hash) return;
     const local = { folders: this.opts.folders(), dataDir };
-    const proc = new HostProcess(slot.id, hash, file, { machine: this.opts.machine(), settings: slot.entry.settings, local }, this.opts.log);
+    const proc = new HostProcess(slot.id, hash, file, { machine: this.opts.machine(), settings: slot.entry.settings, local }, this.opts.github, this.opts.log);
     const before = slot.starting;
     slot.starting = proc;
     void before?.stop();

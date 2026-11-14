@@ -15,7 +15,7 @@ Gasho は、Mac と Ubuntu Server で動く Claude Code のセッションと、
 - 利用者は自分1人で、自分のマシンだけを対象にする
 - 各 working server では `claude rc` を使い、Claude Desktop とスマホのアプリからセッションを操作している。Gasho は公式アプリを置き換えず、並べて使う
 - Anthropic の非公開 API と認証情報には触れない。Claude Code は、CLI、hooks、トランスクリプトといった公式の手段だけで扱う
-- GitHub の情報は見るだけにする。GitHub での操作は rc 上の Agent が行い、Gasho は GitHub のページへのリンクを出す
+- Gasho の本体は、GitHub の情報を見るだけにする。GitHub での操作は rc 上の Agent が行い、Gasho は GitHub のページへのリンクを出す。GitHub を変える操作（assign、コメントなど）は、プラグインで足せる（[プラグインの仕様](plugins.md)の「GitHub を読む・変える」）
 - Gasho サーバーは、同じマシンと同じ LAN の中からだけ使う。外から使う必要が出たときは、Tailscale などを導入する。Cloudflare Tunnel と Cloudflare Access も検討したが、LAN を基本にする方針にしたので採らなかった
 
 ## 機能

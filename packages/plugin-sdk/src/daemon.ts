@@ -58,6 +58,46 @@ export interface ExecError extends Error {
   stderr: string;
 }
 
+export interface GitHubReadOptions {
+  /**
+   * How old an answer gasho-daemon kept for the same arguments may be, in seconds: 30 by default, at most 600. With 0,
+   * gh runs again (still once for those asking the same at the same time).
+   */
+  maxAgeSeconds?: number;
+  /**
+   * The repository the answer is about (owner/name), when the arguments do not name it with --repo (-R) or as the path
+   * of `gh api repos/<owner>/<name>/…`. A write to the repository drops the answer; one whose repository is not known
+   * is dropped by any write.
+   */
+  repo?: string;
+  /** Stopped after this long; 30 s by default, at most 120 s. */
+  timeoutMs?: number;
+  /** Output kept per stream, in bytes; 8 MB by default, at most 32 MB. More fails the command. */
+  maxBuffer?: number;
+}
+
+export interface GitHubWriteOptions {
+  /** The repository it changes (owner/name): what gasho-daemon kept of it is dropped, so the next read runs gh. */
+  repo: string;
+  timeoutMs?: number;
+  maxBuffer?: number;
+}
+
+/**
+ * The GitHub CLI (gh) of the working server, run by gasho-daemon for every plugin (plugin API 1.2). Give the arguments
+ * of gh, without "gh"; there is no folder or environment of the plugin's own, so name the repository with --repo. It
+ * answers and fails as exec does.
+ */
+export interface DaemonGitHub {
+  /** Reads: answered from what gh said for the same arguments when that is new enough. */
+  read(args: string[], options?: GitHubReadOptions): Promise<ExecResult>;
+  /**
+   * Changes GitHub (assign, comment, …). Only in a method whose kind is "write" (gasho-plugin.json), so that the
+   * operations log has it; elsewhere it fails with a PluginError.
+   */
+  write(args: string[], options: GitHubWriteOptions): Promise<ExecResult>;
+}
+
 /** What a method gets besides its params. */
 export interface DaemonContext {
   machine: { id: string; name: string };
@@ -82,6 +122,8 @@ export interface DaemonContext {
    * that gh and git fail rather than wait for input.
    */
   exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
+  /** gh, run by gasho-daemon: use this rather than exec("gh", …) (plugin API 1.2). */
+  github: DaemonGitHub;
   /** Writes to gasho-daemon's log, with the plugin's id. */
   log(...args: unknown[]): void;
 }

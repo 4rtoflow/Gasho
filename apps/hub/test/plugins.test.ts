@@ -194,6 +194,7 @@ test("calls of a plugin are relayed to the working server and the answer goes ba
   assert.equal(relayed.sessionId, "s1");
   assert.deepEqual(relayed.params, { a: 1 });
   assert.equal(relayed.timeoutMs, 15_000);
+  assert.equal(relayed.write, undefined);
   hub.onDaemonMessage(daemon, { type: "plugin.response", requestId: relayed.requestId, result: { hello: "world" } });
   assert.deepEqual(answer("r2"), { type: "plugin.response", requestId: "r2", result: { hello: "world" } });
 
@@ -202,9 +203,11 @@ test("calls of a plugin are relayed to the working server and the answer goes ba
   call("greet", { requestId: "r-big", params: "x".repeat(70_000) });
   assert.match((answer("r-big") as { error?: string }).error ?? "", /大きすぎ/);
 
-  // A write is recorded in the operations log.
+  // A write is recorded in the operations log, and gasho-daemon is told it is one: only it may change GitHub.
   call("save", { summary: "メモを保存" });
   assert.ok(store.recentEvents().some((e) => e.event === "Gasho:plugin.call" && e.summary?.includes("メモを保存")));
+  const save = daemon.sent.filter((m) => m.type === "plugin.request").at(-1);
+  assert.ok(save?.type === "plugin.request" && save.method === "save" && save.write === true);
 
   // Disabled, or not chosen for this working server.
   hub.onClientMessage(client, { type: "plugin.enable", requestId: "e1", plugin: "hello", enabled: false });
