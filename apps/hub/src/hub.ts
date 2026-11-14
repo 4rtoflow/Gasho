@@ -268,6 +268,10 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
       if (cmd.subfolders !== undefined && typeof cmd.subfolders !== "boolean") return "中のフォルダーの指定が正しくありません。";
       return undefined;
+    case "repo.register":
+    case "repo.unregister":
+      if (typeof cmd.path !== "string" || !cmd.path.startsWith("/") || cmd.path.length > 1024) return "フォルダーを絶対パスで指定してください。";
+      return undefined;
     case "session.rename":
       return nameError(cmd.name, true);
     case "session.fork":
@@ -380,6 +384,10 @@ export class Hub {
         m.modelsAt = typeof msg.modelsAt === "number" && Number.isFinite(msg.modelsAt) ? msg.modelsAt : undefined;
         m.features = Array.isArray(msg.features) ? [...new Set(msg.features.filter((f) => FEATURES.has(f)))] : undefined;
         m.canResume = msg.canResume === true || undefined;
+        this.broadcast({ type: "machine", machine: m });
+        break;
+      case "repos":
+        m.repos = Array.isArray(msg.repos) ? msg.repos : [];
         this.broadcast({ type: "machine", machine: m });
         break;
       case "command.result": {
@@ -561,6 +569,8 @@ export class Hub {
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
+      case "repo.register":
+      case "repo.unregister":
       case "file.write": {
         const { requestId: clientRequestId, machine, ...cmd } = msg;
         this.relayCommand(peer, clientRequestId, machine, cmd);
@@ -601,6 +611,8 @@ export class Hub {
       "permission.answer": REQUEST_TIMEOUT_MS,
       "folder.create": REQUEST_TIMEOUT_MS,
       "repo.clone": CLONE_TIMEOUT_MS,
+      "repo.register": REQUEST_TIMEOUT_MS,
+      "repo.unregister": REQUEST_TIMEOUT_MS,
       "file.write": REQUEST_TIMEOUT_MS,
     }[cmd.type];
     const timer = setTimeout(() => {
@@ -616,7 +628,7 @@ export class Hub {
    * The audit log's words for a command: an input's text (with what it switches and the names and sizes of its files,
    * never their contents), the folder of a launch (and whether Claude Code was told to trust it), a session's name (the
    * new one for a rename, the copy's for a fork, the removed session's for a removal), the folder made, the
-   * repository cloned and where to, or the file written (its path from the session's folder and its size, never what
+   * repository cloned and where to, the folder of a repository registered or taken off, or the file written (its path from the session's folder and its size, never what
    * was written; "[new]" when it was made).
    */
   private summaryOf(machine: string, cmd: SessionCommand): string {
@@ -640,6 +652,9 @@ export class Hub {
         return path.posix.join(cmd.parent, cmd.name);
       case "repo.clone":
         return `${cmd.repo} → ${cmd.name ? path.posix.join(cmd.parent, cmd.name) : cmd.parent}`;
+      case "repo.register":
+      case "repo.unregister":
+        return cmd.path.slice(0, 300);
       case "session.rename":
         return cmd.name.trim();
       case "session.fork":
@@ -678,6 +693,10 @@ export class Hub {
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
     const m = this.machines.get(machine);
     if (cmd.type === "file.write") return !m || versionAtLeast(m.daemonVersion, ...FILES_SINCE) ? undefined : FILES_TOO_OLD;
+    if (cmd.type === "repo.register" || cmd.type === "repo.unregister") {
+      // A gasho-daemon that registers repositories sends them as soon as it connects.
+      return !m?.connected || m.repos ? undefined : "この working server の gasho-daemon は古いため、リポジトリを登録できません。gasho-daemon を更新してください。";
+    }
     if (cmd.type === "session.history" || cmd.type === "session.resume") {
       return !m || m.canResume ? undefined : "この working server の gasho-daemon は古いため、過去の会話を一覧にも開き直しもできません。gasho-daemon を更新してください。";
     }

@@ -13,6 +13,7 @@ import type {
   InputFile,
   ModelOption,
   PermissionRequestInfo,
+  RegisteredRepo,
   SessionInfo,
   SessionModel,
   SessionRepo,
@@ -94,6 +95,7 @@ import {
   sessionStatus,
 } from "./sessions.ts";
 import { SessionTerminals, Terminals } from "./terminal.ts";
+import { RegisteredRepos } from "./repos.ts";
 import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
@@ -104,6 +106,8 @@ const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the worktree a folder is in, or the repositories inside it, and their branches are reused. */
 const REPOS_CACHE_MS = 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
+/** How often the registered repositories' worktrees are read again: one may be made or removed elsewhere (Orca, git). */
+const REGISTERED_REFRESH_MS = 10_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
 /** A fork: how long Claude Code may take to show its prompt box once it runs, and then to write the copy's transcript. */
 const FORK_READY_MS = 15_000;
@@ -215,6 +219,11 @@ export class Daemon {
   private permissions = new PermissionRequests(() => this.emitSessions());
   private canLaunch = false;
   private folders: string[] = [];
+  private registered: RegisteredRepos;
+  private registeredRepos: RegisteredRepo[] = [];
+  private reposSent = "";
+  /** Counts the reads of the registered repositories: a read that a later one overtook is not sent. */
+  private reposRead = 0;
   private flushing = new Set<string>();
   /** Sessions whose /rename to the name from the first message was sent, until Claude Code records it (nameAfterTitle). */
   private titleSent = new Set<string>();
@@ -241,6 +250,7 @@ export class Daemon {
     this.enterWaitMs = opts.enterWaitMs ?? ENTER_WAIT_MS;
     this.terminals = new SessionTerminals(new Terminals({ stateDir: cfg.stateDir, env: cleanEnv() }), new Zellij(cleanEnv()));
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
+    this.registered = new RegisteredRepos(path.join(cfg.stateDir, "repos.json"));
     this.plugins = new PluginRunner({
       cacheDir: cfg.pluginCacheDir,
       send: (m) => this.hub.send(m),
@@ -257,8 +267,10 @@ export class Daemon {
       hello: () => ({ type: "hello", machineId: cfg.machineId, token: cfg.token, daemonVersion: DAEMON_VERSION }),
       onReady: () => {
         this.lastSent = "";
+        this.reposSent = "";
         this.emitSessions();
         this.emitCapabilities();
+        this.emitRepos();
         // Also tells the Gasho server that this gasho-daemon runs plugins.
         this.plugins.status(true);
       },
@@ -301,6 +313,9 @@ export class Daemon {
       .catch(() => undefined);
     await this.refreshFolders();
     setInterval(() => void this.refreshFolders(), FOLDERS_REFRESH_MS).unref();
+    await this.registered.load();
+    await this.refreshRepos();
+    setInterval(() => void this.refreshRepos(), REGISTERED_REFRESH_MS).unref();
 
     this.hub.connect();
     startHookServer({
@@ -590,6 +605,34 @@ export class Daemon {
     this.plugins.foldersChanged();
   }
 
+  private async refreshRepos(): Promise<void> {
+    const read = ++this.reposRead;
+    const repos = await this.registered.read();
+    if (read !== this.reposRead) return;
+    this.registeredRepos = repos;
+    this.emitRepos();
+  }
+
+  private emitRepos(): void {
+    const json = JSON.stringify(this.registeredRepos);
+    if (json === this.reposSent || !this.hub.connected) return;
+    this.reposSent = json;
+    this.hub.send({ type: "repos", repos: this.registeredRepos });
+  }
+
+  private async registerRepo(dir: string): Promise<CommandResult> {
+    const r = await this.registered.register(path.resolve(dir));
+    if ("error" in r) return { ok: false, error: r.error };
+    await this.refreshRepos();
+    return { ok: true, path: r.path };
+  }
+
+  private async unregisterRepo(repo: string): Promise<CommandResult> {
+    await this.registered.unregister(repo);
+    await this.refreshRepos();
+    return { ok: true };
+  }
+
   private emitCapabilities(): void {
     if (!this.hub.connected) return;
     this.hub.send({
@@ -875,6 +918,8 @@ export class Daemon {
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
+      case "repo.register":
+      case "repo.unregister":
       case "file.write": {
         let result: CommandResult;
         try {
@@ -920,6 +965,12 @@ export class Daemon {
               break;
             case "repo.clone":
               result = await this.cloneRepo(m.parent, m.repo, m.name);
+              break;
+            case "repo.register":
+              result = await this.registerRepo(m.path);
+              break;
+            case "repo.unregister":
+              result = await this.unregisterRepo(m.path);
               break;
             case "file.write":
               result = await this.writeFile(m);

@@ -4,7 +4,19 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { findRepos, nestedRepos, parseGitHubUrl, parseLog, parseRefs, parseStatus, parseTrack, readGitGraph, worktreeOf } from "../src/git.ts";
+import {
+  findRepos,
+  listWorktrees,
+  nestedRepos,
+  parseGitHubUrl,
+  parseLog,
+  parseRefs,
+  parseStatus,
+  parseTrack,
+  readGitGraph,
+  worktreeOf,
+} from "../src/git.ts";
+import { RegisteredRepos } from "../src/repos.ts";
 
 test("parseGitHubUrl handles https, ssh and credentials, and rejects other hosts", () => {
   assert.deepEqual(parseGitHubUrl("https://github.com/4rtoflow/Gasho.git\n"), {
@@ -152,7 +164,7 @@ test("nestedRepos lists the repositories inside a folder that is not one, with t
   }
 });
 
-test("worktreeOf gives every worktree of a repository the same repository, from any folder inside them", async () => {
+test("worktreeOf gives every worktree of a repository the same repository, listWorktrees names them the same way, and their folder registers it", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-wt-"));
   // macOS's temporary folder is reached through a symbolic link (/var → /private/var); git names the real folders.
   const real = fs.realpathSync(dir);
@@ -169,6 +181,9 @@ test("worktreeOf gives every worktree of a repository the same repository, from 
     run(dir, "clone", "--bare", main, bare);
     run(bare, "worktree", "add", path.join(dir, "lib-main"), "main");
     fs.mkdirSync(path.join(dir, "notes"));
+    // A worktree whose folder was deleted without git (prunable).
+    run(main, "worktree", "add", "-b", "gone", path.join(dir, "app-gone"));
+    fs.rmSync(path.join(dir, "app-gone"), { recursive: true });
 
     const repo = path.join(real, "app");
     assert.deepEqual(await worktreeOf(path.join(main, "src")), { path: repo, repo, branch: "main" });
@@ -181,6 +196,25 @@ test("worktreeOf gives every worktree of a repository the same repository, from 
       branch: "main",
     });
     assert.equal(await worktreeOf(path.join(dir, "notes")), undefined);
+
+    // The sidebar puts a registered repository's worktree and the sessions in it in one row only if both name it alike.
+    assert.deepEqual(await listWorktrees(repo), [
+      { path: repo, branch: "main" },
+      { path: path.join(real, "app-detached") },
+      { path: path.join(real, "app-x"), branch: "feat/x" },
+    ]);
+    assert.deepEqual(await listWorktrees(path.join(real, "lib.git")), [{ path: path.join(real, "lib-main"), branch: "main" }]);
+
+    // A folder that a repository and its worktrees are kept side by side in registers that repository; one that holds
+    // several repositories registers none.
+    const group = path.join(dir, "group");
+    fs.mkdirSync(path.join(group, "docs"), { recursive: true });
+    run(group, "clone", main, "web");
+    run(path.join(group, "web"), "worktree", "add", "-b", "feat/y", path.join(group, "web-y"));
+    const registered = new RegisteredRepos(path.join(dir, "state", "repos.json"));
+    assert.deepEqual(await registered.register(group), { path: path.join(real, "group", "web") });
+    const mixed = await registered.register(dir);
+    assert.ok("error" in mixed && mixed.error.includes("別々のリポジトリが 2 個あります（app、lib）"));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

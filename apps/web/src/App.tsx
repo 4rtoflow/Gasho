@@ -4,18 +4,23 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type R
 import type { SessionStatus } from "@gasho/protocol";
 import { ResizeHandle } from "@/components/resize-handle";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
+import { RepoFilter } from "@/components/repo-filter";
+import { ReposDialog } from "@/components/repos-dialog";
 import { SessionActionDialog, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
+import { useChoice } from "@/lib/flag";
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery, useWindowWidth } from "@/lib/media";
-import { arrangeSessions, rememberSessions, useSavedOrder } from "@/lib/order";
+import { arrangeSessions, rememberSessions, reorderShown, useSavedOrder } from "@/lib/order";
 import { updateCount } from "@/lib/plugin-catalog";
 import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
 import { rememberWorktrees, useRememberedWorktrees } from "@/lib/remembered-worktrees";
 import {
   notificationShown,
   rememberedOf,
+  repoChoices,
+  repoKeyOf,
   sessionToOpen,
   worktreeId,
   worktreeKey,
@@ -38,8 +43,9 @@ import { SessionState, SessionView } from "@/views/session";
 import { SettingsView } from "@/views/settings";
 import { WorktreeView } from "@/views/worktree";
 
-/** Where this browser keeps the order the sidebar's worktrees were dragged into. */
+/** Where this browser keeps the order the sidebar's worktrees were dragged into, and the repository they are narrowed to. */
 const WORKTREE_ORDER_KEY = "gasho.worktreeOrder";
+const WORKTREE_REPO_KEY = "gasho.worktreeRepo";
 
 /** A worktree's status in the sidebar: that of its most pressing session. */
 function worktreeStatus(w: WorktreeSessions): SessionStatus {
@@ -147,6 +153,9 @@ export function App() {
   const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
   // The dialog that starts a new session, opened from the "＋" of the sidebar's worktree list.
   const [launchOpen, setLaunchOpen] = useState(false);
+  // The dialog that registers repositories, opened from the menu that narrows the sidebar's worktrees.
+  const [reposOpen, setReposOpen] = useState(false);
+  const [repoKey, setRepoKey] = useChoice(WORKTREE_REPO_KEY);
   // The order the sidebar's worktrees were dragged into (none: the one used last first).
   const [worktreeOrder, setWorktreeOrder] = useSavedOrder(WORKTREE_ORDER_KEY);
   const desktop = useMediaQuery(DESKTOP);
@@ -155,7 +164,7 @@ export function App() {
   const badges = usePluginBadges();
   // Every worktree with sessions is kept, so that it stays in the sidebar once they are gone.
   const remembered = useRememberedWorktrees();
-  useEffect(() => rememberWorktrees(worktreesByLastUse(machines).map(rememberedOf)), [machines]);
+  useEffect(() => rememberWorktrees(worktreesByLastUse(machines).flatMap((w) => (w.sessions.length > 0 ? [rememberedOf(w)] : []))), [machines]);
 
   if (auth === "checking") return <Centered>読み込み中…</Centered>;
   if (auth === "unreachable") return <Centered>Gasho サーバーにつながりません。再試行しています…</Centered>;
@@ -166,6 +175,10 @@ export function App() {
   // order they were dragged into (worktrees that got their first session since then come first).
   const byId = new Map(worktreesByLastUse(machines, remembered).map((w) => [w.id, w]));
   const worktrees = arrangeSessions([...byId.keys()], worktreeOrder).flatMap((id) => byId.get(id) ?? []);
+  // Narrowed to one repository, while it is in the list (it may come back: its working server reconnects, say).
+  const repos = repoChoices(worktrees);
+  const narrowed = repos.find((r) => r.key === repoKey);
+  const listed = narrowed ? worktrees.filter((w) => repoKeyOf(w) === narrowed.key) : worktrees;
   // The plugins' sidebar items: between ホーム and 端末, in the plugins' order. Each opens a page of its plugin.
   const pluginItems = parts.flatMap(({ info, def }) =>
     (def.sidebar ?? []).map((item) => {
@@ -187,13 +200,24 @@ export function App() {
     },
     {
       // Shown even without sessions, for its "＋".
-      title: "worktree",
+      title: narrowed ? `worktree · ${narrowed.name}` : "worktree",
       action: { label: "新しいセッション", icon: <Plus />, onClick: () => setLaunchOpen(true) },
       secondaryAction: worktreeOrder
         ? { label: "最後に使った順に戻す", icon: <ListRestart />, onClick: () => setWorktreeOrder(undefined) }
         : undefined,
-      sort: { onReorder: (ids) => setWorktreeOrder(rememberSessions(ids, worktreeOrder)) },
-      items: worktrees.map((w) => ({
+      tools: (
+        <RepoFilter
+          choices={repos}
+          picked={narrowed}
+          onPick={setRepoKey}
+          onRegister={() => setReposOpen(true)}
+          machineNames={machines.length > 1}
+        />
+      ),
+      sort: {
+        onReorder: (ids) => setWorktreeOrder(rememberSessions(reorderShown(worktrees.map((w) => w.id), ids), worktreeOrder)),
+      },
+      items: listed.map((w) => ({
         id: w.id,
         label: w.label,
         // The working server too, when there are several.
@@ -299,6 +323,7 @@ export function App() {
       <PluginBadgeProbes />
       <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} />
       <LaunchDialog open={launchOpen} onClose={() => setLaunchOpen(false)} onLaunched={() => setMobileOpen(false)} />
+      <ReposDialog open={reposOpen} onClose={() => setReposOpen(false)} />
     </div>
   );
 }

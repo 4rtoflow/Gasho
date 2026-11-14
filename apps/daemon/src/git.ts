@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { GitBranch, GitCommit, GitGraph, GitHubRepo, GitRef, SessionRepo, SessionWorktree } from "@gasho/protocol";
+import type { GitBranch, GitCommit, GitGraph, GitHubRepo, GitRef, RepoWorktree, SessionRepo, SessionWorktree } from "@gasho/protocol";
 
 const execFileP = promisify(execFile);
 
@@ -135,6 +135,28 @@ export async function worktreeOf(cwd: string): Promise<SessionWorktree | undefin
   if (!shared) return undefined;
   const branch = await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).then((s) => s.trim() || undefined, () => undefined);
   return { path: top, repo: path.basename(shared) === ".git" ? path.dirname(shared) : shared, ...(branch ? { branch } : {}) };
+}
+
+/**
+ * The worktrees in `git worktree list --porcelain`, with their folders as git recorded them. A bare repository has no
+ * folder to work in, and a prunable worktree's folder is gone: both are left out.
+ */
+export function parseWorktreeList(out: string): RepoWorktree[] {
+  return out.split(/\n\n+/).flatMap((block) => {
+    const lines = block.split("\n");
+    const top = lines.find((l) => l.startsWith("worktree "))?.slice("worktree ".length);
+    if (!top || lines.some((l) => l === "bare" || l === "prunable" || l.startsWith("prunable "))) return [];
+    const branch = lines.find((l) => l.startsWith("branch refs/heads/"))?.slice("branch refs/heads/".length);
+    return [{ path: top, ...(branch ? { branch } : {}) }];
+  });
+}
+
+/** The worktrees of the repository whose folder is `repo`, the main one first, named as worktreeOf names them. */
+export async function listWorktrees(repo: string): Promise<RepoWorktree[]> {
+  const listed = parseWorktreeList(await git(repo, ["worktree", "list", "--porcelain"]));
+  // `--show-toplevel` gives the real folder, whatever path git recorded for the worktree; a folder gone meanwhile is left out.
+  const found = await Promise.all(listed.map(async (w) => fs.realpath(w.path).then((top) => ({ ...w, path: top }), () => undefined)));
+  return found.filter((w) => w !== undefined);
 }
 
 // ---- folders that hold several repositories ----

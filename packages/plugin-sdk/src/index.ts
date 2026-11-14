@@ -131,7 +131,10 @@ export interface WorktreeInfo {
   repo?: string;
   /** Its repository on GitHub, if it is there. */
   github?: GitHubRepo;
-  /** Gasho's sessions in it, in the order of their tabs. None for a worktree the sidebar keeps once its sessions are gone. */
+  /**
+   * Gasho's sessions in it, in the order of their tabs. None for a worktree the sidebar keeps once its sessions are gone,
+   * and for a worktree of a registered repository that has none.
+   */
   sessions: SessionInfo[];
 }
 

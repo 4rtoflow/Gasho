@@ -1,5 +1,5 @@
 // Gasho shows only the sessions it started (from its own launcher); others running on a working server are not shown.
-import type { GashoNotification, GitHubRepo, MachineInfo, SessionInfo } from "@gasho/protocol";
+import type { GashoNotification, GitHubRepo, MachineInfo, RegisteredRepo, SessionInfo } from "@gasho/protocol";
 import { basename } from "./format.ts";
 
 export function shownSessions(m: MachineInfo): SessionInfo[] {
@@ -24,11 +24,16 @@ export interface WorktreeSessions {
   path: string;
   /** Whether it is a git worktree, whose sessions may run in the folders inside `path` too. */
   subfolders: boolean;
-  /** What plugins get of it (docs/plugins.md): the branch checked out, the repository's folder, its GitHub repository. */
+  /** A worktree of a repository registered with its working server: it stays in the sidebar while git lists it. */
+  registered: boolean;
+  /**
+   * What plugins get of it (docs/plugins.md): the branch checked out, the repository's folder (SessionWorktree.repo,
+   * which the sidebar is also narrowed by), its GitHub repository.
+   */
   branch?: string;
   repoFolder?: string;
   github?: GitHubRepo;
-  /** In the order they started, which is the order of the tabs. Empty for a worktree this browser remembers. */
+  /** In the order they started, which is the order of the tabs. Empty for one of a registered repository or remembered. */
   sessions: SessionInfo[];
 }
 
@@ -40,6 +45,7 @@ export interface RememberedWorktree {
   repo?: string;
   subfolders: boolean;
   branch?: string;
+  /** Absent for one remembered before the repository's folder was. */
   repoFolder?: string;
   github?: GitHubRepo;
 }
@@ -64,9 +70,14 @@ export function worktreeKey(machine: string, path: string): string {
   return [machine, path].join("\u001f");
 }
 
+/** A repository's name: its GitHub repository's, or its folder's (without ".git", for a bare one). */
+const repoName = (folder: string, github: GitHubRepo | undefined) => github?.name ?? basename(folder).replace(/\.git$/, "");
+
 /**
  * The worktrees of the sessions Gasho shows, of all working servers (the sidebar's list): the one used last first.
- * Then the `remembered` ones that have no session now, in the order given.
+ * Then the other worktrees of the repositories registered with each working server, as git lists them, and then the
+ * `remembered` ones that have no session now, in the order given. One remembered in a registered repository is left
+ * out: the repository's list tells whether it is still there.
  */
 export function worktreesByLastUse(machines: MachineInfo[], remembered: RememberedWorktree[] = []): WorktreeSessions[] {
   const byId = new Map<string, WorktreeSessions>();
@@ -79,21 +90,41 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
         continue;
       }
       const w = s.worktree;
-      const repo = s.github?.name ?? (w ? basename(w.repo).replace(/\.git$/, "") : undefined);
       const path = w?.path ?? s.cwd;
+      const repo = w ? repoName(w.repo, s.github) : s.github?.name;
       const facts = known({ repo, branch: w?.branch, repoFolder: w?.repo, github: s.github });
-      byId.set(id, { id, machine, label: w?.branch ?? basename(path), path, subfolders: Boolean(w), ...facts, sessions: [s] });
+      byId.set(id, { id, machine, label: w?.branch ?? basename(path), path, subfolders: Boolean(w), registered: false, ...facts, sessions: [s] });
     }
   }
   const worktrees = [...byId.values()];
   for (const w of worktrees) w.sessions.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0) || a.sessionId.localeCompare(b.sessionId));
   const latest = (w: WorktreeSessions) => Math.max(...w.sessions.map(lastUsed));
   worktrees.sort((a, b) => latest(b) - latest(a) || a.id.localeCompare(b.id));
+  for (const machine of machines) {
+    for (const r of machine.repos ?? []) {
+      for (const t of r.worktrees) {
+        const id = worktreeKey(machine.id, t.path);
+        const label = t.branch ?? basename(t.path);
+        const found = byId.get(id);
+        if (found) {
+          // git's list is read more often than a session's worktree.
+          Object.assign(found, { label, registered: true });
+          if (t.branch) found.branch = t.branch;
+          else delete found.branch;
+          continue;
+        }
+        const facts = known({ repo: repoName(r.path, r.github), branch: t.branch, repoFolder: r.path, github: r.github });
+        const w: WorktreeSessions = { id, machine, label, path: t.path, subfolders: true, registered: true, ...facts, sessions: [] };
+        byId.set(id, w);
+        worktrees.push(w);
+      }
+    }
+  }
   for (const r of remembered) {
     const machine = machines.find((m) => m.id === r.machine);
     const id = worktreeKey(r.machine, r.path);
-    if (!machine || byId.has(id)) continue;
-    byId.set(id, { id, machine, label: r.label, path: r.path, subfolders: r.subfolders, ...known(r), sessions: [] });
+    if (!machine || byId.has(id) || machine.repos?.some((x) => x.path === r.repoFolder)) continue;
+    byId.set(id, { id, machine, label: r.label, path: r.path, subfolders: r.subfolders, registered: false, ...known(r), sessions: [] });
     worktrees.push(byId.get(id)!);
   }
   return worktrees;
@@ -102,6 +133,33 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
 /** What the sidebar keeps of a worktree once its sessions are gone. */
 export function rememberedOf(w: WorktreeSessions): RememberedWorktree {
   return { machine: w.machine.id, path: w.path, label: w.label, subfolders: w.subfolders, ...known(w) };
+}
+
+/** A repository the sidebar can be narrowed to: one that a worktree in it names, on one working server. */
+export interface RepoChoice {
+  /** worktreeKey of the working server and the repository's folder; repoKeyOf gives a worktree's. */
+  key: string;
+  name: string;
+  machine: MachineInfo;
+}
+
+export function repoKeyOf(w: WorktreeSessions): string | undefined {
+  return w.repoFolder === undefined ? undefined : worktreeKey(w.machine.id, w.repoFolder);
+}
+
+/** The repositories of these worktrees, by name. */
+export function repoChoices(worktrees: WorktreeSessions[]): RepoChoice[] {
+  const byKey = new Map<string, RepoChoice>();
+  for (const w of worktrees) {
+    const key = repoKeyOf(w);
+    if (key && !byKey.has(key)) byKey.set(key, { key, name: w.repo ?? basename(w.repoFolder ?? ""), machine: w.machine });
+  }
+  return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name) || a.machine.name.localeCompare(b.machine.name));
+}
+
+/** A registered repository's name, as the sidebar shows it. */
+export function registeredRepoName(r: RegisteredRepo): string {
+  return repoName(r.path, r.github);
 }
 
 /** The tab to open once the open session's tab is gone: the one after it, else the one before. */
