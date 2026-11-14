@@ -172,10 +172,9 @@ async function setup(o: { mcp?: boolean; warnings?: string[] } = {}) {
   d.canLaunch = true;
   d.zellij = {
     // launchArgs: … "gasho-launch", <pid file>, <folder>, "env", …: the shell writes Claude Code's PID first.
-    run: async (args: string[]) => {
+    start: async (_session: string, args: string[]) => {
       const at = args.indexOf("gasho-launch");
       if (at >= 0) await fs.writeFile(args[at + 1] as string, String(process.pid));
-      return "";
     },
     screen: async () => plainScreen(fake.screen()),
     keys: async (_s: string, ...keys: string[]) => keys.forEach((k) => fake.key(k)),

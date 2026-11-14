@@ -71,7 +71,7 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.10.0";
+export const DAEMON_VERSION = "0.10.1";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -903,7 +903,8 @@ export class Daemon {
     const zellijSession = zellijSessionName(rcName);
     const pidFile = path.join(this.cfg.stateDir, `${zellijSession}.pid`);
     await fsp.mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
-    await this.zellij.run(
+    await this.zellij.start(
+      zellijSession,
       launchArgs({ zellijSession, pidFile, cwd: dir, claudeBin: this.cfg.claudeBin, rcName, env: cleanEnv(), claudeArgs }),
     );
     log(`launching "${rcName}" in ${dir} (zellij session ${zellijSession})${claudeArgs.length > 0 ? ` with ${claudeArgs.join(" ")}` : ""}`);

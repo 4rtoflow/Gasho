@@ -99,6 +99,8 @@ loginctl enable-linger "$USER"
 
 最後の `loginctl enable-linger` で、ログインしていなくても、マシンが起動したときから gasho-daemon が動く。
 
+Gasho から起動したセッション（zellij と Claude Code）は、セッションごとに systemd のスコープ（`gasho-<名前>-xxxx.scope`）を作って、その中で動かす。gasho-daemon のサービスの外なので、gasho-daemon を動かし直したり止めたりしても、セッションは止まらない。
+
 | すること | コマンド |
 |---|---|
 | 状態を見る | `systemctl --user status gasho-daemon` |
@@ -167,6 +169,8 @@ npx @4rtoflow/gasho-daemon@latest service print > ~/.config/systemd/user/gasho-d
 systemctl --user daemon-reload
 systemctl --user restart gasho-daemon
 ```
+
+0.10.0 までの gasho-daemon は、systemd で動かしているときに起動したセッションを、自分のサービスの中で動かしていた。そのため、0.10.0 から更新して動かし直すと、そのセッションは止まる。会話は working server に残るので、端末で `claude --resume` を使えば開き直せる。
 
 Mac では、書き出したあと `launchctl bootout` と `launchctl bootstrap` で読み直す（5 の表）。`npm install -g` で入れたときは、`npm install -g @4rtoflow/gasho-daemon@latest` のあと動かし直す。clone したリポジトリで動かしているときは、`git pull` のあと動かし直す。
 

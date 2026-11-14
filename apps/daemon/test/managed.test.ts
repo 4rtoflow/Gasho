@@ -36,6 +36,7 @@ import {
   switchedForSession,
   switchQuestion,
   typedInBox,
+  Zellij,
   zellijSessionName,
 } from "../src/managed.ts";
 
@@ -61,6 +62,48 @@ test("zellij session names are safe and unique per launch", () => {
   assert.equal(zellijSessionName("Bobert の作業", "ab12"), "gasho-bobert-ab12");
   assert.equal(zellijSessionName("!!!", "ab12"), "gasho-session-ab12");
   assert.notEqual(zellijSessionName("x"), zellijSessionName("x"));
+});
+
+// A systemd-run that writes its arguments to $LOG and runs the command after "--", as `--scope` does; with $FAIL set,
+// it fails like one that finds no user manager. The zellij next to it only writes its arguments.
+const FAKE_SYSTEMD_RUN = `#!/bin/sh
+echo "systemd-run $*" >> "$LOG"
+[ -n "$FAIL" ] && exit 1
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ $# -gt 0 ] && shift
+[ $# -gt 0 ] && exec "$@"
+exit 0
+`;
+
+test("sessions start in a systemd user scope of their own, so a restart of gasho-daemon's service leaves them running", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-scope-"));
+  try {
+    const log = path.join(dir, "log");
+    await fs.writeFile(path.join(dir, "systemd-run"), FAKE_SYSTEMD_RUN, { mode: 0o755 });
+    await fs.writeFile(path.join(dir, "zellij"), `#!/bin/sh\necho "zellij $*" >> "$LOG"\n`, { mode: 0o755 });
+    const args = (s: string) => ["attach", "--create-background", s, "--", "/bin/sh", "-c", "true"];
+    const scoped = new Zellij({ PATH: dir, LOG: log });
+    await scoped.start("gasho-x-1", args("gasho-x-1"));
+    await scoped.start("gasho-x-2", args("gasho-x-2"));
+    assert.deepEqual((await fs.readFile(log, "utf8")).trim().split("\n"), [
+      // Whether user scopes can be started is checked once.
+      "systemd-run --user --scope --quiet --collect true",
+      "systemd-run --user --scope --quiet --collect --unit=gasho-x-1 -- zellij attach --create-background gasho-x-1 -- /bin/sh -c true",
+      "zellij attach --create-background gasho-x-1 -- /bin/sh -c true",
+      "systemd-run --user --scope --quiet --collect --unit=gasho-x-2 -- zellij attach --create-background gasho-x-2 -- /bin/sh -c true",
+      "zellij attach --create-background gasho-x-2 -- /bin/sh -c true",
+    ]);
+
+    // Without systemd for the user (macOS, no user manager), zellij runs as it is.
+    await fs.rm(log);
+    await new Zellij({ PATH: dir, LOG: log, FAIL: "1" }).start("gasho-x-3", args("gasho-x-3"));
+    assert.deepEqual((await fs.readFile(log, "utf8")).trim().split("\n"), [
+      "systemd-run --user --scope --quiet --collect true",
+      "zellij attach --create-background gasho-x-3 -- /bin/sh -c true",
+    ]);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("launchArgs starts claude --remote-control through a shell that records its PID", () => {
