@@ -19,12 +19,21 @@ export interface MachineWire {
   name: string;
 }
 
+/** What a daemon part may read of its working server (plugin API 1.1). */
+export interface LocalWire {
+  /** The folders Gasho offers to start sessions in (MachineInfo.folders). */
+  folders: string[];
+  /** A folder of the plugin's own on this working server, kept across versions (made before the process starts). */
+  dataDir: string;
+}
+
 /** gasho-daemon -> the plugin's process. */
 export type ToHost =
-  | { t: "init"; plugin: string; machine: MachineWire; settings: Record<string, unknown> }
+  | { t: "init"; plugin: string; machine: MachineWire; settings: Record<string, unknown>; local: LocalWire }
   | { t: "call"; id: number; method: string; params: unknown; session?: SessionWire; settings: Record<string, unknown> }
   | { t: "abort"; id: number }
   | { t: "settings"; settings: Record<string, unknown> }
+  | { t: "folders"; folders: string[] }
   | { t: "stop" };
 
 /** The plugin's process -> gasho-daemon. `user`: the message is for the person (a PluginError). */

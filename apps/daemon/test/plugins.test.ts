@@ -17,6 +17,7 @@ export default {
       cwd: ctx.session?.cwd,
       app: ctx.session?.repo("app").dir,
     }),
+    local: (params, ctx) => ({ folders: ctx.folders(), dataDir: ctx.dataDir }),
     outside: (params, ctx) => ctx.session.repo("../etc"),
     oops: () => { const e = new Error("見せてよい理由"); e.gashoPluginError = true; throw e; },
     crash: () => { throw new Error("secret detail"); },
@@ -36,6 +37,7 @@ function setup(enabled = true) {
   const logs: string[] = [];
   const codes: Record<string, string> = { [HASH1]: V1, [HASH2]: V2 };
   let runner: PluginRunner;
+  const local = { folders: ["/work"], dataDir: fs.mkdtempSync(path.join(os.tmpdir(), "gasho-plugin-data-")) };
   const send = (m: DaemonToHub) => {
     sent.push(m);
     // The Gasho server hands over the code asked for.
@@ -46,6 +48,8 @@ function setup(enabled = true) {
     send,
     machine: () => ({ id: "m1", name: "ubuntu" }),
     session: async (id) => (id === "s1" ? { sessionId: "s1", cwd: "/work/zen", managed: true, repos: [{ path: "app" }] } : undefined),
+    folders: () => local.folders,
+    dataDir: local.dataDir,
     enabled,
     log: (s) => logs.push(s),
   });
@@ -64,11 +68,11 @@ function setup(enabled = true) {
     for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setTimeout(r, 25));
     assert.ok(ok(), "timed out");
   };
-  return { runner, sent, logs, call, state, until };
+  return { runner, sent, logs, call, state, until, local };
 }
 
 test("a daemon part runs in a process of its own, gets its session and settings, and answers calls", async () => {
-  const { runner, call, state, until, sent } = setup();
+  const { runner, call, state, until, sent, local } = setup();
   try {
     runner.update([{ id: "hello", hash: HASH1, run: true, settings: { interval: 60 } }]);
     assert.ok(sent.some((m) => m.type === "plugin.code.get" && m.hash === HASH1));
@@ -86,6 +90,14 @@ test("a daemon part runs in a process of its own, gets its session and settings,
     assert.equal((await call("sh")).result, "hi");
     assert.equal((await call("missing")).result, "ENOENT");
     assert.equal((await call("slow", { timeoutMs: 1000 })).error, "working server から応答がありません。");
+
+    // Its own folder is made before it starts; the folders reach the running process when they change.
+    const dataDir = path.join(local.dataDir, "hello");
+    assert.deepEqual((await call("local")).result, { folders: ["/work"], dataDir });
+    assert.ok(fs.statSync(dataDir).isDirectory());
+    local.folders = ["/work", "/home/rg/repos"];
+    runner.foldersChanged();
+    assert.deepEqual((await call("local")).result, { folders: ["/work", "/home/rg/repos"], dataDir });
   } finally {
     await runner.stopAll();
   }

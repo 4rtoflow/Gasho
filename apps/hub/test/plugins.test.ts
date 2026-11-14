@@ -12,7 +12,7 @@ const manifest = {
   id: "hello",
   name: "Hello",
   version: "1.0.0",
-  api: "1.0",
+  api: "1.1",
   web: { js: "web.js", css: "web.css" },
   daemon: { js: "daemon.js" },
   methods: { greet: { kind: "read" }, save: { kind: "write", timeoutSeconds: 30 } },
@@ -160,9 +160,12 @@ test("browsers get the plugins with their files' URLs, and the daemon part's sta
   assert.ok(told?.type === "plugins");
   assert.deepEqual(told.plugins, [{ id: "hello", hash: p?.hash, run: true, settings: { interval: 60 } }]);
 
-  // A gasho-daemon that says nothing about plugins is too old; once it does, its state shows.
+  // A gasho-daemon that says nothing about plugins is too old, and so is one of API 1.0 for this 1.1 plugin; once it
+  // runs 1.1, its state shows.
   assert.equal(lastPlugins(client.sent)?.[0]?.daemon?.[machineId]?.state, "old");
   hub.onDaemonMessage(daemon, { type: "plugin.status", api: "1.0", plugins: [{ id: "hello", hash: p?.hash, state: "running" }] });
+  assert.equal(lastPlugins(client.sent)?.[0]?.daemon?.[machineId]?.state, "old");
+  hub.onDaemonMessage(daemon, { type: "plugin.status", api: "1.1", plugins: [{ id: "hello", hash: p?.hash, state: "running" }] });
   assert.equal(lastPlugins(client.sent)?.[0]?.daemon?.[machineId]?.state, "running");
 
   // It gets the code it asks for.
@@ -182,7 +185,7 @@ test("calls of a plugin are relayed to the working server and the answer goes ba
   call("greet");
   assert.match((answer("r-greet") as { error?: string }).error ?? "", /古い/);
 
-  hub.onDaemonMessage(daemon, { type: "plugin.status", api: "1.0", plugins: [{ id: "hello", state: "running" }] });
+  hub.onDaemonMessage(daemon, { type: "plugin.status", api: "1.1", plugins: [{ id: "hello", state: "running" }] });
   client.sent.length = 0;
   call("greet", { requestId: "r2", sessionId: "s1" });
   const relayed = daemon.sent.find((m) => m.type === "plugin.request");

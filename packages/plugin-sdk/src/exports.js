@@ -12,6 +12,7 @@ export const SDK_EXPORTS = [
   "usePluginState",
   "useNavigation",
   "useSendInput",
+  "useLaunchSession",
   "useNow",
   "githubRepos",
   "panelRepo",
@@ -27,4 +28,4 @@ export const SDK_EXPORTS = [
 ];
 
 /** The version of the plugin API that this SDK describes (gasho-plugin.json `api`). */
-export const PLUGIN_API = "1.0";
+export const PLUGIN_API = "1.1";

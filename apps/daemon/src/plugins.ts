@@ -10,10 +10,10 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DaemonPluginEntry, DaemonPluginStatus, DaemonToHub, HubToDaemon } from "@gasho/protocol";
-import type { FromHost, MachineWire, SessionWire, ToHost } from "./plugin-ipc.ts";
+import type { FromHost, LocalWire, MachineWire, SessionWire, ToHost } from "./plugin-ipc.ts";
 
 /** The plugin API this gasho-daemon runs plugins of. */
-export const PLUGIN_API = "1.0";
+export const PLUGIN_API = "1.1";
 /** The process of a daemon part: next to this file (.ts when run from the repository, .js in the npm package). */
 const HOST_FILE = fileURLToPath(new URL(`./plugin-host${path.extname(fileURLToPath(import.meta.url))}`, import.meta.url));
 /** How long a new process may take to import the plugin and run its `start`. */
@@ -50,7 +50,7 @@ class HostProcess {
   /** Called once when the process ends. */
   onExit: (code: number | null) => void = () => undefined;
 
-  constructor(id: string, hash: string, codeFile: string, init: { machine: MachineWire; settings: Record<string, unknown> }, log: (s: string) => void) {
+  constructor(id: string, hash: string, codeFile: string, init: { machine: MachineWire; settings: Record<string, unknown>; local: LocalWire }, log: (s: string) => void) {
     this.hash = hash;
     this.child = fork(HOST_FILE, [codeFile], {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -105,7 +105,7 @@ class HostProcess {
       this.onExit(code);
     });
     this.child.on("error", (e) => log(`${prefix}${e.message}`));
-    this.send({ t: "init", plugin: id, machine: init.machine, settings: init.settings });
+    this.send({ t: "init", plugin: id, machine: init.machine, settings: init.settings, local: init.local });
   }
 
   get alive(): boolean {
@@ -122,6 +122,10 @@ class HostProcess {
 
   settings(settings: Record<string, unknown>): void {
     this.send({ t: "settings", settings });
+  }
+
+  folders(folders: string[]): void {
+    this.send({ t: "folders", folders });
   }
 
   call(method: string, params: unknown, session: SessionWire | undefined, settings: Record<string, unknown>, timeoutMs: number): Promise<Answer> {
@@ -197,6 +201,10 @@ export interface PluginRunnerOptions {
   machine: () => MachineWire;
   /** The session a call names, as gasho-daemon tracks it; undefined for one it does not. */
   session: (sessionId: string) => Promise<SessionWire | undefined>;
+  /** The folders Gasho offers to start sessions in, now. */
+  folders: () => string[];
+  /** Where each daemon part keeps its own files, one folder per plugin. */
+  dataDir: string;
   /** False when GASHO_PLUGINS=none: no daemon part runs here. */
   enabled: boolean;
   log: (s: string) => void;
@@ -297,6 +305,15 @@ export class PluginRunner {
     this.opts.send(msg);
   }
 
+  /** The folders Gasho offers to start sessions in changed: the running daemon parts hear of it. */
+  foldersChanged(): void {
+    const folders = this.opts.folders();
+    for (const slot of this.slots.values()) {
+      slot.proc?.folders(folders);
+      slot.starting?.folders(folders);
+    }
+  }
+
   /** Ends every daemon part (gasho-daemon is stopping). */
   async stopAll(): Promise<void> {
     await Promise.all([...this.slots.values()].map((s) => this.halt(s)));
@@ -330,15 +347,19 @@ export class PluginRunner {
     if (slot.proc?.alive && slot.proc.hash === hash) return;
     if (slot.starting?.hash === hash || slot.failed?.hash === hash) return;
     let file: string;
+    // The plugin's id is checked by the Gasho server (letters, digits and "-"), so it can name a folder.
+    const dataDir = path.join(this.opts.dataDir, slot.id);
     try {
       file = await this.codeFile(slot.id, hash);
+      await fsp.mkdir(dataDir, { recursive: true, mode: 0o700 });
     } catch (e) {
       if (slot.entry.hash === hash) slot.failed = { hash, error: e instanceof Error ? e.message : String(e) };
       this.status();
       return;
     }
     if (slot.entry.hash !== hash || !slot.entry.run || slot.starting?.hash === hash) return;
-    const proc = new HostProcess(slot.id, hash, file, { machine: this.opts.machine(), settings: slot.entry.settings }, this.opts.log);
+    const local = { folders: this.opts.folders(), dataDir };
+    const proc = new HostProcess(slot.id, hash, file, { machine: this.opts.machine(), settings: slot.entry.settings, local }, this.opts.log);
     const before = slot.starting;
     slot.starting = proc;
     void before?.stop();

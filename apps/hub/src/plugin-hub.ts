@@ -19,7 +19,7 @@ import type {
   PluginMachines,
   PluginManifest,
 } from "@gasho/protocol";
-import { DEFAULT_TIMEOUT_SECONDS, PLUGIN_API_MAJOR, settingProblem, settingValue, type PluginEntry, type PluginRegistry } from "./plugins.ts";
+import { DEFAULT_TIMEOUT_SECONDS, PLUGIN_API, PLUGIN_API_MAJOR, settingProblem, settingValue, type PluginEntry, type PluginRegistry } from "./plugins.ts";
 import type { Store } from "./store.ts";
 
 /** The arguments of a call, at most (as JSON). */
@@ -175,7 +175,7 @@ export class PluginHub {
     const daemon = this.deps.daemon(machine);
     if (!daemon) return reply("この working server はオフラインです。");
     const status = this.status.get(machine);
-    if (!status || !supports(status.api)) return reply(OLD_DAEMON);
+    if (!status || !supports(status.api, manifest.api)) return reply(OLD_DAEMON);
     if (!chosen(state.machines, machine)) {
       return reply(`この working server では、${manifest.name} の working server で動く部分を動かしていません。プラグインの画面で選んでください。`);
     }
@@ -334,7 +334,7 @@ export class PluginHub {
   private daemonState(e: PluginEntry, state: { enabled: boolean; machines: PluginMachines }, m: MachineInfo): { state: PluginDaemonState; error?: string } {
     if (!m.connected || !this.deps.daemon(m.id)) return { state: "offline" };
     const status = this.status.get(m.id);
-    if (!status || !supports(status.api)) return { state: "old" };
+    if (!status || !supports(status.api, e.revision?.manifest.api ?? PLUGIN_API)) return { state: "old" };
     if (!state.enabled || !chosen(state.machines, m.id)) return { state: "off" };
     const own = status.plugins.get(e.id);
     if (!own) return { state: "stopped" };
@@ -342,7 +342,12 @@ export class PluginHub {
   }
 }
 
-/** Whether a gasho-daemon runs plugins of this Gasho server's plugin API (the same major). */
-function supports(api: string): boolean {
-  return Number(/^(\d+)\./.exec(api)?.[1]) === PLUGIN_API_MAJOR;
+/**
+ * Whether a gasho-daemon (its plugin API `api`) runs a plugin written for `wants`: the same major as this Gasho server,
+ * and a minor up to the daemon's (a 1.1 plugin may use what a 1.0 gasho-daemon does not give its daemon part).
+ */
+function supports(api: string, wants: string): boolean {
+  const [major, minor] = (/^(\d+)\.(\d+)/.exec(api) ?? []).slice(1).map(Number);
+  const [wantsMajor, wantsMinor] = (/^(\d+)\.(\d+)/.exec(wants) ?? []).slice(1).map(Number);
+  return major === PLUGIN_API_MAJOR && wantsMajor === major && (minor ?? 0) >= (wantsMinor ?? 0);
 }

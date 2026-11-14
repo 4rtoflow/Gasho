@@ -65,6 +65,16 @@ export interface DaemonContext {
   session?: DaemonSession;
   /** The values of the settings with scope "server". */
   settings: Record<string, unknown>;
+  /**
+   * The folders Gasho offers to start sessions in on this working server: those Claude Code trusts, and their parents
+   * (as the screen's MachineInfo.folders). Plugin API 1.1.
+   */
+  folders(): string[];
+  /**
+   * A folder of this plugin's own on this working server, for what it keeps between calls (kept when the plugin is
+   * updated, removed or added again). Plugin API 1.1.
+   */
+  dataDir: string;
   /** Aborted when the call takes too long, or the process is being stopped. */
   signal: AbortSignal;
   /**
