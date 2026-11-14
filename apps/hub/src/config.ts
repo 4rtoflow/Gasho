@@ -13,6 +13,10 @@ export interface HubConfig {
   pluginsDir: string;
   /** The checked versions of the plugins, served from here. */
   pluginCacheDir: string;
+  /** The repository whose catalog plugins are added from ("owner/name"). */
+  pluginRepo: string;
+  /** The GitHub CLI that reads it, with its login. */
+  ghBin: string;
 }
 
 export function pluginsDirOf(env: NodeJS.ProcessEnv = process.env): string {
@@ -34,5 +38,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
     webDist: env.GASHO_WEB_DIST ?? path.resolve(here, "../../web/dist"),
     pluginsDir: pluginsDirOf(env),
     pluginCacheDir: env.GASHO_PLUGIN_CACHE ?? path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "gasho", "hub-plugins"),
+    pluginRepo: env.GASHO_PLUGIN_REPO || "4rtoflow/GashoPlugins",
+    ghBin: env.GASHO_GH_BIN || "gh",
   };
 }
