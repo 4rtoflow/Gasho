@@ -15,7 +15,7 @@ export interface DaemonReadiness {
   reason?: string;
 }
 
-/** A session, for the parts a plugin adds to it (header items, panels). */
+/** A session, for the parts a plugin adds to it (header items, panels, the end of its conversation). */
 export interface SessionContext {
   machine: MachineInfo;
   session: SessionInfo;
@@ -102,6 +102,25 @@ export interface HomeTile {
   component: ComponentType;
 }
 
+/** A part at the end of a session's conversation (P13), and the session it is drawn for. */
+export interface ConversationEndProps {
+  machine: MachineInfo;
+  session: SessionInfo;
+}
+
+/**
+ * A part at the end of a session's conversation (P13): below its newest entry and the messages being sent, above the
+ * chat box. It scrolls with the conversation, which keeps it in sight while the reader is at the bottom. Plugin API 1.2.
+ */
+export interface ConversationEndItem {
+  id: string;
+  /** Where it goes among the plugins' parts there: a smaller one comes first. By default 500. */
+  order?: number;
+  /** Whether it shows for this session. */
+  when?: (ctx: SessionContext) => boolean;
+  component: ComponentType<ConversationEndProps>;
+}
+
 /** What the web part of a plugin adds to Gasho's screen (its web.js exports it as default). */
 export interface PluginDefinition {
   sidebar?: SidebarItem[];
@@ -111,6 +130,8 @@ export interface PluginDefinition {
   homeTiles?: HomeTile[];
   /** More on the settings screen, below the inputs made from gasho-plugin.json `settings` (P5). */
   settings?: ComponentType;
+  /** Parts at the end of a session's conversation (P13). Plugin API 1.2. */
+  conversationEnd?: ConversationEndItem[];
 }
 
 /** A call of a method of the plugin's daemon part (P7). */
@@ -171,6 +192,24 @@ export type LaunchResult =
   | { ok: true; sessionId: string }
   | { ok: false; error: string; needsTrust?: boolean; trustWarnings?: string[] };
 
+/**
+ * What a session is working on, read from Claude Code's hooks and the session's conversation as Gasho's screen has
+ * them (plugin API 1.2). Empty while the session is neither working nor waiting for an answer.
+ */
+export interface SessionActivity {
+  /**
+   * When the work going on started (ms since the epoch, the working server's clock): the person's last message, or,
+   * when its work has ended, the first thing the session did after that (work it took up by itself, such as the end
+   * of a task it ran in the background). Undefined when Gasho's screen cannot tell.
+   */
+  turnStartedAt?: number;
+  /**
+   * The tool running now: the latest one Claude Code started (PreToolUse) and has not finished (PostToolUse). `summary`
+   * is its most telling input (the command, the file, …).
+   */
+  tool?: { name: string; summary?: string; startedAt: number };
+}
+
 /** A session's folder, or one of the repositories gasho-daemon found inside it. */
 export interface RepoChoice {
   repos?: SessionRepo[];
@@ -183,7 +222,7 @@ export interface GashoSdk {
   definePlugin(def: PluginDefinition): PluginDefinition;
   /** The working servers and their sessions, as Gasho's screen has them (read only). */
   useMachines(): MachineInfo[];
-  /** In a session's header items and panels: that session. */
+  /** In a session's header items, panels and parts at the end of its conversation: that session. */
   useSessionContext(): SessionContext | undefined;
   /** Whether this plugin's daemon part runs on a working server. */
   useDaemonReady(machine: string): DaemonReadiness;
@@ -203,6 +242,8 @@ export interface GashoSdk {
    * セッション" does. Plugin API 1.1.
    */
   useLaunchSession(): (input: { machine: string; cwd: string; name?: string; trust?: boolean }) => Promise<LaunchResult>;
+  /** What a session is working on: since when, and with which tool (plugin API 1.2). */
+  useSessionActivity(machine: string, sessionId: string): SessionActivity;
   /** The current time, renewed every `intervalMs` (30 s by default). */
   useNow(intervalMs?: number): number;
   /** The GitHub repositories of a session: its folder's, or those of the repositories inside it. */
@@ -240,6 +281,7 @@ export declare const usePluginState: GashoSdk["usePluginState"];
 export declare const useNavigation: GashoSdk["useNavigation"];
 export declare const useSendInput: GashoSdk["useSendInput"];
 export declare const useLaunchSession: GashoSdk["useLaunchSession"];
+export declare const useSessionActivity: GashoSdk["useSessionActivity"];
 export declare const useNow: GashoSdk["useNow"];
 export declare const githubRepos: GashoSdk["githubRepos"];
 export declare const panelRepo: GashoSdk["panelRepo"];

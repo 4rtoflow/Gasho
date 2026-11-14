@@ -3,7 +3,7 @@
 // that the plugin draws with Gasho's own React, state and parts. The hooks find which plugin calls them through the
 // scope Gasho draws each plugin part in (PluginScope in parts.tsx).
 import * as React from "react";
-import { createContext, useContext, useSyncExternalStore } from "react";
+import { createContext, useContext, useMemo, useSyncExternalStore } from "react";
 import * as ReactDOM from "react-dom";
 import * as ReactDOMClient from "react-dom/client";
 import * as jsxRuntime from "react/jsx-runtime";
@@ -17,6 +17,7 @@ import type {
   PluginDefinition,
   RequestOptions,
   RequestTarget,
+  SessionActivity,
   SessionContext,
 } from "@gasho/plugin-sdk";
 import { PLUGIN_API, SDK_EXPORTS } from "@gasho/plugin-sdk/exports";
@@ -24,6 +25,7 @@ import type { PluginInfo, PluginSettingSpec, SessionInfo } from "@gasho/protocol
 import { MarkdownText } from "@/components/markdown";
 import { PANEL_BUTTON, panelRepo, RepoTabs, SidePanel } from "@/components/side-panel";
 import { TILE, TILE_SHADOW } from "@/components/ui/stat-card";
+import { sessionActivity } from "@/lib/activity";
 import { relativeTime } from "@/lib/format";
 import { addPending, removePending, settlePending } from "@/lib/pending";
 import { backTo, go, hrefOf, noteOpenedFrom, useRoute, type Route } from "@/lib/route";
@@ -195,6 +197,16 @@ function useNavigation(): Navigation {
   };
 }
 
+// ---- what a session is working on ----
+
+/** Kept while its inputs stay the same, so that a part using it is drawn again only when something changed. */
+function useSessionActivity(machine: string, sessionId: string): SessionActivity {
+  const { machines, events, transcripts } = useAppState();
+  const status = machines.find((m) => m.id === machine)?.sessions.find((s) => s.sessionId === sessionId)?.status;
+  const entries = transcripts[transcriptKey(machine, sessionId)]?.entries;
+  return useMemo(() => sessionActivity({ machine, sessionId, status }, events, entries), [machine, sessionId, status, events, entries]);
+}
+
 // ---- parts ----
 
 function Page({ title, description, actions, children }: { title: React.ReactNode; description?: React.ReactNode; actions?: React.ReactNode; children?: React.ReactNode }) {
@@ -298,6 +310,7 @@ export const sdk: GashoSdk = {
       return { ok: false, error: r.error ?? "起動できませんでした。" };
     };
   },
+  useSessionActivity,
   useNow,
   githubRepos,
   panelRepo,
