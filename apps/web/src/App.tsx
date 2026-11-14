@@ -1,16 +1,26 @@
 import { motion } from "framer-motion";
 import { Home, KeyRound, ListRestart, Plus, Puzzle, Settings } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import type { SessionStatus } from "@gasho/protocol";
 import { ResizeHandle } from "@/components/resize-handle";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
-import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
+import { SessionActionDialog, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery, useWindowWidth } from "@/lib/media";
 import { arrangeSessions, rememberSessions, useSavedOrder } from "@/lib/order";
 import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
-import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
+import { rememberWorktrees, useRememberedWorktrees } from "@/lib/remembered-worktrees";
+import {
+  notificationShown,
+  rememberedOf,
+  sessionToOpen,
+  worktreeId,
+  worktreeKey,
+  worktreesByLastUse,
+  type WorktreeSessions,
+} from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { PANEL_WIDTH_MAX, PANEL_WIDTH_MIN, clampPanelWidth, defaultPanelWidth, usePanelWidth } from "@/lib/widths";
@@ -25,10 +35,16 @@ import { PairView } from "@/views/pair";
 import { PluginsView } from "@/views/plugins";
 import { SessionState, SessionView } from "@/views/session";
 import { SettingsView } from "@/views/settings";
+import { WorktreeView } from "@/views/worktree";
 
-const SEP = "\u001f";
-/** Where this browser keeps the order the sidebar's sessions were dragged into. */
-const SESSION_ORDER_KEY = "gasho.sessionOrder";
+/** Where this browser keeps the order the sidebar's worktrees were dragged into. */
+const WORKTREE_ORDER_KEY = "gasho.worktreeOrder";
+
+/** A worktree's status in the sidebar: that of its most pressing session. */
+function worktreeStatus(w: WorktreeSessions): SessionStatus {
+  if (!w.machine.connected) return "unknown";
+  return (["waiting", "busy", "idle"] as const).find((st) => w.sessions.some((s) => s.status === st)) ?? "unknown";
+}
 
 /** Gasho's logo: 🙏 (合掌, gasshō). The collapsed sidebar shows the logo alone. */
 export const LOGO = "🙏";
@@ -126,29 +142,29 @@ export function App() {
   }, [route]);
   const { auth, me, machines, notifications, connected } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
-  // What was picked from a session's menu in the sidebar (rename, fork, remove); its dialog is open meanwhile.
+  // What was picked from a session tab's menu (rename, fork, remove); its dialog is open meanwhile.
   const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
-  // The dialog that starts a new session, opened from the "＋" of the sidebar's session list.
+  // The dialog that starts a new session, opened from the "＋" of the sidebar's worktree list.
   const [launchOpen, setLaunchOpen] = useState(false);
-  // The order the sidebar's sessions were dragged into (none: the one used last first).
-  const [sessionOrder, setSessionOrder] = useSavedOrder(SESSION_ORDER_KEY);
+  // The order the sidebar's worktrees were dragged into (none: the one used last first).
+  const [worktreeOrder, setWorktreeOrder] = useSavedOrder(WORKTREE_ORDER_KEY);
   const desktop = useMediaQuery(DESKTOP);
   // The plugins' web parts (docs/plugins.md): their sidebar items and the badges their hooks give.
   const { parts } = usePluginRegistry();
   const badges = usePluginBadges();
+  // Every worktree with sessions is kept, so that it stays in the sidebar once they are gone.
+  const remembered = useRememberedWorktrees();
+  useEffect(() => rememberWorktrees(worktreesByLastUse(machines).map(rememberedOf)), [machines]);
 
   if (auth === "checking") return <Centered>読み込み中…</Centered>;
   if (auth === "unreachable") return <Centered>Gasho サーバーにつながりません。再試行しています…</Centered>;
   if (auth === "unregistered") return <PairView />;
 
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
-  // The sessions of all working servers in one list: the one used last first, or in the order they were dragged into
-  // (sessions started or forked since then come first).
-  const byId = new Map(sessionsByLastUse(machines).map((x) => [[x.machine.id, x.session.sessionId].join(SEP), x]));
-  const sessions = arrangeSessions([...byId.keys()], sessionOrder).flatMap((id) => {
-    const x = byId.get(id);
-    return x ? [{ id, ...x }] : [];
-  });
+  // The worktrees of all working servers in one list: the one used last first, then those without sessions, or in the
+  // order they were dragged into (worktrees that got their first session since then come first).
+  const byId = new Map(worktreesByLastUse(machines, remembered).map((w) => [w.id, w]));
+  const worktrees = arrangeSessions([...byId.keys()], worktreeOrder).flatMap((id) => byId.get(id) ?? []);
   // The plugins' sidebar items: between ホーム and 端末, in the plugins' order. Each opens a page of its plugin.
   const pluginItems = parts.flatMap(({ info, def }) =>
     (def.sidebar ?? []).map((item) => {
@@ -169,36 +185,39 @@ export function App() {
     },
     {
       // Shown even without sessions, for its "＋".
-      title: "セッション",
+      title: "worktree",
       action: { label: "新しいセッション", icon: <Plus />, onClick: () => setLaunchOpen(true) },
-      secondaryAction: sessionOrder
-        ? { label: "最後に使った順に戻す", icon: <ListRestart />, onClick: () => setSessionOrder(undefined) }
+      secondaryAction: worktreeOrder
+        ? { label: "最後に使った順に戻す", icon: <ListRestart />, onClick: () => setWorktreeOrder(undefined) }
         : undefined,
-      sort: { onReorder: (ids) => setSessionOrder(rememberSessions(ids, sessionOrder)) },
-      items: sessions.map(({ id, machine: m, session: s }) => ({
-        id,
-        label: sessionLabel(s),
-        icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
-        badge: !m.connected ? "オフライン" : s.status === "waiting" ? "確認" : undefined,
-        // Right-click (a long press on a phone): rename, fork, remove.
-        wrap: (button: ReactElement) => (
-          <SessionContextMenu machine={m} session={s} onPick={setSessionAction}>
-            {button}
-          </SessionContextMenu>
-        ),
+      sort: { onReorder: (ids) => setWorktreeOrder(rememberSessions(ids, worktreeOrder)) },
+      items: worktrees.map((w) => ({
+        id: w.id,
+        label: w.label,
+        // The working server too, when there are several.
+        description: [w.repo, machines.length > 1 ? w.machine.name : undefined].filter(Boolean).join(" · ") || undefined,
+        icon: <StatusDot status={worktreeStatus(w)} />,
+        badge: !w.machine.connected ? "オフライン" : w.sessions.some((s) => s.status === "waiting") ? "確認" : undefined,
       })),
     },
   ];
+  const openSession =
+    route.name === "session" ? machines.find((m) => m.id === route.machine)?.sessions.find((s) => s.sessionId === route.sessionId) : undefined;
   const activeId =
     route.name === "session"
-      ? [route.machine, route.sessionId].join(SEP)
-      : route.name === "plugin"
+      ? openSession
+        ? worktreeId(route.machine, openSession)
+        : ""
+      : route.name === "worktree"
+        ? worktreeKey(route.machine, route.path)
+        : route.name === "plugin"
         ? (pluginItems.find((i) => i.plugin === route.plugin && i.page.id === route.page)?.id ?? "")
         : route.name;
   const panel = route.name === "session" ? route.panel : undefined;
   // The session on a phone's screen (not while one of its panels takes the screen): the top bar shows its name and
   // state, and its header leaves them out (see SessionView), so the two bars become one.
-  const onScreen = route.name === "session" && !panel ? byId.get(activeId) : undefined;
+  const onScreen = route.name === "session" && !panel && openSession?.managed ? openSession : undefined;
+  const onScreenMachine = onScreen && machines.find((m) => m.id === (route.name === "session" ? route.machine : ""));
 
   return (
     <div className="flex h-dvh overflow-hidden bg-background text-foreground">
@@ -209,8 +228,10 @@ export function App() {
           if (id === "home" || id === "devices" || id === "settings" || id === "plugins") return go({ name: id });
           const item = pluginItems.find((i) => i.id === id);
           if (item) return go({ name: "plugin", plugin: item.plugin, page: item.page.id, params: item.page.params ?? {} });
-          const [machine, sessionId] = id.split(SEP);
-          if (machine && sessionId) go({ name: "session", machine, sessionId });
+          const w = worktrees.find((x) => x.id === id);
+          if (!w) return;
+          const s = sessionToOpen(w);
+          go(s ? { name: "session", machine: w.machine.id, sessionId: s.sessionId } : { name: "worktree", machine: w.machine.id, path: w.path });
         }}
         mobileOpen={mobileOpen}
         onMobileOpenChange={setMobileOpen}
@@ -220,10 +241,10 @@ export function App() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3 md:hidden">
           <SidebarTrigger onClick={() => setMobileOpen(true)} />
-          {onScreen ? (
+          {onScreen && onScreenMachine ? (
             <>
-              <h1 className="min-w-0 truncate text-sm font-semibold">{sessionLabel(onScreen.session)}</h1>
-              <SessionState machine={onScreen.machine} session={onScreen.session} />
+              <h1 className="min-w-0 truncate text-sm font-semibold">{sessionLabel(onScreen)}</h1>
+              <SessionState machine={onScreenMachine} session={onScreen} />
             </>
           ) : (
             <span className="flex items-center gap-1.5 font-semibold">
@@ -245,8 +266,21 @@ export function App() {
             {route.name === "settings" && <SettingsView />}
             {route.name === "plugins" && <PluginsView />}
             {route.name === "plugin" && <PluginPageView plugin={route.plugin} page={route.page} params={route.params} />}
+            {route.name === "worktree" && (
+              <WorktreeView
+                key={worktreeKey(route.machine, route.path)}
+                worktree={worktrees.find((w) => w.id === worktreeKey(route.machine, route.path))}
+                onSessionAction={setSessionAction}
+              />
+            )}
             {route.name === "session" && (desktop || !panel) && (
-              <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} panel={panel} />
+              <SessionView
+                key={`${route.machine}/${route.sessionId}`}
+                machine={route.machine}
+                sessionId={route.sessionId}
+                panel={panel}
+                onSessionAction={setSessionAction}
+              />
             )}
             {route.name === "session" && !desktop && panel && (
               <PanelView machine={route.machine} sessionId={route.sessionId} panel={panel} docked={false} />
@@ -260,7 +294,7 @@ export function App() {
         </div>
       </div>
       <PluginBadgeProbes />
-      <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} onNavigate={() => setMobileOpen(false)} />
+      <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} />
       <LaunchDialog open={launchOpen} onClose={() => setLaunchOpen(false)} onLaunched={() => setMobileOpen(false)} />
     </div>
   );

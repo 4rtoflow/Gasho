@@ -1,6 +1,6 @@
-// What can be done to a session from its place in the sidebar: rename it, fork it, or remove it. The menu opens with a
+// What can be done to a session from its tab above the session: rename it, fork it, or remove it. The menu opens with a
 // right-click (a long press on a touch screen, the context menu key on a keyboard). Each item opens a dialog, which the
-// app keeps at its top (SessionActionDialog): it stays open while the sidebar redraws or the drawer closes.
+// app keeps at its top (SessionActionDialog): it stays open while the tabs redraw, and when a fork opens in their place.
 import { GitFork, Pencil, Trash2 } from "lucide-react";
 import { AlertDialog, ContextMenu, Dialog } from "radix-ui";
 import { useRef, useState, type FormEvent, type ReactElement, type ReactNode } from "react";
@@ -9,7 +9,7 @@ import { BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SECONDARY, DIALOG_OVERLAY, DIALOG
 import { sessionLabel } from "@/lib/format";
 import { go, useRoute } from "@/lib/route";
 import { forkName, MAX_SESSION_NAME, nameProblem } from "@/lib/session-names";
-import { daemonAtLeast } from "@/lib/sessions";
+import { daemonAtLeast, tabAfterRemoval, worktreeId, worktreesByLastUse } from "@/lib/sessions";
 import { sendCommand, useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -35,7 +35,7 @@ const MENU =
 const MENU_ITEM =
   "flex w-full cursor-default items-center gap-2.5 rounded-lg px-2.5 py-1.5 outline-none select-none data-[highlighted]:bg-surface-raised data-[disabled]:pointer-events-none data-[disabled]:opacity-40 [&>svg]:size-4 [&>svg]:shrink-0";
 
-/** The menu of a session in the sidebar; `children` is the item's button, which opens it. */
+/** The menu of a session's tab; `children` is the tab, which opens it. */
 export function SessionContextMenu({
   machine,
   session,
@@ -102,34 +102,22 @@ export function SessionContextMenu({
   );
 }
 
-/**
- * The dialog for a picked menu item. `onNavigate` is called after it went to another page (to a fork, or home after
- * the open session was removed): the app closes the sidebar's drawer then.
- */
-export function SessionActionDialog({
-  request,
-  onClose,
-  onNavigate,
-}: {
-  request: SessionActionRequest | null;
-  onClose: () => void;
-  onNavigate?: () => void;
-}) {
+/** The dialog for a picked menu item. */
+export function SessionActionDialog({ request, onClose }: { request: SessionActionRequest | null; onClose: () => void }) {
   if (!request) return null;
   // A new pick starts a fresh dialog.
   const key = `${request.action}/${request.machine.id}/${request.session.sessionId}`;
-  if (request.action === "remove") return <RemoveDialog key={key} request={request} onClose={onClose} onNavigate={onNavigate} />;
-  return <NameDialog key={key} request={request} onClose={onClose} onNavigate={onNavigate} />;
+  if (request.action === "remove") return <RemoveDialog key={key} request={request} onClose={onClose} />;
+  return <NameDialog key={key} request={request} onClose={onClose} />;
 }
 
 interface DialogProps {
   request: SessionActionRequest;
   onClose: () => void;
-  onNavigate?: () => void;
 }
 
 /** Renaming a session, or forking it under a new name. */
-function NameDialog({ request: { action, machine, session }, onClose, onNavigate }: DialogProps) {
+function NameDialog({ request: { action, machine, session }, onClose }: DialogProps) {
   const fork = action === "fork";
   const current = sessionLabel(session);
   const [name, setName] = useState(() => (fork ? forkName(current) : current));
@@ -161,7 +149,6 @@ function NameDialog({ request: { action, machine, session }, onClose, onNavigate
     }
     if (fork && r.sessionId) {
       go({ name: "session", machine: machine.id, sessionId: r.sessionId });
-      onNavigate?.();
     }
     if (r.warning) setNotice(r.warning);
     else onClose();
@@ -251,7 +238,7 @@ function NameDialog({ request: { action, machine, session }, onClose, onNavigate
 }
 
 /** Removing a session: its Claude Code ends, and its conversation stays on the working server. */
-function RemoveDialog({ request: { machine, session }, onClose, onNavigate }: DialogProps) {
+function RemoveDialog({ request: { machine, session }, onClose }: DialogProps) {
   const route = useRoute();
   const { machines } = useAppState();
   const [busy, setBusy] = useState(false);
@@ -263,16 +250,24 @@ function RemoveDialog({ request: { machine, session }, onClose, onNavigate }: Di
   const remove = async () => {
     setBusy(true);
     setError(undefined);
+    // Its worktree's tabs as they are before it goes.
+    const m = machines.find((x) => x.id === machine.id);
+    const worktree = m && worktreesByLastUse([m]).find((w) => w.id === worktreeId(machine.id, live));
     const r = await sendCommand(machine.id, { type: "session.remove", sessionId: session.sessionId }, REMOVE_WAIT_MS);
     setBusy(false);
     if (!r.ok) {
       setError(r.error ?? "削除できませんでした。");
       return;
     }
-    // The open session is gone: back home, in place of its page.
+    // The open session is gone: the tab next to it opens in place of its page, or the worktree once it has no tab.
     if (route.name === "session" && route.machine === machine.id && route.sessionId === session.sessionId) {
-      go({ name: "home" }, { replace: true });
-      onNavigate?.();
+      const next = worktree && tabAfterRemoval(worktree, session.sessionId);
+      go(
+        next
+          ? { name: "session", machine: machine.id, sessionId: next.sessionId }
+          : { name: "worktree", machine: machine.id, path: worktree?.path ?? live.worktree?.path ?? live.cwd },
+        { replace: true },
+      );
     }
     onClose();
   };
@@ -283,9 +278,13 @@ function RemoveDialog({ request: { machine, session }, onClose, onNavigate }: Di
       {working && "作業の途中で止まります。"}
       {live.pendingInputs ? `送信待ちの ${live.pendingInputs} 件は送りません。` : ""}
     </>,
-    <>
-      会話の記録は {machine.name} に残ります。端末で <code className="font-mono text-[0.92em]">claude --resume</code> を使うと開き直せます。
-    </>,
+    machine.canResume ? (
+      <>会話の記録は {machine.name} に残ります。タブの左の過去の会話から開き直せます。</>
+    ) : (
+      <>
+        会話の記録は {machine.name} に残ります。端末で <code className="font-mono text-[0.92em]">claude --resume</code> を使うと開き直せます。
+      </>
+    ),
   ];
 
   return (

@@ -271,8 +271,14 @@ function commit(plan: Plan): string[] {
     const pulls = r.pulls.length ? `：${r.pulls.map((n) => `#${n}`).join(" ")}` : "";
     return `${pkgOf(r.id).title} ${r.from} → ${r.version}（${r.why}）${pulls}`;
   });
-  git("-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-    "commit", "-m", `${titles.join(" と ")} を公開する`, "-m", lines.join("\n"), "--", ...files);
+  // A pull request may have written the versions already (as before the releases were automatic): then there is
+  // nothing to commit, and the tags go on the commit the plan was made on.
+  if (git("diff", "--name-only", "HEAD", "--", ...files)) {
+    git("-c", "user.name=github-actions[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+      "commit", "-m", `${titles.join(" と ")} を公開する`, "-m", lines.join("\n"), "--", ...files);
+  } else {
+    console.log(`::notice::the source already says ${titles.join(", ")}; tagging ${plan.base.slice(0, 7)} without a commit`);
+  }
   const tags = plan.releases.map((r) => r.tag);
   for (const tag of tags) git("tag", tag);
 

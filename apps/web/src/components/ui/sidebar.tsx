@@ -1,6 +1,6 @@
 "use client";
-// From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item's button can be wrapped
-// (`wrap`), for a session's context menu, a section's title can have buttons (`action`, for "＋", and
+// From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item can have a second line
+// (`description`), for a worktree's repository, a section's title can have buttons (`action`, for "＋", and
 // `secondaryAction`), the items of a section can be put in another order by dragging them (`sort`), and the width on
 // a computer can be changed by dragging the right edge (`ResizeHandle`, lib/widths).
 
@@ -48,8 +48,8 @@ export type SidebarItem = {
   icon?: React.ReactNode;
   badge?: string | number;
   children?: SidebarChild[];
-  /** Gasho: puts something around the item's button, such as a context menu (the button stays the trigger). */
-  wrap?: (button: React.ReactElement) => React.ReactNode;
+  /** Gasho: a smaller line under the label. */
+  description?: string;
 };
 /** Gasho: a button at the right of a section's title, such as "＋" to add an item. */
 export type SidebarAction = { label: string; icon: React.ReactNode; onClick: () => void };
@@ -336,6 +336,7 @@ function Panel({
     const isOpen = hasChildren && open.has(item.id) && !collapsed;
     const childActive = !!item.children?.some((c) => c.id === activeId);
     const isActive = !hasChildren && activeId === item.id;
+    const tipLabel = item.description ? `${item.label} · ${item.description}` : item.label;
 
     const onClick = () => {
       if (!hasChildren) {
@@ -358,13 +359,14 @@ function Panel({
       <button
         type="button"
         onClick={onClick}
-        onMouseEnter={(e) => enter(e, item.label)}
-        onFocus={(e) => enter(e, item.label)}
-        aria-label={collapsed ? item.label : undefined}
+        onMouseEnter={(e) => enter(e, tipLabel)}
+        onFocus={(e) => enter(e, tipLabel)}
+        aria-label={collapsed ? tipLabel : undefined}
         aria-expanded={hasChildren ? isOpen : undefined}
         aria-current={isActive ? "page" : undefined}
         className={cn(
-          "relative flex h-9 w-full items-center gap-3 rounded-lg px-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:focus-visible:ring-neutral-600/60",
+          "relative flex w-full items-center gap-3 rounded-lg px-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:focus-visible:ring-neutral-600/60",
+          item.description ? "min-h-9 py-1" : "h-9",
           isActive || childActive
             ? "text-neutral-900 dark:text-white"
             : "text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white"
@@ -382,9 +384,12 @@ function Panel({
           initial={false}
           animate={{ opacity: collapsed ? 0 : 1 }}
           transition={{ duration: 0.15 }}
-          className="relative flex-1 truncate whitespace-nowrap text-left"
+          className="relative min-w-0 flex-1 whitespace-nowrap text-left"
         >
-          {item.label}
+          <span className="block truncate">{item.label}</span>
+          {item.description && (
+            <span className="block truncate text-[11px] leading-4 text-neutral-400 dark:text-neutral-500">{item.description}</span>
+          )}
         </motion.span>
         {!collapsed && item.badge !== undefined && (
           <motion.span
@@ -462,7 +467,7 @@ function Panel({
     if (!sort) {
       return (
         <div key={item.id}>
-          {item.wrap ? item.wrap(button) : button}
+          {button}
           {children}
         </div>
       );
@@ -495,7 +500,7 @@ function Panel({
         )}
       >
         <div className="flex items-center">
-          <div className="min-w-0 flex-1">{item.wrap ? item.wrap(button) : button}</div>
+          <div className="min-w-0 flex-1">{button}</div>
           {!collapsed && (
             <span
               data-sort-handle

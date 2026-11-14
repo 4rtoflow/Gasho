@@ -14,13 +14,14 @@ import type {
   SessionInfo,
   SessionModel,
   SessionRepo,
+  SessionWorktree,
   SwitchField,
   TranscriptEntry,
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { listDir, readFileAt, writeFileAt } from "./files.ts";
 import { cloneRepo, createFolder } from "./folders.ts";
-import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
+import { githubRepoOf, nestedRepos, readGitGraph, worktreeOf } from "./git.ts";
 import { GitHubProxy } from "./github.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
@@ -70,14 +71,14 @@ import {
 } from "./managed.ts";
 import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
 import { SessionTerminals, Terminals } from "./terminal.ts";
-import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
+import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
 import { log } from "./util.ts";
 
 export const DAEMON_VERSION = "0.14.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
-/** How long the list of repositories inside a folder (and their branches) is reused. */
+/** How long the worktree a folder is in, or the repositories inside it, and their branches are reused. */
 const REPOS_CACHE_MS = 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
@@ -169,6 +170,7 @@ export class Daemon {
   private polling = false;
   private github = new Map<string, { at: number; repo?: GitHubRepo }>();
   private repos = new Map<string, { at: number; repos?: SessionRepo[] }>();
+  private worktrees = new Map<string, { at: number; worktree?: SessionWorktree }>();
   /** The terminals of the sessions Gasho started (built-in; zellij for those from gasho-daemon 0.10 and before). */
   private terminals: SessionTerminals;
   private managed: ManagedSessions;
@@ -398,6 +400,7 @@ export class Daemon {
     this.applyMeta(t);
     info.github = await this.githubOf(info.cwd);
     info.repos = await this.reposOf(info.cwd);
+    info.worktree = await this.worktreeAt(info.cwd);
   }
 
   private applyMeta(t: Tracked): void {
@@ -449,6 +452,14 @@ export class Daemon {
     return repos;
   }
 
+  private async worktreeAt(cwd: string): Promise<SessionWorktree | undefined> {
+    const hit = this.worktrees.get(cwd);
+    if (hit && Date.now() - hit.at < REPOS_CACHE_MS) return hit.worktree;
+    const worktree = await worktreeOf(cwd);
+    this.worktrees.set(cwd, { at: Date.now(), worktree });
+    return worktree;
+  }
+
   private emitSessions(): void {
     const sessions = [...this.tracked.values()]
       .map((t) => {
@@ -489,6 +500,7 @@ export class Daemon {
       models: this.models?.options,
       modelsAt: this.models?.at,
       features: [...INPUT_FEATURES],
+      canResume: true,
     });
   }
 
@@ -756,6 +768,8 @@ export class Daemon {
       case "session.rename":
       case "session.fork":
       case "session.remove":
+      case "session.history":
+      case "session.resume":
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
@@ -780,6 +794,12 @@ export class Daemon {
               break;
             case "session.remove":
               result = await this.remove(m.sessionId);
+              break;
+            case "session.history":
+              result = await this.history(m.cwd, m.subfolders === true);
+              break;
+            case "session.resume":
+              result = await this.resume(m.sessionId);
               break;
             case "permission.answer": {
               if (m.permissionId.startsWith(OPEN_QUESTION)) {
@@ -1149,6 +1169,50 @@ export class Daemon {
     }
     await this.refresh();
     return { ok: true, sessionId: forkId, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  /** The conversations of a folder that no Claude Code has open now (see pastConversations). */
+  private async history(cwd: string, subfolders: boolean): Promise<CommandResult> {
+    const history = await pastConversations(this.cfg.claudeDir, path.resolve(cwd), { subfolders, open: new Set(this.tracked.keys()) });
+    return { ok: true, history };
+  }
+
+  /**
+   * Opens a conversation that no Claude Code has open again, in its folder, as a session started from Gasho:
+   * `claude --remote-control <name> --resume <id>` in a new terminal. Its name is the conversation's (see
+   * conversationFacts); without one, it is named after its next message, as a new session is.
+   */
+  private async resume(sessionId: string): Promise<CommandResult> {
+    if (!this.canLaunch) return { ok: false, error: NO_TERMINAL };
+    // Open in two processes, the conversation would be written by both.
+    if (this.tracked.has(sessionId)) return { ok: false, error: "この会話は、いま別の Claude Code が開いています。" };
+    const file = await findTranscript(this.cfg.claudeDir, sessionId);
+    const facts = file ? await conversationFacts(file).catch(() => undefined) : undefined;
+    if (!facts) return { ok: false, error: "この会話の記録が見つかりません。" };
+    const stat = await fsp.stat(facts.cwd).catch(() => undefined);
+    if (!stat?.isDirectory()) return { ok: false, error: `会話のフォルダーがありません：${facts.cwd}` };
+    const titled = facts.title ? titleName(facts.title) : undefined;
+    const name = titled ?? `${path.basename(facts.cwd)}-gasho`;
+    const started = await this.startClaude(facts.cwd, name, { claudeArgs: ["--resume", sessionId], resuming: true });
+    if ("error" in started) {
+      // Only the launcher asks whether to trust a folder.
+      const error = started.needsTrust
+        ? "このフォルダーは、もう Claude Code に信頼されていません。「新しいセッション」でこのフォルダーを選んで信頼してから、もう一度開いてください。"
+        : started.error;
+      return { ok: false, error };
+    }
+    const { sessionId: id, terminal, pid } = started;
+    this.managed.add({ sessionId: id, terminal, pid, cwd: facts.cwd, name, launchedAt: Date.now(), ...(titled ? {} : { autoName: true }) });
+    await this.managed.save();
+    log(`resumed ${sessionId} as "${name}" (${id})`);
+    const warnings: string[] = started.mcpDeclined ? [MCP_DECLINED] : [];
+    if (started.resumeAsked) {
+      warnings.push(
+        "前の発言から時間がたっていて会話も長いため、Claude Code が要約から始めるかを尋ねました。会話はそのまま引き継いでいます。次の返答では、会話をすべて読み直します（時間とトークンが多くかかります）。",
+      );
+    }
+    await this.refresh();
+    return { ok: true, sessionId: id, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
   }
 
   /**

@@ -3,7 +3,18 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { compactSummaryText, emptyMeta, modelLabel, parseRecord, readTranscript, toUrlSessionId, TranscriptTail, unwrapPasted } from "../src/transcript.ts";
+import {
+  compactSummaryText,
+  emptyMeta,
+  modelLabel,
+  parseRecord,
+  pastConversations,
+  projectDirName,
+  readTranscript,
+  toUrlSessionId,
+  TranscriptTail,
+  unwrapPasted,
+} from "../src/transcript.ts";
 
 test("user text: interrupt marker, branch and timestamp", () => {
   const meta = emptyMeta();
@@ -359,4 +370,41 @@ test("Claude's latest question is kept whole while it has no answer: its result 
   // A subagent's question is not the session's.
   ask("toolu_3", { isSidechain: true });
   assert.equal(meta.question, undefined);
+});
+
+test("past conversations: a folder's, by the folder their records give, the latest first, with their name or title", async () => {
+  const claude = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-test-"));
+  const write = async (folder: string, id: string, records: object[], mtime: number) => {
+    const dir = path.join(claude, "projects", projectDirName(folder));
+    await fs.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${id}.jsonl`);
+    await fs.writeFile(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    await fs.utimes(file, mtime, mtime);
+  };
+  const said = (cwd: string, text: string) => ({ type: "user", cwd, message: { role: "user", content: text } });
+  await write("/w/app", "named", [said("/w/app", "最初の発言"), { type: "ai-title", aiTitle: "題" }, { type: "custom-title", customTitle: "付けた名前" }], 100);
+  await write("/w/app", "titled", [said("/w/app", "最初の発言"), { type: "ai-title", aiTitle: "Claude Code の題" }], 300);
+  await write("/w/app", "untitled", [{ type: "user", cwd: "/w/app", isMeta: true, message: { content: "<command-name>/x</command-name>" } }, said("/w/app", "<b>直して</b> ください")], 200);
+  await write("/w/app/web", "inside", [said("/w/app/web", "画面")], 400);
+  // "/w/app-x" has the same directory name as "/w/app/x": its records tell them apart.
+  await write("/w/app-x", "other", [said("/w/app-x", "別の worktree")], 500);
+  await write("/w/app", "empty", [{ type: "file-history-snapshot", cwd: "/w/app" }], 600);
+  await write("/w/app", "running", [said("/w/app", "動いている")], 700);
+
+  const open = new Set(["running"]);
+  const top = await pastConversations(claude, "/w/app", { open });
+  assert.deepEqual(
+    top.map((c) => [c.sessionId, c.title]),
+    [
+      ["titled", "Claude Code の題"],
+      ["untitled", "直して ください"],
+      ["named", "付けた名前"],
+    ],
+  );
+  const all = await pastConversations(claude, "/w/app", { open, subfolders: true });
+  assert.deepEqual(
+    all.map((c) => `${c.sessionId} ${c.cwd}`),
+    ["inside /w/app/web", "titled /w/app", "untitled /w/app", "named /w/app"],
+  );
+  assert.equal(all[0]?.lastActivityAt, 400_000);
 });
