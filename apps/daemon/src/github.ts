@@ -41,6 +41,10 @@ const MAX_STORED_BYTES = 64 * 1024 * 1024;
 const ANY = "";
 
 const clamp = (v: unknown, min: number, max: number, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(Math.max(v, min), max) : fallback);
+const limitsOf = (ask: GitHubAsk) => ({
+  timeoutMs: clamp(ask.timeoutMs, 1000, MAX_TIMEOUT_MS, TIMEOUT_MS),
+  maxBuffer: clamp(ask.maxBuffer, 1024, MAX_BUFFER_LIMIT, MAX_BUFFER),
+});
 
 /** "owner/name" in lower case, from owner/name, HOST/owner/name or a URL of the repository; undefined otherwise. */
 export function repoKey(s: unknown): string | undefined {
@@ -81,8 +85,9 @@ export interface GitHubProxyOptions {
 
 /**
  * Runs gh for the plugins' daemon parts. A read is answered from what gh said for the same arguments if that is new
- * enough, and reads asked while the same one runs wait for it, so gh runs once. A write runs gh, then drops what is kept
- * of its repository (and the answers whose repository is not known): the next read of them runs gh again.
+ * enough, and reads asked (with the same limits) while the same one runs wait for it, so gh runs once. A write runs gh,
+ * then drops what is kept of its repository (and the answers whose repository is not known): the next read of them runs
+ * gh again.
  */
 export class GitHubProxy {
   private ghBin: string;
@@ -106,16 +111,19 @@ export class GitHubProxy {
     const maxAge = clamp(ask.maxAgeSeconds, 0, MAX_AGE_LIMIT_SECONDS, MAX_AGE_SECONDS) * 1000;
     const hit = this.stored.get(key);
     if (hit && this.now() - hit.at < maxAge) return Promise.resolve(hit.answer);
-    const running = this.running.get(key);
+    const limits = limitsOf(ask);
+    // Only reads with the same limits wait for one gh: one that may wait longer must not fail when another's ends.
+    const runKey = JSON.stringify([ask.args, limits.timeoutMs, limits.maxBuffer]);
+    const running = this.running.get(runKey);
     if (running) return running.answer;
     const writes = this.writes.get(tag) ?? 0;
-    const answer = this.run(ask).then((a) => {
+    const answer = this.runGh(ask.args, limits).then((a) => {
       if ((this.writes.get(tag) ?? 0) === writes) this.keep(key, tag, a);
       return a;
     });
-    this.running.set(key, { tag, answer });
+    this.running.set(runKey, { tag, answer });
     const done = () => {
-      if (this.running.get(key)?.answer === answer) this.running.delete(key);
+      if (this.running.get(runKey)?.answer === answer) this.running.delete(runKey);
     };
     answer.then(done, done);
     return answer;
@@ -125,18 +133,11 @@ export class GitHubProxy {
     const repo = repoKey(ask.repo);
     if (!repo) throw new Error("ctx.github.write: give the repository it changes as repo (owner/name)");
     try {
-      return await this.run(ask);
+      return await this.runGh(ask.args, limitsOf(ask));
     } finally {
       // Also when gh failed: it may have changed part of what it was asked to.
       this.forget(repo);
     }
-  }
-
-  private run(ask: GitHubAsk): Promise<ExecResult> {
-    return this.runGh(ask.args, {
-      timeoutMs: clamp(ask.timeoutMs, 1000, MAX_TIMEOUT_MS, TIMEOUT_MS),
-      maxBuffer: clamp(ask.maxBuffer, 1024, MAX_BUFFER_LIMIT, MAX_BUFFER),
-    });
   }
 
   private keep(key: string, tag: string, answer: ExecResult): void {
