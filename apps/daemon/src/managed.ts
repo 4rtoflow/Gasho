@@ -604,6 +604,15 @@ export function launchArgs(o: {
   ];
 }
 
+/**
+ * `systemd-run` arguments that run a command in a systemd user scope of its own (`<unit>.scope`). Every process that a
+ * service starts belongs to the service's unit, and stopping the unit stops them all (systemd's default KillMode): a
+ * session that gasho-daemon's service started would end with each restart of gasho-daemon. In a scope, it goes on.
+ */
+export function scopeArgs(unit: string): string[] {
+  return ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, "--"];
+}
+
 export function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -616,6 +625,8 @@ export function isAlive(pid: number): boolean {
 /** Thin wrapper over the zellij CLI. Every call names the session explicitly. */
 export class Zellij {
   private env: Record<string, string>;
+  /** Whether systemd-run can start user scopes on this machine (checked once; see start). */
+  private scopes: Promise<boolean> | undefined;
 
   constructor(env: Record<string, string>) {
     this.env = env;
@@ -624,6 +635,30 @@ export class Zellij {
   async run(args: string[]): Promise<string> {
     const { stdout } = await execFileP("zellij", args, { env: this.env, timeout: 15_000, maxBuffer: 4 * 1024 * 1024 });
     return stdout;
+  }
+
+  /**
+   * Starts the background session `session` with `args` (launchArgs). Where the user's systemd runs, it starts in a
+   * scope of its own (see scopeArgs), so its zellij server and Claude Code do not belong to gasho-daemon's service and
+   * outlive a restart of it. Elsewhere (macOS, no user manager), zellij is run as it is.
+   */
+  async start(session: string, args: string[]): Promise<void> {
+    if (!(await this.canScope())) {
+      await this.run(args);
+      return;
+    }
+    await execFileP("systemd-run", [...scopeArgs(session), "zellij", ...args], { env: this.env, timeout: 15_000 });
+  }
+
+  private canScope(): Promise<boolean> {
+    this.scopes ??= execFileP("systemd-run", ["--user", "--scope", "--quiet", "--collect", "true"], {
+      env: this.env,
+      timeout: 15_000,
+    }).then(
+      () => true,
+      () => false,
+    );
+    return this.scopes;
   }
 
   async available(): Promise<boolean> {
