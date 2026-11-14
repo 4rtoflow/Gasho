@@ -3,7 +3,7 @@
 // cannot be used when it cannot; and the plugins of GashoPlugins (its catalog, P10), to add, update and remove. Every
 // change goes live at once (hot reload). Plugins being developed are linked with the Gasho server's command instead
 // (npm run hub:plugin -- add --link), and are never updated from the catalog.
-import { ArrowUpCircle, LoaderCircle, Plus, Puzzle, RefreshCw, Settings2, Trash2 } from "lucide-react";
+import { ArrowUpCircle, LoaderCircle, Palette, Plus, Puzzle, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { AlertDialog, Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
 import type { CatalogPlugin, MachineInfo, PluginCatalog, PluginDaemonState, PluginInfo, PluginMachines } from "@gasho/protocol";
@@ -15,6 +15,7 @@ import { requestCatalog, sendPluginCommand, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 import { apiSupported, usePluginRegistry } from "@/plugins/registry";
+import { enabledThemes } from "@/plugins/theme";
 
 const STATE: Record<PluginDaemonState, { label: string; className: string }> = {
   running: { label: "動いている", className: "text-emerald-400" },
@@ -48,6 +49,7 @@ export function PluginsView() {
   const updates = updatesOf(infos, catalog);
   const installed = new Set(infos.map((i) => i.id));
   const available = (catalog?.plugins ?? []).filter((p) => !installed.has(p.id)).sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  const [themeInUse, ...othersEnabled] = enabledThemes(infos);
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4 md:p-6">
       <div className="flex items-start justify-between gap-3">
@@ -79,6 +81,11 @@ export function PluginsView() {
                 loadError={errors[info.id]}
                 loading={Boolean(loading[info.id])}
                 update={updates.get(info.id)}
+                themeNote={
+                  themeInUse && othersEnabled.some((t) => t.id === info.id)
+                    ? `テーマが2つ以上有効です。当てているのは ${themeInUse.manifest.name} です。使わないテーマを無効にしてください。`
+                    : undefined
+                }
                 onRemove={() => setRemoving(info)}
               />
             ))}
@@ -140,6 +147,7 @@ function PluginCard({
   loadError,
   loading,
   update,
+  themeNote,
   onRemove,
 }: {
   info: PluginInfo;
@@ -148,6 +156,8 @@ function PluginCard({
   loading: boolean;
   /** The catalog's newer version of it. */
   update?: CatalogPlugin;
+  /** Why this enabled theme is not the one in use. */
+  themeNote?: string;
   onRemove: () => void;
 }) {
   const [busy, setBusy] = useState<"change" | "update">();
@@ -168,7 +178,7 @@ function PluginCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium">
-            <Puzzle className="size-4 text-muted-foreground" />
+            {m.theme ? <Palette className="size-4 text-muted-foreground" /> : <Puzzle className="size-4 text-muted-foreground" />}
             {m.name}
             {m.version && <span className="text-xs font-normal text-muted-foreground tabular-nums">{m.version}</span>}
             {update && (
@@ -176,6 +186,7 @@ function PluginCard({
                 {canUpdate ? `（${update.version} に更新できる）` : `（${update.version} は API ${update.api} が要る）`}
               </span>
             )}
+            {m.theme && <span className="rounded-full border border-border px-1.5 py-px text-[11px] font-normal text-muted-foreground">テーマ</span>}
             {info.dev && <span className="rounded-full border border-sky-500/40 px-1.5 py-px text-[11px] font-normal text-sky-300">開発中</span>}
             {!info.enabled && <span className="rounded-full border border-border px-1.5 py-px text-[11px] font-normal text-muted-foreground">無効</span>}
             {info.enabled && loading && <span className="text-[11px] font-normal text-muted-foreground">読み込み中…</span>}
@@ -222,6 +233,7 @@ function PluginCard({
 
       {problem && <p className="text-xs text-red-400">{problem}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
+      {themeNote && <p className="text-xs text-amber-400">{themeNote}</p>}
       {permissionsText(m.permissions) && <p className="text-xs text-muted-foreground">{permissionsText(m.permissions)}</p>}
       {m.daemon && (
         <DaemonMachines info={info} machines={machines} busy={Boolean(busy)} onChange={(machinesValue) => void run({ type: "plugin.machines", plugin: info.id, machines: machinesValue })} />
