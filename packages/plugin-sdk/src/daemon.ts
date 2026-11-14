@@ -61,7 +61,7 @@ export interface ExecError extends Error {
 export interface GitHubReadOptions {
   /**
    * How old an answer gasho-daemon kept for the same arguments may be, in seconds: 30 by default, at most 600. With 0,
-   * gh runs again (still once for those asking the same at the same time).
+   * gh runs again (still once for those asking the same, with the same timeoutMs and maxBuffer, at the same time).
    */
   maxAgeSeconds?: number;
   /**
