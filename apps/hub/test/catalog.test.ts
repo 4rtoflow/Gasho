@@ -299,6 +299,28 @@ test("a plugin of the catalog is added, updated and removed from a browser, and 
   assert.match((await result("r2")).error ?? "", /入っていません/);
 });
 
+test("adding a theme from the catalog disables the theme enabled before, and browsers never hear of both enabled", async () => {
+  const theme = { id: "vscode-dark", name: "VS Code Dark", version: "1.0.0", api: "1.6", theme: { background: "#121314" } };
+  const file = tgz(entry("./", "", "5"), entry("./gasho-plugin.json", JSON.stringify(theme)));
+  const assets = new Map([
+    ["catalog/catalog.json", catalogJson([{ ...theme, theme: undefined, daemon: false, release: "vscode-dark-v1.0.0", file: "vscode-dark-1.0.0.tgz", sha256: sha256(file), size: file.length }])],
+    ["vscode-dark-v1.0.0/vscode-dark-1.0.0.tgz", file],
+  ]);
+  const { dir, registry, client, hub, catalog, store, result } = await setup(assets);
+  fs.mkdirSync(path.join(dir, "ayu-dark"));
+  fs.writeFileSync(path.join(dir, "ayu-dark", "gasho-plugin.json"), JSON.stringify({ ...theme, id: "ayu-dark", name: "ayu Dark" }));
+  await registry.scan();
+  await catalog.read(0);
+  const from = client.sent.length;
+  hub.onClientMessage(client, { type: "plugin.install", requestId: "i1", plugin: "vscode-dark", machines: "all" });
+  assert.deepEqual(await result("i1"), { ok: true });
+  const told = client.sent.slice(from).flatMap((m) => (m.type === "plugins" ? [m.plugins] : []));
+  assert.ok(told.length > 0);
+  for (const plugins of told) assert.ok(plugins.filter((p) => p.manifest.theme && p.enabled).length <= 1);
+  assert.deepEqual(Object.fromEntries((lastPlugins(client.sent) ?? []).map((p) => [p.id, p.enabled])), { "ayu-dark": false, "vscode-dark": true });
+  assert.ok(store.recentEvents().some((e) => e.event === "Gasho:plugin.enable" && e.summary?.startsWith("ayu Dark [off]（VS Code Dark に切り替え）")));
+});
+
 test("a release that is not what the catalog says, or needs a newer plugin API, is not added", async () => {
   const wrongId = tgz(entry("gasho-plugin.json", JSON.stringify({ ...manifest("1.0.0"), id: "other" })), entry("web.js", "x"), entry("daemon.js", "x"));
   const newApi = release("1.0.0", { api: "1.99" });

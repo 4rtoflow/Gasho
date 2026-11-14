@@ -298,6 +298,7 @@ export class PluginHub {
         if (typeof cmd.enabled !== "boolean") return { ok: false, error: "有効か無効かの指定が正しくありません。" };
         this.deps.store.setPluginState(entry.id, { ...state, enabled: cmd.enabled });
         audit("Gasho:plugin.enable", `${name} [${cmd.enabled ? "on" : "off"}]`);
+        if (cmd.enabled && entry.revision?.manifest.theme) this.disableOtherThemes(peer, entry.id, name);
         break;
       }
       case "plugin.machines": {
@@ -359,15 +360,29 @@ export class PluginHub {
     const tgz = await catalog.fetch(entry);
     // Before the files, so that its daemon part starts only where it was chosen to.
     this.deps.store.setPluginState(id, { enabled: true, machines });
+    let manifest: PluginManifest;
     try {
-      await installRelease(this.deps.registry.dir, entry, tgz);
+      manifest = await installRelease(this.deps.registry.dir, entry, tgz);
     } catch (e) {
       this.deps.store.forgetPlugin(id);
       throw e;
     }
     this.audit(peer, "Gasho:plugin.install", `${entry.name} ${entry.version}`);
+    // Before the scan, so that browsers never hear of two themes enabled.
+    if (manifest.theme) this.disableOtherThemes(peer, id, manifest.name);
     await this.deps.registry.scan();
     return { ok: true };
+  }
+
+  /** Only one theme (P16) is enabled at a time: enabling or adding one (`id`) disables the others. */
+  private disableOtherThemes(peer: ClientPeer, id: string, name: string): void {
+    for (const e of this.deps.registry.entries()) {
+      if (e.id === id || !e.revision?.manifest.theme) continue;
+      const state = this.state(e.id);
+      if (!state.enabled) continue;
+      this.deps.store.setPluginState(e.id, { ...state, enabled: false });
+      this.audit(peer, "Gasho:plugin.enable", `${e.revision.manifest.name} [off]（${name} に切り替え）`);
+    }
   }
 
   private async update(peer: ClientPeer, id: string): Promise<CommandResult> {
