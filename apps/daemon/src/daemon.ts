@@ -73,7 +73,7 @@ import { SessionTerminals, Terminals } from "./terminal.ts";
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.11.0";
+export const DAEMON_VERSION = "0.11.1";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;

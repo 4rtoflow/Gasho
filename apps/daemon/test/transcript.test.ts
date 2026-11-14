@@ -73,6 +73,25 @@ test("assistant tool_use and user tool_result; thinking is dropped", () => {
   assert.deepEqual(r?.blocks[0], { type: "tool_result", toolUseId: "toolu_1", content: "ok", isError: false });
 });
 
+test("long texts are sent whole: an answer with diagrams, a message sent from Gasho; only a runaway text is cut", () => {
+  const textOf = (e: ReturnType<typeof parseRecord>): string | undefined => {
+    const b = e?.blocks[0];
+    return b?.type === "text" ? b.text : undefined;
+  };
+  // An answer with diagrams and tables: one of 8,229 characters was cut at 4,000, in the middle of a diagram.
+  const answer = "│ 図の行 │\n".repeat(1000);
+  const a = parseRecord({ type: "assistant", uuid: "a1", message: { content: [{ type: "text", text: answer }] } }, emptyMeta());
+  assert.equal(textOf(a), answer);
+  // Gasho sends messages of up to 20,000 characters.
+  const message = "あ".repeat(20000);
+  const u = parseRecord({ type: "user", uuid: "u1", message: { role: "user", content: message } }, emptyMeta());
+  assert.equal(textOf(u), message);
+  // Past 40,000 characters, the rest is left out and how much is noted.
+  const runaway = "x".repeat(40010);
+  const r = parseRecord({ type: "assistant", uuid: "a2", message: { content: [{ type: "text", text: runaway }] } }, emptyMeta());
+  assert.equal(textOf(r), `${"x".repeat(40000)}… (+10 chars)`);
+});
+
 test("metadata records update meta and are not entries", () => {
   const meta = emptyMeta();
   assert.equal(parseRecord({ type: "ai-title", aiTitle: "スマホからのテスト" }, meta), null);
