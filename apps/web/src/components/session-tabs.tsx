@@ -1,11 +1,14 @@
 // The tabs above a session: the sessions Gasho shows in the same worktree, in the order they started. A tab opens its
-// session; a right-click (a long press on a phone) opens the session's menu (see session-menu).
-import { useEffect, useRef } from "react";
+// session; a right-click (a long press on a phone) opens the session's menu (see session-menu). "＋" after the tabs
+// starts a new session in the worktree.
+import { LoaderCircle, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { MachineInfo, SessionInfo } from "@gasho/protocol";
 import { SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { sessionLabel } from "@/lib/format";
 import { go } from "@/lib/route";
+import { sendCommand } from "@/lib/store";
 import { worktreeId, worktreesByLastUse } from "@/lib/sessions";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +28,32 @@ export function SessionTabs({
   useEffect(() => {
     current.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, []);
+
+  const [launching, setLaunching] = useState(false);
+  const [error, setError] = useState<string>();
+  // The new session opens only while these tabs are still shown: one picked meanwhile is not left for it.
+  const shown = useRef(true);
+  useEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
+  }, []);
+  const canLaunch = machine.connected && machine.canLaunch === true;
+  const launch = async () => {
+    if (!canLaunch || launching) return;
+    setLaunching(true);
+    setError(undefined);
+    // In the worktree's top folder, or the session's own folder when it is not in a repository.
+    const r = await sendCommand(machine.id, { type: "session.launch", cwd: session.worktree?.path ?? session.cwd }, 60_000);
+    if (!shown.current) return;
+    setLaunching(false);
+    if (!r.ok || !r.sessionId) {
+      setError(r.error ?? "起動できませんでした。");
+      return;
+    }
+    go({ name: "session", machine: machine.id, sessionId: r.sessionId });
+  };
 
   return (
     <nav
@@ -55,6 +84,21 @@ export function SessionTabs({
           </SessionContextMenu>
         );
       })}
+      <button
+        type="button"
+        onClick={() => void launch()}
+        disabled={!canLaunch || launching}
+        aria-label="この worktree で新しいセッションを起動"
+        title={canLaunch ? "この worktree で新しいセッションを起動" : "接続していて、セッションの端末を作れる working server でだけ起動できます"}
+        className="grid size-9 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+      >
+        {launching ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
+      </button>
+      {error && (
+        <p role="alert" title={error} className="self-center truncate text-xs text-red-400">
+          {error}
+        </p>
+      )}
     </nav>
   );
 }

@@ -157,7 +157,7 @@ GitHub プラグインの場合は、次のようになる。
 
 ```
 ┌────────────────┬───────────────────────────────────┬─────────────────┐
-│ Gasho          │ * gasho-plugin  * api             │ Issues        x │
+│ Gasho          │ * gasho-plugin  * api  ＋         │ Issues        x │
 │                ├───────────────────────────────────┤ 4rtoflow/Gasho  │
 │ ホーム         │ gasho-plugin               作業中 │                 │
 │ リポジトリ ◀P1 │ Gasho main  Issues PRs ファイル   ├─────────────────┤
