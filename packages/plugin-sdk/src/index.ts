@@ -4,7 +4,7 @@
 import type { ComponentType, ReactNode } from "react";
 import type { GitHubRepo, MachineInfo, PluginInfo, SessionInfo, SessionRepo } from "@gasho/protocol";
 
-export type { GitHubRepo, MachineInfo, PluginInfo, SessionInfo, SessionRepo } from "@gasho/protocol";
+export type { ContextWindow, GitHubRepo, MachineInfo, PlanLimits, PluginInfo, SessionInfo, SessionRepo, UsageWindow } from "@gasho/protocol";
 
 /** The arguments of a page or a panel: the query of its URL. */
 export type Params = Record<string, string>;
@@ -121,6 +121,26 @@ export interface ConversationEndItem {
   component: ComponentType<ConversationEndProps>;
 }
 
+/** A part in the line under a session's chat box (P14), and the session it is drawn for. */
+export interface ComposerFooterProps {
+  machine: MachineInfo;
+  session: SessionInfo;
+}
+
+/**
+ * A part in the line under a session's chat box (P14), where the keyboard hint and the character count are: left of
+ * the count, also on a phone (where the hint is hidden). The line is 1.5rem high; what does not fit goes in a Popover.
+ * Plugin API 1.4.
+ */
+export interface ComposerFooterItem {
+  id: string;
+  /** Where it goes among the plugins' parts there: a smaller one comes further left. By default 500. */
+  order?: number;
+  /** Whether it shows for this session. */
+  when?: (ctx: SessionContext) => boolean;
+  component: ComponentType<ComposerFooterProps>;
+}
+
 /** What the web part of a plugin adds to Gasho's screen (its web.js exports it as default). */
 export interface PluginDefinition {
   sidebar?: SidebarItem[];
@@ -132,6 +152,8 @@ export interface PluginDefinition {
   settings?: ComponentType;
   /** Parts at the end of a session's conversation (P13). Plugin API 1.2. */
   conversationEnd?: ConversationEndItem[];
+  /** Parts in the line under a session's chat box (P14). Plugin API 1.4. */
+  composerFooter?: ComposerFooterItem[];
 }
 
 /** A call of a method of the plugin's daemon part (P7). */
@@ -210,6 +232,28 @@ export interface SessionActivity {
   tool?: { name: string; summary?: string; startedAt: number };
 }
 
+/**
+ * A popup that `trigger` opens, in Gasho's look (plugin API 1.4). It closes on Esc, on a press outside it, and on a
+ * press of the trigger. It is not modal: the page behind it scrolls. What it shows is drawn only while it is open,
+ * in the plugin's scope (its CSS and the SDK's hooks work there).
+ */
+export interface PopoverProps {
+  /** One element that takes a ref, such as a <button>: it gets aria-expanded and aria-controls. */
+  trigger: ReactNode;
+  children?: ReactNode;
+  /** The side of the trigger it opens on, when there is room ("bottom" by default). */
+  side?: "top" | "bottom" | "left" | "right";
+  /** How it lines up with the trigger along that side ("center" by default). */
+  align?: "start" | "center" | "end";
+  /** Its name for a screen reader. */
+  label?: string;
+  /** Classes for the popup itself, such as its width ("w-72" by default). */
+  className?: string;
+  /** Open or closed, when the plugin keeps that itself (with onOpenChange). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
 /** A session's folder, or one of the repositories gasho-daemon found inside it. */
 export interface RepoChoice {
   repos?: SessionRepo[];
@@ -268,6 +312,8 @@ export interface GashoSdk {
   Markdown: ComponentType<{ text: string }>;
   /** "3分前", with the exact time on hover. */
   RelativeTime: ComponentType<{ at: string | number; now: number }>;
+  /** A popup that a button opens (plugin API 1.4). */
+  Popover: ComponentType<PopoverProps>;
 }
 
 export declare const definePlugin: GashoSdk["definePlugin"];
@@ -294,6 +340,7 @@ export declare const RepoTabs: GashoSdk["RepoTabs"];
 export declare const Tile: GashoSdk["Tile"];
 export declare const Markdown: GashoSdk["Markdown"];
 export declare const RelativeTime: GashoSdk["RelativeTime"];
+export declare const Popover: GashoSdk["Popover"];
 
 /**
  * What Gasho's screen puts on globalThis.__gasho for plugins: the version of the plugin API, and the modules plugins

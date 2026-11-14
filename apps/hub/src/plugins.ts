@@ -14,7 +14,7 @@ import type { PluginManifest, PluginMethodSpec, PluginPermission, PluginSettingS
 
 /** The plugin API this Gasho server serves: plugins written for 1.0 … 1.PLUGIN_API_MINOR. */
 export const PLUGIN_API_MAJOR = 1;
-export const PLUGIN_API_MINOR = 3;
+export const PLUGIN_API_MINOR = 4;
 /** The version of the plugin API, as plugins and gasho-daemon name it. */
 export const PLUGIN_API = `${PLUGIN_API_MAJOR}.${PLUGIN_API_MINOR}`;
 

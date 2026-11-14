@@ -11,6 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { Daemon } from "../src/daemon.ts";
 import { dialogOpen, mcpQuestionOpen, plainScreen, trustQuestion, typedInBox } from "../src/managed.ts";
+import { RELAY_FILE, shellQuote } from "../src/statusline.ts";
 import type { TerminalStart } from "../src/terminal.ts";
 
 const RULE = "─".repeat(50);
@@ -217,12 +218,31 @@ test("with trust, the cursor is moved to yes before the one Enter, and the sessi
     assert.deepEqual(fake.keys, ["Down", "Enter"]);
     assert.deepEqual(killed, []);
     assert.equal(d.managed.get(SID)?.cwd, folder);
-    // Claude Code runs with Remote Control in the folder, in a terminal named after the session.
+    // Claude Code runs with Remote Control in the folder, in a terminal named after the session, and its status line
+    // is the relay that reports the context window and the plan's limits (statusline.ts).
     assert.equal(started.length, 1);
-    assert.deepEqual(started[0]?.args, ["--remote-control", "clone-test"]);
+    assert.deepEqual(started[0]?.args.slice(0, 3), ["--remote-control", "clone-test", "--settings"]);
+    assert.deepEqual(JSON.parse(started[0]?.args[3] ?? ""), {
+      statusLine: { type: "command", command: `${shellQuote(process.execPath)} ${shellQuote(RELAY_FILE)}` },
+    });
+    assert.equal(started[0]?.env.GASHO_STATUSLINE_URL, "http://127.0.0.1:0/statusline");
+    assert.equal(started[0]?.env.GASHO_STATUSLINE_COMMAND, undefined);
     assert.equal(started[0]?.cwd, folder);
     assert.match(started[0]?.name ?? "", /^gasho-clone-test-[0-9a-f]{4}$/);
     assert.equal(d.managed.get(SID)?.terminal, started[0]?.name);
+  } finally {
+    await done();
+  }
+});
+
+test("the status line the user set up for the folder keeps running, through the relay", async () => {
+  const { d, folder, started, done } = await setup();
+  try {
+    await fs.mkdir(path.join(folder, ".claude"));
+    await fs.writeFile(path.join(folder, ".claude", "settings.json"), JSON.stringify({ statusLine: { type: "command", command: "./line.sh", padding: 0 } }));
+    assert.equal((await d.launch(folder, "clone-test", true)).ok, true);
+    assert.deepEqual(JSON.parse(started[0]?.args[3] ?? "").statusLine.padding, 0);
+    assert.equal(started[0]?.env.GASHO_STATUSLINE_COMMAND, "./line.sh");
   } finally {
     await done();
   }
