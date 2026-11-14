@@ -1,11 +1,20 @@
 "use client";
 // From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item's button can be wrapped
 // (`wrap`), for a session's context menu, a section's title can have buttons (`action`, for "＋", and
-// `secondaryAction`), and the items of a section can be put in another order by dragging them (`sort`).
+// `secondaryAction`), the items of a section can be put in another order by dragging them (`sort`), and the width on
+// a computer can be changed by dragging the right edge (`ResizeHandle`).
 
 import * as React from "react";
 import { AnimatePresence, motion, useDragControls, type PanInfo } from "framer-motion";
 import { ChevronRight, GripVertical, PanelLeft } from "lucide-react";
+import { useWindowWidth } from "../../lib/media";
+import {
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+  clampSidebarWidth,
+  useSidebarWidth,
+} from "../../lib/sidebar-width";
 import { useSortable, type Sortable } from "../../lib/sortable";
 import { cn } from "../../lib/utils";
 
@@ -35,7 +44,6 @@ function useControllableState<T>(
 }
 
 const spring = { type: "spring", stiffness: 420, damping: 36, mass: 0.8 } as const;
-const EXPANDED = 248;
 const COLLAPSED = 56;
 
 export type SidebarChild = { id: string; label: string; badge?: string | number };
@@ -95,6 +103,11 @@ export function Sidebar({
   const [mobileOpen, setMobileOpen] = useControllableState(mobileProp, false, onMobileOpenChange);
   // Gasho: the drawer is swiped closed from anywhere but what drags an item to another place.
   const drawerDrag = useDragControls();
+  // Gasho: the width saved, or the one being dragged to (saved when the drag ends).
+  const [savedWidth, setSavedWidth] = useSidebarWidth();
+  const [dragWidth, setDragWidth] = React.useState<number | null>(null);
+  const windowWidth = useWindowWidth();
+  const width = clampSidebarWidth(dragWidth ?? savedWidth, windowWidth);
 
   // ⌘B / Ctrl+B
   React.useEffect(() => {
@@ -126,14 +139,16 @@ export function Sidebar({
     <>
       <motion.aside
         initial={false}
-        animate={{ width: collapsed ? COLLAPSED : EXPANDED }}
-        transition={spring}
+        animate={{ width: collapsed ? COLLAPSED : width }}
+        // While dragged, the edge stays under the pointer.
+        transition={dragWidth === null ? spring : { duration: 0 }}
         className={cn(
-          "hidden h-full shrink-0 overflow-hidden border-r border-neutral-200 bg-white md:block dark:border-neutral-800 dark:bg-neutral-950",
+          "relative hidden h-full shrink-0 overflow-hidden border-r border-neutral-200 bg-white md:block dark:border-neutral-800 dark:bg-neutral-950",
           className
         )}
       >
         <Panel {...content} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+        {!collapsed && <ResizeHandle width={width} windowWidth={windowWidth} onDrag={setDragWidth} onChange={setSavedWidth} />}
       </motion.aside>
 
       <AnimatePresence>
@@ -217,6 +232,86 @@ function SectionAction({ action, onNavigate }: { action: SidebarAction; onNaviga
     >
       {action.icon}
     </button>
+  );
+}
+
+/**
+ * Gasho: the right edge of the sidebar on a computer, dragged to change its width (`onDrag` while moving, `onChange`
+ * when let go). A double-click goes back to the default width; ←/→ change it when focused.
+ */
+function ResizeHandle({
+  width,
+  windowWidth,
+  onDrag,
+  onChange,
+}: {
+  width: number;
+  windowWidth: number;
+  onDrag: (width: number | null) => void;
+  onChange: (width: number) => void;
+}) {
+  const drag = React.useRef<{ x: number; from: number; to: number } | null>(null);
+  const [dragging, setDragging] = React.useState(false);
+
+  const end = (save: boolean) => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    setDragging(false);
+    document.body.style.removeProperty("cursor");
+    document.body.style.removeProperty("user-select");
+    if (save && d.to !== d.from) onChange(d.to);
+    onDrag(null);
+  };
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="サイドバーの幅"
+      aria-valuenow={width}
+      aria-valuemin={SIDEBAR_WIDTH_MIN}
+      aria-valuemax={clampSidebarWidth(SIDEBAR_WIDTH_MAX, windowWidth)}
+      tabIndex={0}
+      title="ドラッグで幅を変える（ダブルクリックで元の幅）"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { x: e.clientX, from: width, to: width };
+        setDragging(true);
+        // Kept while the pointer is off the edge, over the rest of the page.
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+        onDrag(width);
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        d.to = clampSidebarWidth(d.from + e.clientX - d.x, windowWidth);
+        onDrag(d.to);
+      }}
+      onPointerUp={() => end(true)}
+      onPointerCancel={() => end(false)}
+      onDoubleClick={() => onChange(SIDEBAR_WIDTH_DEFAULT)}
+      onKeyDown={(e) => {
+        const step = e.key === "ArrowLeft" ? -8 : e.key === "ArrowRight" ? 8 : 0;
+        if (!step) return;
+        e.preventDefault();
+        // At the end of the range nothing is saved, so a wider width saved on a wider window stays.
+        const next = clampSidebarWidth(width + step, windowWidth);
+        if (next !== width) onChange(next);
+      }}
+      className="group absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none outline-none"
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "absolute inset-y-0 right-0 w-0.5 transition-colors group-hover:bg-neutral-300 group-focus-visible:bg-neutral-400 dark:group-hover:bg-neutral-700 dark:group-focus-visible:bg-neutral-600",
+          dragging && "bg-neutral-400 dark:bg-neutral-600"
+        )}
+      />
+    </div>
   );
 }
 
