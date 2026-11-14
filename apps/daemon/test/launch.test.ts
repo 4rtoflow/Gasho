@@ -4,6 +4,8 @@
 // in a 50-column zellij pane (Gasho's own terminals are as wide); the launches run against a fake terminal and a fake
 // `claude agents` (no claude, no terminal).
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import os from "node:os";
@@ -189,7 +191,7 @@ async function setup(o: { mcp?: boolean; warnings?: string[] } = {}) {
   };
   d.refresh = async () => undefined;
   d.refreshFolders = async () => undefined;
-  return { d, fake, folder, killed, started, done: () => fs.rm(dir, { recursive: true, force: true }) };
+  return { d, fake, folder, killed, started, agentsFile, done: () => fs.rm(dir, { recursive: true, force: true }) };
 }
 
 test("without trust, the launch stops at the question: nothing is pressed, and Claude Code's warnings come back", async () => {
@@ -257,6 +259,36 @@ test("the question about the folder's MCP servers that follows is answered with 
     assert.match(r.warning, /MCP サーバーは、使わない設定にして起動しました/);
     assert.deepEqual(fake.keys, ["Down", "Enter", "Esc"]);
   } finally {
+    await done();
+  }
+});
+
+test("ending sessions opened outside Gasho signals the process `claude agents` lists for each, and kills none that stays", async () => {
+  const { d, agentsFile, done } = await setup();
+  // Each says so once it is ready for SIGTERM (one that has not set its handler yet would end on it).
+  const child = async (code: string) => {
+    const p = spawn(process.execPath, ["-e", `${code}; setInterval(() => {}, 1000); console.log("ready")`], { stdio: ["ignore", "pipe", "ignore"] });
+    await once(p.stdout, "data");
+    return p;
+  };
+  const ends = await child("");
+  const stays = await child('process.on("SIGTERM", () => {})');
+  try {
+    await fs.writeFile(agentsFile, JSON.stringify([{ pid: ends.pid, sessionId: "out-1" }, { pid: stays.pid, sessionId: "out-2" }]));
+    d.endWaitMs = 500;
+    // "gone": `claude agents` no longer lists it, so it has ended already.
+    const r = await d.end(["out-1", "out-2", "gone"]);
+    assert.equal(r.ok, true);
+    assert.deepEqual([...r.ended].sort(), ["gone", "out-1"]);
+    assert.match(r.warning, /終了しませんでした/);
+    // Long enough for a kill to be seen.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(ends.signalCode, "SIGTERM");
+    assert.equal(stays.exitCode, null);
+    assert.equal(stays.signalCode, null);
+  } finally {
+    ends.kill("SIGKILL");
+    stays.kill("SIGKILL");
     await done();
   }
 });

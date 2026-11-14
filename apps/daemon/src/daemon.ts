@@ -203,6 +203,8 @@ export class Daemon {
   private cfg: DaemonConfig;
   private hub: HubClient;
   private tracked = new Map<string, Tracked>();
+  /** How long a Claude Code started outside Gasho may take to end after SIGTERM (see end). */
+  private endWaitMs = REMOVE_WAIT_MS;
   private lastSent = "";
   private refreshing = false;
   private refreshAgain = false;
@@ -643,6 +645,7 @@ export class Daemon {
       modelsAt: this.models?.at,
       features: [...INPUT_FEATURES],
       canResume: true,
+      canEnd: true,
     });
   }
 
@@ -915,6 +918,7 @@ export class Daemon {
       case "session.remove":
       case "session.history":
       case "session.resume":
+      case "session.end":
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
@@ -950,6 +954,9 @@ export class Daemon {
               break;
             case "session.resume":
               result = await this.resume(m.sessionId);
+              break;
+            case "session.end":
+              result = await this.end(m.sessionIds);
               break;
             case "permission.answer": {
               if (m.permissionId.startsWith(OPEN_QUESTION)) {
@@ -1375,6 +1382,51 @@ export class Daemon {
     }
     await this.refresh();
     return { ok: true, sessionId: id, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  /**
+   * Ends Claude Codes started outside Gasho (in Orca, a terminal) with SIGTERM, as on a shutdown: their conversations
+   * are kept, and can then be opened again from Gasho (see history, resume). Their terminals are not Gasho's, and stay
+   * open. As in remove, only a process that `claude agents` lists with the session's id is signalled. One that does
+   * not end is left running rather than killed: it may be in the middle of writing its conversation.
+   */
+  private async end(sessionIds: string[]): Promise<CommandResult> {
+    if (sessionIds.some((id) => this.managed.has(id))) {
+      return { ok: false, error: "Gasho が起動したセッションは、ここでは終了できません。終了するときは、セッションを削除してください。" };
+    }
+    const label = (id: string) => {
+      const info = this.tracked.get(id)?.info;
+      return info?.title || info?.name || id.slice(0, 8);
+    };
+    // A Claude Code that a plugin runs in its own folder is no session (see fromPlugin), and is never signalled.
+    const rows = (await listAgents(this.cfg.claudeBin)).filter((r) => !r.cwd || !isInside(r.cwd, this.cfg.pluginDataDir));
+    const ended: string[] = [];
+    const signalled: { id: string; pid: number }[] = [];
+    const noProcess: string[] = [];
+    for (const id of sessionIds) {
+      const row = rows.find((r) => r.sessionId === id);
+      if (!row) ended.push(id);
+      else if (!row.pid) noProcess.push(id);
+      else signalled.push({ id, pid: row.pid });
+    }
+    for (const { pid } of signalled) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // ended already
+      }
+    }
+    for (let waited = 0; waited < this.endWaitMs && signalled.some((s) => isAlive(s.pid)); waited += 250) await sleep(250);
+    const running = signalled.filter((s) => isAlive(s.pid)).map((s) => s.id);
+    ended.push(...signalled.filter((s) => !running.includes(s.id)).map((s) => s.id));
+    if (ended.length > 0) log(`ended Claude Code outside Gasho: ${ended.map(label).join(", ")}`);
+    const problems = [
+      running.length > 0 && `次の会話の Claude Code は終了しませんでした。元の端末で終了してください：${running.map(label).join("、")}`,
+      noProcess.length > 0 && `次の会話はバックグラウンドで動いているため、終了できません：${noProcess.map(label).join("、")}`,
+    ].filter((p): p is string => Boolean(p));
+    await this.refresh();
+    if (ended.length === 0) return { ok: false, error: problems.join(" ") || "終了する会話がありません。" };
+    return { ok: true, ended, ...(problems.length > 0 ? { warning: problems.join(" ") } : {}) };
   }
 
   /**
