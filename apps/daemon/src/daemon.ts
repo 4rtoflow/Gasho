@@ -10,6 +10,7 @@ import type {
   InputFeature,
   InputFile,
   ModelOption,
+  PermissionRequestInfo,
   SessionInfo,
   SessionModel,
   SessionRepo,
@@ -24,7 +25,7 @@ import { ghError, listGitHub, viewGitHub } from "./github.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
-import { PermissionRequests } from "./permissions.ts";
+import { answersMessage, OPEN_QUESTION, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
 import {
   atBottom,
   bannerModel,
@@ -85,6 +86,8 @@ const FORK_TRANSCRIPT_MS = 5000;
 const REMOVE_WAIT_MS = 8000;
 const MAX_INPUT = 20_000;
 const INTERRUPT_SETTLE_MS = 1500;
+/** Claude Code's question dialog (AskUserQuestion, 2.1.325), at the bottom of the screen: its last choice. */
+const QUESTION_DIALOG_RE = /Chat about this/;
 /** Said when this machine cannot make a terminal for a session (see terminalWorks). */
 const NO_TERMINAL =
   "この working server では、セッションの端末（node-pty）を用意できないので、セッションを起動できません。gasho-daemon の doctor で確かめてください。";
@@ -421,7 +424,7 @@ export class Daemon {
           name: m?.name ?? t.info.name,
           managed: m ? true : undefined,
           pendingInputs: pending || undefined,
-          permissionRequests: this.permissions.of(t.info.sessionId),
+          permissionRequests: this.permissions.of(t.info.sessionId) ?? this.openQuestion(t),
         };
       })
       .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
@@ -737,7 +740,11 @@ export class Daemon {
               result = await this.remove(m.sessionId);
               break;
             case "permission.answer": {
-              const error = this.permissions.answer(m.sessionId, m.permissionId, m.decision);
+              if (m.permissionId.startsWith(OPEN_QUESTION)) {
+                result = await this.answerQuestion(m);
+                break;
+              }
+              const error = this.permissions.answer(m.sessionId, m.permissionId, m.decision, { answers: m.answers, mode: m.mode, message: m.message });
               result = error ? { ok: false, error } : { ok: true };
               break;
             }
@@ -1675,5 +1682,46 @@ export class Daemon {
     this.settleUntil.set(sessionId, Date.now() + INTERRUPT_SETTLE_MS);
     this.scheduleRefresh(500);
     return { ok: true };
+  }
+
+  /**
+   * Claude's question that gasho-daemon holds no hook for (see PermissionRequestInfo.answerAsMessage): shown from the
+   * transcript while a session started from Gasho waits on it. A question with a hook held is shown from that instead.
+   */
+  private openQuestion(t: Tracked): PermissionRequestInfo[] | undefined {
+    const q = t.meta.question;
+    if (!q || t.info.status !== "waiting" || !this.managed.has(t.info.sessionId)) return undefined;
+    const r = openQuestionRequest(q);
+    return r ? [r] : undefined;
+  }
+
+  /**
+   * Answers a question shown from the transcript (see openQuestion). Esc closes Claude Code's dialog, as in the
+   * terminal: Claude is told the person declined it, and stops. The answers then go as the next message, typed once the
+   * session is idle like an input from Gasho. "deny" only closes the dialog. Nothing is pressed unless the session
+   * still waits and its screen shows the question.
+   */
+  private async answerQuestion(m: Extract<HubToDaemon, { type: "permission.answer" }>): Promise<CommandResult> {
+    const s = this.managed.get(m.sessionId);
+    const q = this.tracked.get(m.sessionId)?.meta.question;
+    if (!s || !q || `${OPEN_QUESTION}${q.toolUseId}` !== m.permissionId) return { ok: false, error: "この質問には、すでに答えられています。" };
+    let message: string | undefined;
+    if (m.decision !== "deny") {
+      const answers = questionAnswers(q.input, m.answers);
+      if (typeof answers === "string") return { ok: false, error: answers };
+      message = answersMessage(answers);
+    }
+    if ((await this.currentStatus(s.pid)) !== "waiting") return { ok: false, error: "この質問には、すでに答えられています。" };
+    const screen = (await this.terminals.screen(s.terminal).catch(() => undefined))?.plain ?? "";
+    if (!atBottom(screen, QUESTION_DIALOG_RE, 12)) {
+      return { ok: false, error: "端末に質問の画面が見当たらないため、答えられませんでした。端末か公式アプリで答えてください。" };
+    }
+    await this.terminals.keys(s.terminal, "Esc");
+    this.settleUntil.set(m.sessionId, Date.now() + INTERRUPT_SETTLE_MS);
+    if (message) this.managed.enqueue(m.sessionId, { id: m.requestId, text: message });
+    this.scheduleRefresh(500);
+    this.emitSessions();
+    log(`${s.name}: closed Claude's question${message ? "; the answers go as the next message" : ""}`);
+    return { ok: true, ...(message ? { queued: true } : {}) };
   }
 }

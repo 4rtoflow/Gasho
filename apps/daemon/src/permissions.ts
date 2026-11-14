@@ -1,8 +1,11 @@
 // Permission requests that Claude Code asks through the PermissionRequest hook. The hook's HTTP response is held until
 // the request is answered in Gasho; Claude Code shows its own dialog meanwhile, so the request can also be answered in
 // the terminal or the official apps, and then Gasho lets go of it (answering the hook with no decision).
+// Two tools ask the person for more than a yes: AskUserQuestion (questions with options) and ExitPlanMode (a plan to
+// approve). For them, "allow" alone answers nothing and Claude Code keeps its dialog open: the answers, or the plan,
+// go back in the tool's input (updatedInput), as Claude Code's hooks documentation says.
 import { randomUUID } from "node:crypto";
-import type { PermissionDecision, PermissionRequestInfo } from "@gasho/protocol";
+import type { AskedOption, AskedQuestion, PermissionDecision, PermissionRequestInfo, PlanMode, QuestionAnswer } from "@gasho/protocol";
 import { clip, inputSummary, str } from "./util.ts";
 
 /** What the hook answers: a decision, or nothing (Claude Code goes on with its own dialog). */
@@ -12,8 +15,10 @@ interface Held {
   info: PermissionRequestInfo;
   sessionId: string;
   toolName: string;
-  /** The tool input as JSON, to find the call when its PostToolUse comes (answered elsewhere). */
-  inputKey: string;
+  /** The tool input as Claude Code sent it: AskUserQuestion's and ExitPlanMode's go back with the answer. */
+  input: Record<string, unknown>;
+  /** What finds the call when its PostToolUse comes (answered elsewhere); see callKey. */
+  callKey: string;
   /** The allow rules "allow from now on" applies (see alwaysSuggestions). */
   suggestions: Record<string, unknown>[];
   /** Claude Code's status showed the session waiting since the request came. */
@@ -21,11 +26,24 @@ interface Held {
   reply: HookReply;
 }
 
+/** What an answer from Gasho may carry besides the decision (see `answer`). */
+export interface AnswerDetails {
+  answers?: QuestionAnswer[];
+  mode?: PlanMode;
+  message?: string;
+}
+
 /** The tool input shown in Gasho: pretty JSON, clipped. */
 const MAX_INPUT = 4000;
+/** A plan shown in Gasho, clipped. The plan Claude Code gets back is the one it sent, whole. */
+const MAX_PLAN = 40_000;
+/** What one answer to a question may say, written in Gasho. */
+const MAX_ANSWER = 4000;
 
 /** What Gasho answers when the person denies: Claude stops, as with "No" in the terminal, and waits for them. */
 const DENY_MESSAGE = "The user denied this in Gasho.";
+/** …and when they deny with a message: Claude is told it and goes on, as with feedback in the terminal. */
+const DENY_WITH_MESSAGE = "The user declined this in Gasho and said:";
 
 /**
  * The suggestions "allow from now on" applies: rules that allow the tool. The others are left out: a folder added to
@@ -59,6 +77,110 @@ export function alwaysLabel(rules: Record<string, unknown>[]): string | undefine
   return `${parts.join("、")}${sessionOnly ? "（このセッションのみ）" : ""}`;
 }
 
+/**
+ * What finds a call's PostToolUse from its PermissionRequest: the tool input. AskUserQuestion's PostToolUse carries
+ * the answers besides the questions, and ExitPlanMode's carries no input at all (Claude Code puts the plan into the
+ * PermissionRequest only), so those two go by their questions, and by the tool alone.
+ */
+export function callKey(toolName: string | undefined, input: unknown): string {
+  if (toolName === "ExitPlanMode") return "";
+  if (toolName === "AskUserQuestion") return JSON.stringify((input as { questions?: unknown } | null | undefined)?.questions ?? null);
+  return JSON.stringify(input ?? {});
+}
+
+/** AskUserQuestion's questions as Gasho shows them (clipped); undefined when they are not as Claude Code sends them. */
+export function askedQuestions(input: Record<string, unknown>): AskedQuestion[] | undefined {
+  if (!Array.isArray(input.questions) || input.questions.length === 0) return undefined;
+  const out: AskedQuestion[] = [];
+  for (const raw of input.questions as unknown[]) {
+    const q = (raw ?? {}) as Record<string, unknown>;
+    const question = str(q.question);
+    if (!question || !Array.isArray(q.options)) return undefined;
+    const options: AskedOption[] = [];
+    for (const rawOption of q.options as unknown[]) {
+      const o = (rawOption ?? {}) as Record<string, unknown>;
+      const label = str(o.label);
+      if (label === undefined) return undefined;
+      const description = str(o.description);
+      const preview = str(o.preview);
+      options.push({
+        label: clip(label, 300),
+        // Claude sometimes repeats the label as the description.
+        ...(description && description !== label ? { description: clip(description, 2000) } : {}),
+        ...(preview ? { preview: clip(preview, 8000) } : {}),
+      });
+    }
+    const header = str(q.header);
+    out.push({ question: clip(question, 4000), ...(header ? { header: clip(header, 60) } : {}), options, ...(q.multiSelect === true ? { multiSelect: true } : {}) });
+  }
+  return out;
+}
+
+/**
+ * The answers AskUserQuestion takes: each question's text → the labels of the options chosen and what was written,
+ * joined with ", " (as Claude Code joins a multiSelect question's labels). `input` is the tool input as Claude Code
+ * sent it, so labels and questions are whole even where Gasho showed them clipped. A string is an error message: a
+ * question is left unanswered, or an answer does not fit its question.
+ */
+export function questionAnswers(input: Record<string, unknown>, given: QuestionAnswer[] | undefined): Record<string, string> | string {
+  const questions = input.questions as Array<{ question: string; options: Array<{ label: string }>; multiSelect?: boolean }>;
+  if (!Array.isArray(given) || given.length !== questions.length) return "すべての質問に答えてください。";
+  const answers: Record<string, string> = {};
+  for (const [i, q] of questions.entries()) {
+    const a = given[i];
+    const picked = Array.isArray(a?.picked) ? a.picked : [];
+    const text = typeof a?.text === "string" ? a.text.trim() : "";
+    const fits =
+      picked.every((k) => Number.isInteger(k) && k >= 0 && k < q.options.length) &&
+      new Set(picked).size === picked.length &&
+      (q.multiSelect === true || picked.length + (text ? 1 : 0) <= 1);
+    if (!fits) return "答えが質問に合っていません。画面を読み込み直してから、もう一度答えてください。";
+    const parts = [...[...picked].sort((x, y) => x - y).map((k) => q.options[k]?.label ?? ""), ...(text ? [clip(text, MAX_ANSWER)] : [])];
+    if (parts.length === 0) return "すべての質問に答えてください。";
+    answers[q.question] = parts.join(", ");
+  }
+  return answers;
+}
+
+/** How the id of a question shown from the transcript starts (see openQuestionRequest). */
+export const OPEN_QUESTION = "question:";
+
+/**
+ * Claude's question as the transcript has it, as a request that Gasho can answer although gasho-daemon holds no hook
+ * for it (see PermissionRequestInfo.answerAsMessage); undefined when its questions are not as Claude Code sends them.
+ */
+export function openQuestionRequest(q: { toolUseId: string; input: Record<string, unknown>; at?: number }): PermissionRequestInfo | undefined {
+  const questions = askedQuestions(q.input);
+  if (!questions) return undefined;
+  return {
+    id: `${OPEN_QUESTION}${q.toolUseId}`,
+    toolName: "AskUserQuestion",
+    input: clip(JSON.stringify(q.input, null, 2), MAX_INPUT),
+    summary: clip(questions[0]?.question ?? "", 200),
+    at: q.at ?? 0,
+    questions,
+    answerAsMessage: true,
+  };
+}
+
+/**
+ * The message that answers Claude's questions once their dialog has been closed: each question (on one line) and its
+ * answer, as questionAnswers makes them. Written to Claude on the person's behalf, in the language of Gasho's screens.
+ */
+export function answersMessage(answers: Record<string, string>): string {
+  const lines = Object.entries(answers).map(([q, a]) => `- 「${clip(q.replace(/\s+/g, " ").trim(), 300)}」→ ${a}`);
+  return ["さきほどの質問への答えです（Gasho から答えたため、質問の画面は閉じました）。", ...lines].join("\n");
+}
+
+/** A plan's title: its first line with text, without Markdown's heading marks. */
+function planTitle(plan: string): string {
+  const line = plan
+    .split("\n")
+    .map((l) => l.replace(/^\s*#+\s*/, "").trim())
+    .find(Boolean);
+  return clip(line ?? "", 200);
+}
+
 export class PermissionRequests {
   private held = new Map<string, Held>();
   private onChange: () => void;
@@ -76,22 +198,28 @@ export class PermissionRequests {
       reply(undefined);
       return undefined;
     }
-    const input = payload.tool_input ?? {};
+    const raw = payload.tool_input ?? {};
+    const input = (typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
     const suggestions = alwaysSuggestions(Array.isArray(payload.permission_suggestions) ? payload.permission_suggestions : []);
     const id = randomUUID();
     const always = alwaysLabel(suggestions);
+    const questions = toolName === "AskUserQuestion" ? askedQuestions(input) : undefined;
+    const plan = toolName === "ExitPlanMode" ? str(input.plan) : undefined;
     this.held.set(id, {
       info: {
         id,
         toolName,
-        input: clip(JSON.stringify(input, null, 2), MAX_INPUT),
-        summary: inputSummary(input, 200),
+        input: clip(JSON.stringify(raw, null, 2), MAX_INPUT),
+        summary: questions ? clip(questions[0]?.question ?? "", 200) : plan !== undefined ? planTitle(plan) : inputSummary(raw, 200),
         at: now,
         ...(always ? { always } : {}),
+        ...(questions ? { questions } : {}),
+        ...(plan !== undefined ? { plan: clip(plan, MAX_PLAN) } : {}),
       },
       sessionId,
       toolName,
-      inputKey: JSON.stringify(input),
+      input,
+      callKey: callKey(toolName, raw),
       suggestions,
       sawWaiting: false,
       reply,
@@ -106,15 +234,33 @@ export class PermissionRequests {
     return list.length > 0 ? list : undefined;
   }
 
-  /** Answers a request from Gasho. Returns an error message when it is no longer waiting. */
-  answer(sessionId: string, id: string, decision: PermissionDecision): string | undefined {
+  /**
+   * Answers a request from Gasho. `answers`: a question's, which "allow" needs; `mode`: the permission mode a plan
+   * approved goes on in; `message`: with "deny", what Claude is told, so that it goes on instead of stopping (a plan:
+   * it plans again). Returns an error message when the request is no longer waiting or the answer does not fit it;
+   * the request then stays as it was.
+   */
+  answer(sessionId: string, id: string, decision: PermissionDecision, details: AnswerDetails = {}): string | undefined {
     const h = this.held.get(id);
     if (!h || h.sessionId !== sessionId) return "この確認には、すでに答えられています。";
     if (decision === "always" && h.suggestions.length === 0) return "この確認では、今後も許可することはできません。";
-    const body =
-      decision === "deny"
-        ? { behavior: "deny", message: DENY_MESSAGE, interrupt: true }
-        : { behavior: "allow", ...(decision === "always" ? { updatedPermissions: h.suggestions } : {}) };
+    let body: Record<string, unknown>;
+    const message = details.message?.trim();
+    if (decision === "deny") {
+      body = message
+        ? { behavior: "deny", message: `${DENY_WITH_MESSAGE}\n${message}`, interrupt: false }
+        : { behavior: "deny", message: DENY_MESSAGE, interrupt: true };
+    } else if (h.toolName === "AskUserQuestion") {
+      if (!h.info.questions) return "この質問には、Gasho から答えられません。端末か公式アプリで答えてください。";
+      const answers = questionAnswers(h.input, details.answers);
+      if (typeof answers === "string") return answers;
+      body = { behavior: "allow", updatedInput: { ...h.input, answers } };
+    } else if (h.toolName === "ExitPlanMode") {
+      const mode = details.mode === "auto" || details.mode === "default" ? details.mode : undefined;
+      body = { behavior: "allow", updatedInput: h.input, ...(mode ? { updatedPermissions: [{ type: "setMode", mode, destination: "session" }] } : {}) };
+    } else {
+      body = { behavior: "allow", ...(decision === "always" ? { updatedPermissions: h.suggestions } : {}) };
+    }
     this.settle(id, { hookSpecificOutput: { hookEventName: "PermissionRequest", decision: body } });
     return undefined;
   }
@@ -129,9 +275,9 @@ export class PermissionRequests {
     switch (str(payload.hook_event_name)) {
       case "PostToolUse":
       case "PostToolUseFailure": {
-        const key = JSON.stringify(payload.tool_input ?? {});
         const toolName = str(payload.tool_name);
-        const h = [...this.held.values()].find((x) => x.sessionId === sessionId && x.toolName === toolName && x.inputKey === key);
+        const key = callKey(toolName, payload.tool_input);
+        const h = [...this.held.values()].find((x) => x.sessionId === sessionId && x.toolName === toolName && x.callKey === key);
         if (h) this.settle(h.info.id, undefined);
         return;
       }

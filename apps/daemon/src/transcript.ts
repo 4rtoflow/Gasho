@@ -91,6 +91,11 @@ export interface TranscriptMeta {
   ultracode?: boolean;
   /** How many times the transcript says the model was switched for this session only. */
   sessionSwitches?: number;
+  /**
+   * Claude's latest question (AskUserQuestion) while the transcript has no answer to it: the call's id, its input as
+   * Claude wrote it (not clipped), and when. Cleared by the call's result or by a new message from the person.
+   */
+  question?: { toolUseId: string; input: Record<string, unknown>; at?: number };
 }
 
 export function emptyMeta(): TranscriptMeta {
@@ -222,14 +227,20 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
       if (b.type === "text") {
         pushText(str(b.text) ?? "");
       } else if (b.type === "tool_use") {
+        const id = str(b.id);
+        if (role === "assistant" && !isSidechain && b.name === "AskUserQuestion" && id && b.input && typeof b.input === "object") {
+          const at = ts ? Date.parse(ts) : Number.NaN;
+          meta.question = { toolUseId: id, input: b.input as Record<string, unknown>, ...(Number.isNaN(at) ? {} : { at }) };
+        }
         blocks.push({
           type: "tool_use",
-          id: str(b.id),
+          id,
           name: str(b.name) ?? "tool",
           input: clip(JSON.stringify(b.input ?? {}), MAX_TOOL),
           summary: inputSummary(b.input, 300),
         });
       } else if (b.type === "tool_result") {
+        if (meta.question && str(b.tool_use_id) === meta.question.toolUseId) delete meta.question;
         blocks.push({
           type: "tool_result",
           toolUseId: str(b.tool_use_id),
@@ -243,6 +254,8 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
     }
   }
   if (blocks.length === 0) return null;
+  // The person wrote something (or stopped Claude) since the question: it is no longer waiting for an answer.
+  if (role === "user" && !isSidechain && blocks.some((b) => b.type === "text")) delete meta.question;
   const entry: TranscriptEntry = { uuid, ts, role, blocks, isSidechain };
   if (interrupted) entry.interrupted = true;
   return entry;

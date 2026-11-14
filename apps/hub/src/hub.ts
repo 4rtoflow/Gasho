@@ -12,6 +12,7 @@ import type {
   InputFeature,
   MachineHookEvent,
   MachineInfo,
+  PermissionRequestInfo,
   SessionCommand,
 } from "@gasho/protocol";
 import { notificationFor } from "./notify.ts";
@@ -144,6 +145,49 @@ function folderNameError(name: unknown): string | undefined {
   return undefined;
 }
 
+/** Answers to Claude's questions (AskUserQuestion asks up to 4, with up to 4 options each; with room to spare). */
+const MAX_QUESTIONS = 10;
+const MAX_OPTIONS = 20;
+const MAX_ANSWER = 4000;
+
+/** The answers to an AskUserQuestion: an error message, or undefined. gasho-daemon checks them against the questions. */
+function answersError(answers: unknown): string | undefined {
+  const wrong = "質問への答えが正しくありません。";
+  if (!Array.isArray(answers) || answers.length === 0 || answers.length > MAX_QUESTIONS) return wrong;
+  for (const a of answers as unknown[]) {
+    const { picked, text } = (a ?? {}) as { picked?: unknown; text?: unknown };
+    if (!Array.isArray(picked) || picked.length > MAX_OPTIONS) return wrong;
+    if (!picked.every((k) => Number.isInteger(k) && (k as number) >= 0 && (k as number) < MAX_OPTIONS)) return wrong;
+    if (text !== undefined && typeof text !== "string") return wrong;
+    if (typeof text === "string" && text.length > MAX_ANSWER) return `答えは${MAX_ANSWER}文字までです。`;
+  }
+  return undefined;
+}
+
+/**
+ * How an answer to a permission request is recorded (`r`: the request, when it is known): "[allow] Bash npm test" (the
+ * decision, the tool, what it asked for), "[answer] Color → Blue / Fruits → Apple, Cherry" (Claude's questions),
+ * "[approve] Plan title" (a plan approved), "[revise] what to change" (a plan sent back), and a denial's message after
+ * " — ".
+ */
+export function answerSummary(cmd: Extract<SessionCommand, { type: "permission.answer" }>, r: PermissionRequestInfo | undefined): string {
+  const message = cmd.message?.trim();
+  if (cmd.decision !== "deny" && r?.questions && cmd.answers) {
+    const answers = r.questions.map((q, i) => {
+      const a = cmd.answers?.[i];
+      const chosen = [...(a?.picked ?? []).map((k) => q.options[k]?.label ?? "?"), ...(a?.text?.trim() ? [a.text.trim()] : [])];
+      return `${q.header ?? q.question} → ${chosen.join(", ")}`;
+    });
+    return `[answer] ${answers.join(" / ")}`.slice(0, 300);
+  }
+  if (r?.plan !== undefined) {
+    if (cmd.decision !== "deny") return `[approve] ${r.summary ?? ""}`.trim().slice(0, 300);
+    if (message) return `[revise] ${message}`.slice(0, 300);
+  }
+  const what = r ? `${r.toolName} ${r.summary ?? ""}`.trim() : "";
+  return `[${cmd.decision}] ${what}${message ? ` — ${message}` : ""}`.trim().slice(0, 300);
+}
+
 /** Files sent with one input: how many, and their size in all. */
 export const MAX_FILES = 5;
 export const MAX_FILES_BYTES = 10 * 1024 * 1024;
@@ -220,6 +264,12 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
     case "permission.answer":
       if (typeof cmd.permissionId !== "string" || !cmd.permissionId || cmd.permissionId.length > 100) return "確認の指定が正しくありません。";
       if (!["allow", "always", "deny"].includes(cmd.decision)) return "答えの指定が正しくありません。";
+      if (cmd.answers !== undefined) {
+        const wrong = answersError(cmd.answers);
+        if (wrong) return wrong;
+      }
+      if (cmd.mode !== undefined && cmd.mode !== "auto" && cmd.mode !== "default") return "計画を承認したあとの進め方の指定が正しくありません。";
+      if (cmd.message !== undefined && (typeof cmd.message !== "string" || cmd.message.length > MAX_INPUT)) return `伝えることは${MAX_INPUT}文字までです。`;
       return undefined;
     case "file.write": {
       const wrong = filePathError(cmd.path, true);
@@ -603,21 +653,40 @@ export class Hub {
         const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
         return s?.name ?? s?.title ?? "";
       }
-      case "permission.answer": {
-        // The tool and what it was asked for, as the request said; it is gone once answered.
-        const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
-        const r = s?.permissionRequests?.find((x) => x.id === cmd.permissionId);
-        return `[${cmd.decision}] ${r ? `${r.toolName} ${r.summary ?? ""}`.trim().slice(0, 300) : ""}`.trim();
-      }
+      case "permission.answer":
+        // What was asked, as the request said: it is gone once answered.
+        return answerSummary(cmd, this.request(machine, cmd.sessionId, cmd.permissionId));
       case "session.interrupt":
         return "";
     }
+  }
+
+  /** One of a session's permission requests, as its working server last sent them. */
+  private request(machine: string, sessionId: string, id: string): PermissionRequestInfo | undefined {
+    return this.machines
+      .get(machine)
+      ?.sessions.find((x) => x.sessionId === sessionId)
+      ?.permissionRequests?.find((x) => x.id === id);
   }
 
   /** A command that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
     const m = this.machines.get(machine);
     if (cmd.type === "file.write") return !m || versionAtLeast(m.daemonVersion, ...FILES_SINCE) ? undefined : FILES_TOO_OLD;
+    if (cmd.type === "permission.answer" && cmd.decision !== "deny") {
+      // Claude Code takes neither a question nor a plan with "allow" alone: its dialog would stay open, and the hook
+      // that Gasho answers through would be spent.
+      const r = this.request(machine, cmd.sessionId, cmd.permissionId);
+      if (r?.toolName === "AskUserQuestion") {
+        // A gasho-daemon that sends no questions would pass "allow" on without the answers.
+        if (!r.questions) return "この working server の gasho-daemon は古いため、Gasho からは質問に答えられません。端末か公式アプリで答えてください。";
+        if (!cmd.answers?.length) return "質問には、選んだ答えを添えて答えてください。画面を読み込み直すと、答えを選べます。";
+      }
+      if (r?.toolName === "ExitPlanMode" && r.plan === undefined) {
+        return "この working server の gasho-daemon は古いため、Gasho からは計画を承認できません。端末か公式アプリで答えてください。";
+      }
+      return undefined;
+    }
     if (cmd.type === "session.rename" || cmd.type === "session.fork" || cmd.type === "session.remove") {
       if (!m || versionAtLeast(m.daemonVersion, ...SESSION_ACTIONS_SINCE)) return undefined;
       return "この working server の gasho-daemon は古いため、セッションの名前の変更、フォーク、削除を扱えません。gasho-daemon を更新してください。";

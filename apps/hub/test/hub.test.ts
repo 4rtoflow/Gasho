@@ -178,6 +178,21 @@ test("notificationFor covers permission, idle and errors, and ignores other even
   assert.equal(notificationFor("m", { ...ev, event: "Stop" }, undefined, "5")?.title, "s1 の応答が終わりました");
 });
 
+test("a permission prompt for Claude's question or plan is notified as such", () => {
+  const ev = { sessionId: "s1", at: 1, event: "Notification", notificationType: "permission_prompt", summary: "Claude needs your permission" };
+  const waiting = (r: Record<string, unknown>) =>
+    ({ ...session, permissionRequests: [{ id: "b", toolName: "Bash", input: "{}", at: 0 }, { id: "r", input: "{}", at: 1, ...r }] }) as SessionInfo;
+  const question = notificationFor("m", ev, waiting({ toolName: "AskUserQuestion", summary: "Which color?", questions: [] }), "1");
+  assert.deepEqual([question?.kind, question?.title, question?.body], ["permission", "プラグインの整理 が質問しています", "Which color?"]);
+  const plan = notificationFor("m", ev, waiting({ toolName: "ExitPlanMode", summary: "Plan: hello", plan: "# Plan: hello" }), "2");
+  assert.deepEqual([plan?.title, plan?.body], ["プラグインの整理 が計画の承認を待っています", "Plan: hello"]);
+  // From a gasho-daemon too old to send the questions, the summary is raw JSON: no body then.
+  const old = notificationFor("m", ev, waiting({ toolName: "AskUserQuestion", summary: '{"questions":[' }), "3");
+  assert.deepEqual([old?.title, old?.body], ["プラグインの整理 が質問しています", undefined]);
+  const other = notificationFor("m", ev, waiting({ toolName: "Bash", summary: "npm test" }), "4");
+  assert.deepEqual([other?.title, other?.body], ["プラグインの整理 が権限の確認を待っています", "Claude needs your permission"]);
+});
+
 test("session commands are relayed to the working server and the result goes back to the asking browser only", () => {
   const { hub, machineId, machineToken, browserId } = setup();
   const d = fakePeer<HubToDaemon>();
@@ -579,6 +594,77 @@ test("validateCommand checks an answer to a permission request", () => {
   assert.equal(validateCommand({ ...ok, decision: "always" }), undefined);
   assert.ok(validateCommand({ ...ok, permissionId: "" }));
   assert.ok(validateCommand({ ...ok, decision: "maybe" as "allow" }));
+  // Answers to Claude's questions, the mode an approved plan goes on in, and what to tell Claude on a denial.
+  assert.equal(validateCommand({ ...ok, answers: [{ picked: [1] }, { picked: [0, 2], text: "ほかにも" }] }), undefined);
+  assert.equal(validateCommand({ ...ok, answers: [{ picked: [], text: "どちらでもない" }] }), undefined);
+  assert.ok(validateCommand({ ...ok, answers: [] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: [-1] }] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: [1.5] }] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: "1" as unknown as number[] }] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: [], text: 3 as unknown as string }] }));
+  assert.match(validateCommand({ ...ok, answers: [{ picked: [], text: "あ".repeat(4001) }] }) ?? "", /4000文字まで/);
+  assert.equal(validateCommand({ ...ok, mode: "auto" }), undefined);
+  assert.equal(validateCommand({ ...ok, mode: "default" }), undefined);
+  assert.ok(validateCommand({ ...ok, mode: "bypassPermissions" as "auto" }));
+  assert.equal(validateCommand({ ...ok, decision: "deny", message: "ファイル名を変えて" }), undefined);
+  assert.ok(validateCommand({ ...ok, decision: "deny", message: "x".repeat(20_001) }));
+});
+
+test("answers to Claude's questions and plans go to the working server, are recorded as such, and need the answers", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
+  const question = {
+    id: "q1",
+    toolName: "AskUserQuestion",
+    input: "{}",
+    summary: "Which color do you like?",
+    at: 1,
+    questions: [
+      { question: "Which color do you like?", header: "Color", options: [{ label: "Red" }, { label: "Blue" }] },
+      { question: "Which fruits?", options: [{ label: "Apple" }, { label: "Cherry" }], multiSelect: true },
+    ],
+  };
+  const plan = { id: "p1", toolName: "ExitPlanMode", input: "{}", summary: "Plan: hello", at: 2, plan: "# Plan: hello" };
+  // As a gasho-daemon too old for either sends them: no questions, no plan.
+  const oldQuestion = { id: "q0", toolName: "AskUserQuestion", input: '{"questions":[]}', summary: '{"questions":[]}', at: 3 };
+  const oldPlan = { id: "p0", toolName: "ExitPlanMode", input: "{}", summary: "{}", at: 4 };
+  hub.onDaemonMessage(d, { type: "sessions", sessions: [{ ...session, status: "waiting", permissionRequests: [question, plan, oldQuestion, oldPlan] }] });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const answer = (requestId: string, permissionId: string, rest: Record<string, unknown>) =>
+    hub.onClientMessage(c, { type: "permission.answer", requestId, machine: machineId, sessionId: "s1", permissionId, decision: "allow", ...rest });
+  const result = (requestId: string) => {
+    const r = c.sent.findLast((m) => m.type === "command.result" && m.requestId === requestId);
+    return r?.type === "command.result" ? r.result : undefined;
+  };
+  const relayed = () => d.sent.filter((m) => m.type === "permission.answer").length;
+
+  // "allow" alone would spend the request and leave Claude Code's dialog open.
+  answer("a0", "q1", {});
+  assert.match(result("a0")?.error ?? "", /選んだ答えを添えて/);
+  answer("a1", "q0", { answers: [{ picked: [0] }] });
+  assert.match(result("a1")?.error ?? "", /gasho-daemon は古いため/);
+  answer("a2", "p0", { mode: "auto" });
+  assert.match(result("a2")?.error ?? "", /gasho-daemon は古いため/);
+  assert.equal(relayed(), 0);
+  // Denying still reaches the working server: Claude stops.
+  answer("a3", "q0", { decision: "deny" });
+  assert.equal(relayed(), 1);
+
+  answer("a4", "q1", { answers: [{ picked: [1] }, { picked: [0, 1], text: " and plums " }] });
+  const sent = d.sent.at(-1);
+  assert.ok(sent?.type === "permission.answer");
+  assert.deepEqual(sent.answers, [{ picked: [1] }, { picked: [0, 1], text: " and plums " }]);
+  answer("a5", "p1", { mode: "auto" });
+  answer("a6", "p1", { decision: "deny", message: "ファイル名は farewell.txt に" });
+  const summaries = c.sent.flatMap((m) => (m.type === "event" ? [m.event.summary?.replace(/ \(by .*\)$/, "")] : []));
+  assert.deepEqual(summaries, [
+    "[deny] AskUserQuestion {\"questions\":[]}",
+    "[answer] Color → Blue / Which fruits? → Apple, Cherry, and plums",
+    "[approve] Plan: hello",
+    "[revise] ファイル名は farewell.txt に",
+  ]);
 });
 
 test("a shell command (an input that starts with \"!\") needs a command and cannot carry files", () => {

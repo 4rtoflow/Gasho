@@ -89,7 +89,53 @@ export interface PermissionRequestInfo {
    * a permanent rule for this request; absent when it does not, and "always" cannot be answered.
    */
   always?: string;
+  /**
+   * AskUserQuestion: the questions Claude asks the person. "allow" answers them with `answers`; without answers,
+   * Claude Code would keep its own dialog open. Absent when gasho-daemon cannot pass answers on (before this field).
+   */
+  questions?: AskedQuestion[];
+  /**
+   * ExitPlanMode: the plan Claude asks to go ahead with (Markdown, clipped). "allow" approves it (and the session goes
+   * on in the `mode` given); "deny" with a `message` sends it back for Claude to plan again. Absent when gasho-daemon
+   * cannot approve a plan (before this field).
+   */
+  plan?: string;
+  /**
+   * A question that gasho-daemon holds no hook for (it restarted while the question was open, the hook timed out, or
+   * it was spent): shown from the transcript, for a session started from Gasho. Answering it closes Claude Code's
+   * dialog (Claude is told the person declined it) and sends the answers as the next message.
+   */
+  answerAsMessage?: boolean;
 }
+
+/** One question of an AskUserQuestion. */
+export interface AskedQuestion {
+  question: string;
+  /** A short label for it ("Auth method"). */
+  header?: string;
+  options: AskedOption[];
+  /** More than one option can be chosen. */
+  multiSelect?: boolean;
+}
+
+export interface AskedOption {
+  label: string;
+  description?: string;
+  /** Something to look at when the option is chosen (a mockup, a code snippet), shown in a monospace box. */
+  preview?: string;
+}
+
+/**
+ * The answer to one question of an AskUserQuestion: the options chosen (indexes into its `options`; at most one when
+ * it is not multiSelect) and what the person wrote instead of an option, or besides them.
+ */
+export interface QuestionAnswer {
+  picked: number[];
+  text?: string;
+}
+
+/** The permission mode a session goes on in once its plan is approved: auto mode, or asking before each edit. */
+export type PlanMode = "auto" | "default";
 
 /** allow: this once. always: this time and from now on, as Claude Code suggests. deny: Claude stops and waits. */
 export type PermissionDecision = "allow" | "always" | "deny";
@@ -586,8 +632,20 @@ export type SessionCommand =
    * conversation stays on the working server: `claude --resume` lists it.
    */
   | { type: "session.remove"; sessionId: string }
-  /** Answers one of a session's `permissionRequests`. */
-  | { type: "permission.answer"; sessionId: string; permissionId: string; decision: PermissionDecision }
+  /**
+   * Answers one of a session's `permissionRequests`. A request with `questions` takes "allow" with `answers` (one per
+   * question, in order). A request with a `plan`: "allow" approves it and goes on in `mode` (when given). "deny" with
+   * a `message`: Claude is told it and goes on from there (a plan: plans again), instead of stopping.
+   */
+  | {
+      type: "permission.answer";
+      sessionId: string;
+      permissionId: string;
+      decision: PermissionDecision;
+      answers?: QuestionAnswer[];
+      mode?: PlanMode;
+      message?: string;
+    }
   /**
    * Writes a text file inside the session's folder (`path` as in file.get), as UTF-8, up to 1 MB (gasho-daemon 0.11.0
    * and later). `baseHash`: the file's hash when it was read; if the file is no longer that, nothing is written and
