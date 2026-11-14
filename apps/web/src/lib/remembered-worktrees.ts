@@ -16,7 +16,8 @@ function valid(x: unknown): x is RememberedWorktree {
     typeof r.path === "string" &&
     typeof r.label === "string" &&
     typeof r.subfolders === "boolean" &&
-    (r.repo === undefined || typeof r.repo === "string")
+    (r.repo === undefined || typeof r.repo === "string") &&
+    (r.repoPath === undefined || typeof r.repoPath === "string")
   );
 }
 

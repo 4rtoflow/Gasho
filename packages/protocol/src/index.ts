@@ -42,6 +42,24 @@ export interface SessionWorktree {
   branch?: string;
 }
 
+/** A repository registered with a working server (repo.register): the sidebar lists its worktrees, also without sessions. */
+export interface RegisteredRepo {
+  /** Its folder, as SessionWorktree.repo names it. */
+  path: string;
+  github?: GitHubRepo;
+  /** Its worktrees whose folder is there, as `git worktree list` gives them (the main one first). */
+  worktrees: RepoWorktree[];
+  /** Why its worktrees could not be read (its folder is gone, or is no longer a repository). */
+  error?: string;
+}
+
+export interface RepoWorktree {
+  /** Its top folder, as SessionWorktree.path names it. */
+  path: string;
+  /** Absent when HEAD is detached. */
+  branch?: string;
+}
+
 export interface SessionInfo {
   /** Local session id (UUID). */
   sessionId: string;
@@ -239,6 +257,11 @@ export interface MachineInfo {
   features?: InputFeature[];
   /** Whether gasho-daemon lists a folder's past conversations and opens one again (session.history, session.resume). */
   canResume?: boolean;
+  /**
+   * The repositories registered with this working server, in the order they were registered. Absent for a gasho-daemon
+   * that cannot register them, and until gasho-daemon has sent them since the Gasho server started.
+   */
+  repos?: RegisteredRepo[];
 }
 
 /** Something registered with the Gasho server: a browser or a working server. */
@@ -499,6 +522,8 @@ export type DaemonToHub =
       canResume?: boolean;
     }
   | { type: "command.result"; requestId: string; result: CommandResult }
+  /** The registered repositories and their worktrees: sent once connected, and whenever they change. */
+  | { type: "repos"; repos: RegisteredRepo[] }
   | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
   | { type: "dir"; requestId: string; sessionId: string; path: string; dir?: DirListing; error?: string }
   | { type: "file"; requestId: string; sessionId: string; path: string; file?: FileContent; error?: string }
@@ -625,6 +650,13 @@ export type SessionCommand =
    */
   | { type: "repo.clone"; parent: string; repo: string; name?: string }
   /**
+   * Registers the repository that the folder `path` is in, so that the sidebar lists its worktrees. A folder in one of
+   * its worktrees registers the repository's own folder (SessionWorktree.repo), which the result gives (`path`).
+   */
+  | { type: "repo.register"; path: string }
+  /** Takes a registered repository (its folder, as MachineInfo.repos names it) off the list. */
+  | { type: "repo.unregister"; path: string }
+  /**
    * `model`, `effort`, `ultracode`: switch the session (for this session only) before the text is sent.
    * `files`: saved on the working server and mentioned at the end of the text (`@path`), so Claude reads them.
    */
@@ -700,7 +732,7 @@ export interface CommandResult {
   warning?: string;
   /** session.input: what was asked to switch but was not switched (the session keeps what it had). */
   unapplied?: SwitchField[];
-  /** folder.create, repo.clone: the folder that was made (an absolute path). */
+  /** folder.create, repo.clone: the folder that was made (an absolute path). repo.register: the repository's folder. */
   path?: string;
   /**
    * session.launch without `trust`: Claude Code asked whether to trust the folder, so nothing was started.

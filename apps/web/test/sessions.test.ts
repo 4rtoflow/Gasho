@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MachineInfo, SessionInfo } from "@gasho/protocol";
-import { rememberedOf, tabAfterRemoval, worktreesByLastUse } from "../src/lib/sessions.ts";
+import { rememberedOf, repoChoices, repoKeyOf, tabAfterRemoval, worktreesByLastUse } from "../src/lib/sessions.ts";
 
 const session = (sessionId: string, extra: Partial<SessionInfo> = {}): SessionInfo => ({
   sessionId,
@@ -70,4 +70,39 @@ test("remembered worktrees without sessions come last, once each; the tab after 
   const [one] = worktreesByLastUse([machine("mac", [session("a")])]);
   assert.ok(one);
   assert.equal(tabAfterRemoval(one, "a"), undefined);
+});
+
+test("a registered repository's other worktrees follow those with sessions, and git's list decides which remembered ones stay", () => {
+  const app = { path: "/src/app", repo: "/src/app", branch: "main" };
+  const mac: MachineInfo = {
+    ...machine("mac", [session("a", { cwd: "/src/app", worktree: app, lastActivityAt: 1 }), session("n", { cwd: "/notes", lastActivityAt: 2 })]),
+    repos: [
+      {
+        path: "/src/app",
+        worktrees: [
+          // Switched since the session's worktree was read.
+          { path: "/src/app", branch: "feat/y" },
+          { path: "/src/app-x", branch: "feat/x" },
+          { path: "/src/app-detached" },
+        ],
+      },
+    ],
+  };
+  const remembered = [
+    // Removed with git since: the repository's list no longer has it.
+    { machine: "mac", path: "/src/app-old", label: "feat/old", repo: "app", repoPath: "/src/app", subfolders: true },
+    { machine: "mac", path: "/lib", label: "main", repo: "lib", repoPath: "/lib", subfolders: true },
+  ];
+  const list = worktreesByLastUse([mac], remembered);
+  assert.deepEqual(
+    list.map((w) => `${w.label} ${w.sessions.length}${w.registered ? " registered" : ""}`),
+    ["notes 1", "feat/y 1 registered", "feat/x 0 registered", "app-detached 0 registered", "main 0"],
+  );
+  assert.deepEqual(
+    repoChoices(list).map((r) => [r.key, r.name]),
+    [
+      [repoKeyOf(list[1]!), "app"],
+      [repoKeyOf(list[4]!), "lib"],
+    ],
+  );
 });
