@@ -33,13 +33,25 @@ export default {
 };
 `;
 const V2 = `export default { methods: { version: () => 2 } };`;
+const V3 = `
+export default {
+  start(ctx) { ctx.emit("state", { up: true }, { retain: true }); },
+  methods: {
+    burst: (params, ctx) => { for (let i = 1; i <= 5; i++) ctx.emit("progress", { i }); ctx.emit("other", "x"); return "ok"; },
+    big: (params, ctx) => ctx.emit("big", "a".repeat(300 * 1024)),
+    noTopic: (params, ctx) => ctx.emit("", 1),
+    cyclic: (params, ctx) => { const a = {}; a.a = a; ctx.emit("cyclic", a); },
+  },
+};
+`;
 const HASH1 = "aaaaaaaaaaaaaaaa";
 const HASH2 = "bbbbbbbbbbbbbbbb";
+const HASH3 = "cccccccccccccccc";
 
 function setup(enabled = true) {
   const sent: DaemonToHub[] = [];
   const logs: string[] = [];
-  const codes: Record<string, string> = { [HASH1]: V1, [HASH2]: V2 };
+  const codes: Record<string, string> = { [HASH1]: V1, [HASH2]: V2, [HASH3]: V3 };
   let runner: PluginRunner;
   const local = { folders: ["/work"], dataDir: fs.mkdtempSync(path.join(os.tmpdir(), "gasho-plugin-data-")) };
   // A gh that writes down each time it runs.
@@ -150,6 +162,44 @@ test("a new version replaces the old one (hot reload), and turning the plugin of
     runner.update([{ id: "hello", hash: HASH2, run: false, settings: {} }]);
     assert.equal(state()?.state, "off");
     assert.equal((await call("version")).error, "このプラグインは、この working server では動いていません。");
+  } finally {
+    await runner.stopAll();
+  }
+});
+
+test("a daemon part's events go to the Gasho server, at most once a second for each topic", async () => {
+  const { runner, call, state, until, sent } = setup();
+  const events = (topic?: string) => sent.filter((m) => m.type === "plugin.event" && (topic === undefined || m.topic === topic));
+  try {
+    runner.update([{ id: "hello", hash: HASH3, run: true, settings: {} }]);
+    await until(() => state()?.state === "running");
+    // From start already: what it watches, kept by the Gasho server for browsers that connect later.
+    assert.deepEqual(events("state"), [{ type: "plugin.event", plugin: "hello", topic: "state", data: { up: true }, retain: true }]);
+
+    // Five at once: the first now, the last when the second is over; another topic does not wait for this one.
+    const t0 = Date.now();
+    assert.equal((await call("burst")).result, "ok");
+    assert.deepEqual(events("progress").map((m) => (m.type === "plugin.event" ? m.data : undefined)), [{ i: 1 }]);
+    assert.equal(events("other").length, 1);
+    await until(() => events("progress").length === 2);
+    assert.ok(Date.now() - t0 >= 900);
+    assert.deepEqual(events("progress").at(-1), { type: "plugin.event", plugin: "hello", topic: "progress", data: { i: 5 } });
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(events("progress").length, 2);
+
+    // What is not right is the plugin's error, and nothing is sent.
+    assert.match((await call("big")).error ?? "", /大きすぎます（256KB まで）/);
+    assert.match((await call("noTopic")).error ?? "", /topic/);
+    assert.match((await call("cyclic")).error ?? "", /JSON にできません/);
+    assert.equal(events("big").length + events("cyclic").length, 0);
+
+    // A plugin that stops tells nothing more: an event waiting for its turn is dropped.
+    await call("burst");
+    await call("burst");
+    const before = events("progress").length;
+    runner.update([{ id: "hello", hash: HASH3, run: false, settings: {} }]);
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(events("progress").length, before);
   } finally {
     await runner.stopAll();
   }

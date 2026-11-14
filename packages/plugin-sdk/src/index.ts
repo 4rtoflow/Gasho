@@ -288,6 +288,12 @@ export interface GashoSdk {
   useLaunchSession(): (input: { machine: string; cwd: string; name?: string; trust?: boolean }) => Promise<LaunchResult>;
   /** What a session is working on: since when, and with which tool (plugin API 1.2). */
   useSessionActivity(machine: string, sessionId: string): SessionActivity;
+  /**
+   * The data of the last event of a topic that this plugin's daemon part sent from a working server (ctx.emit, plugin
+   * API 1.5); undefined until one came. Events kept by the Gasho server (retain) come when the page connects. A new
+   * version of the plugin starts without the events of the one before.
+   */
+  useEvent<T = unknown>(topic: string, options: { machine: string }): T | undefined;
   /** The current time, renewed every `intervalMs` (30 s by default). */
   useNow(intervalMs?: number): number;
   /** The GitHub repositories of a session: its folder's, or those of the repositories inside it. */
@@ -328,6 +334,7 @@ export declare const useNavigation: GashoSdk["useNavigation"];
 export declare const useSendInput: GashoSdk["useSendInput"];
 export declare const useLaunchSession: GashoSdk["useLaunchSession"];
 export declare const useSessionActivity: GashoSdk["useSessionActivity"];
+export declare const useEvent: GashoSdk["useEvent"];
 export declare const useNow: GashoSdk["useNow"];
 export declare const githubRepos: GashoSdk["githubRepos"];
 export declare const panelRepo: GashoSdk["panelRepo"];

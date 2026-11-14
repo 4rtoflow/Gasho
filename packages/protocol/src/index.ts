@@ -515,6 +515,17 @@ export interface DaemonPluginEntry {
   settings: Record<string, unknown>;
 }
 
+/**
+ * What a plugin's daemon part told the plugin's web parts about one working server (ctx.emit, useEvent; plugin API
+ * 1.5): the last data of a topic.
+ */
+export interface PluginEvent {
+  plugin: string;
+  machine: string;
+  topic: string;
+  data: unknown;
+}
+
 /** A plugin's daemon part, as gasho-daemon tells the Gasho server. */
 export interface DaemonPluginStatus {
   id: string;
@@ -549,7 +560,12 @@ export type DaemonToHub =
   | { type: "plugin.status"; api: string; plugins: DaemonPluginStatus[] }
   /** The code of a plugin's daemon part that gasho-daemon does not have yet. */
   | { type: "plugin.code.get"; plugin: string; hash: string }
-  | { type: "plugin.response"; requestId: string; result?: unknown; error?: string };
+  | { type: "plugin.response"; requestId: string; result?: unknown; error?: string }
+  /**
+   * An event of a plugin's daemon part (ctx.emit): at most one per second for each topic, the last one when there were
+   * more. `retain`: the Gasho server keeps it for browsers that connect later.
+   */
+  | { type: "plugin.event"; plugin: string; topic: string; data?: unknown; retain?: boolean };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
@@ -578,6 +594,8 @@ export type HubToClient =
       events: MachineHookEvent[];
       /** The installed plugins (absent from a Gasho server without plugins). */
       plugins?: PluginInfo[];
+      /** The events of plugins' daemon parts that the Gasho server keeps (retain), the last of each topic. */
+      pluginEvents?: PluginEvent[];
     }
   | { type: "machine"; machine: MachineInfo }
   | { type: "machine.removed"; id: string }
@@ -593,7 +611,9 @@ export type HubToClient =
   /** The installed plugins, whenever one of them changes (files, state, settings, its daemon parts). */
   | { type: "plugins"; plugins: PluginInfo[] }
   | { type: "plugin.response"; requestId: string; result?: unknown; error?: string }
-  | { type: "plugin.result"; requestId: string; result: CommandResult };
+  | { type: "plugin.result"; requestId: string; result: CommandResult }
+  /** An event of a plugin's daemon part on a working server (useEvent), to every browser. */
+  | { type: "plugin.event"; event: PluginEvent };
 
 // browser -> gasho-hub
 export type ClientToHub =

@@ -34,6 +34,7 @@ import { backTo, go, hrefOf, noteOpenedFrom, useRoute, type Route } from "@/lib/
 import { getAppState, sendCommand, sendPluginCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
+import { useEventFor } from "./events";
 import { callPlugin, useRequestFor } from "./requests";
 
 /** The plugin a part belongs to (set by PluginScope). */
@@ -338,6 +339,7 @@ export const sdk: GashoSdk = {
     };
   },
   useSessionActivity,
+  useEvent: <T,>(topic: string, options: { machine: string }) => useEventFor<T>(useContext(PluginScopeContext) ?? "", options?.machine ?? "", topic),
   useNow,
   githubRepos,
   panelRepo,

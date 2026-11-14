@@ -1,7 +1,9 @@
 // The Gasho server's part in plugins (docs/plugins.md): it tells browsers which plugins are installed and how they
 // stand, tells each gasho-daemon which daemon parts to run (and hands it their code), relays the calls of web parts to
 // daemon parts, and keeps which plugins are enabled, where their daemon parts run, and their settings. The plugins'
-// files come from PluginRegistry (plugins.ts); this never runs a plugin's code.
+// files come from PluginRegistry (plugins.ts); this never runs a plugin's code. The events of daemon parts go on to
+// every browser; the Gasho server keeps the last of each topic that asked for it (retain) for browsers that connect
+// later.
 import { randomUUID } from "node:crypto";
 import type {
   ClientToHub,
@@ -15,6 +17,7 @@ import type {
   MachineInfo,
   PluginCommand,
   PluginDaemonState,
+  PluginEvent,
   PluginInfo,
   PluginMachines,
   PluginManifest,
@@ -29,6 +32,11 @@ const MAX_CODE_BYTES = 15 * 1024 * 1024;
 /** The Gasho server waits this much longer than the daemon part may take, so that gasho-daemon's own answer arrives. */
 const RELAY_MARGIN_MS = 3000;
 const MAX_MACHINES = 100;
+/** An event's topic (characters) and data (as JSON, in bytes), at most. */
+const MAX_TOPIC = 100;
+const MAX_EVENT_BYTES = 256 * 1024;
+/** Kept events (retain) of a plugin on one working server, at most: the oldest go first. */
+const MAX_RETAINED = 32;
 
 const OLD_DAEMON = "この working server の gasho-daemon は古いため、プラグインを使えません。gasho-daemon を更新してください。";
 
@@ -57,6 +65,7 @@ export interface PluginHubDeps {
 
 type PluginRequest = Extract<ClientToHub, { type: "plugin.request" }>;
 type PluginStatusMessage = Extract<DaemonToHub, { type: "plugin.status" }>;
+type PluginEventMessage = Extract<DaemonToHub, { type: "plugin.event" }>;
 
 /** Whether a plugin's daemon part is meant to run on a working server. */
 export function chosen(machines: PluginMachines, machine: string): boolean {
@@ -69,6 +78,8 @@ export class PluginHub {
   private status = new Map<string, { api: string; plugins: Map<string, DaemonPluginStatus> }>();
   private calls = new Map<string, PendingCall>();
   private lastInfos = "";
+  /** The kept events (retain), by "<plugin>\0<machine>\0<topic>", with the version of the plugin that sent each. */
+  private retained = new Map<string, { event: PluginEvent; hash: string }>();
 
   constructor(deps: PluginHubDeps) {
     this.deps = deps;
@@ -80,8 +91,14 @@ export class PluginHub {
     return this.deps.registry.entries().map((e) => this.info(e));
   }
 
+  /** The kept events of daemon parts (retain), for a browser that connects. */
+  retainedEvents(): PluginEvent[] {
+    return [...this.retained.values()].map((r) => r.event);
+  }
+
   /** A plugin, its files, its state or its settings changed: browsers and gasho-daemons hear of it. */
   changed(): void {
+    this.forgetEvents();
     this.toClients();
     for (const [machine, peer] of this.deps.daemons()) peer.send({ type: "plugins", plugins: this.daemonEntries(machine) });
   }
@@ -110,9 +127,16 @@ export class PluginHub {
     this.toClients();
   }
 
-  /** plugin.status, plugin.code.get and plugin.response from a gasho-daemon. */
-  onDaemonMessage(machine: string, peer: Peer<HubToDaemon>, msg: Extract<DaemonToHub, { type: "plugin.status" | "plugin.code.get" | "plugin.response" }>): void {
+  /** plugin.status, plugin.code.get, plugin.response and plugin.event from a gasho-daemon. */
+  onDaemonMessage(
+    machine: string,
+    peer: Peer<HubToDaemon>,
+    msg: Extract<DaemonToHub, { type: "plugin.status" | "plugin.code.get" | "plugin.response" | "plugin.event" }>,
+  ): void {
     switch (msg.type) {
+      case "plugin.event":
+        this.onEvent(machine, msg);
+        return;
       case "plugin.status":
         this.onStatus(machine, msg);
         return;
@@ -281,6 +305,45 @@ export class PluginHub {
     }
     this.status.set(machine, { api: msg.api.slice(0, 20), plugins });
     this.toClients();
+  }
+
+  /**
+   * An event of a daemon part: passed on to every browser when the plugin is enabled and runs on that working server,
+   * and kept when it asks for it (retain). Others are dropped (gasho-daemon checks them already).
+   */
+  private onEvent(machine: string, msg: PluginEventMessage): void {
+    const entry = typeof msg.plugin === "string" ? this.deps.registry.get(msg.plugin) : undefined;
+    const hash = entry?.revision?.hash;
+    if (!entry || !hash || !entry.revision?.manifest.daemon) return;
+    const state = this.state(entry.id);
+    if (!state.enabled || !chosen(state.machines, machine)) return;
+    const topic = msg.topic;
+    if (typeof topic !== "string" || topic.length === 0 || topic.length > MAX_TOPIC || /[\u0000-\u001f]/.test(topic)) return;
+    const json = JSON.stringify(msg.data ?? null);
+    if (Buffer.byteLength(json) > MAX_EVENT_BYTES) return;
+    const event: PluginEvent = { plugin: entry.id, machine, topic, data: msg.data ?? null };
+    this.deps.broadcast({ type: "plugin.event", event });
+    if (msg.retain !== true) return;
+    const key = `${entry.id}\0${machine}\0${topic}`;
+    // Kept in the order they came: the oldest of the plugin on the working server is dropped first.
+    this.retained.delete(key);
+    this.retained.set(key, { event, hash });
+    const prefix = `${entry.id}\0${machine}\0`;
+    const own = [...this.retained.keys()].filter((k) => k.startsWith(prefix));
+    for (const k of own.slice(0, Math.max(0, own.length - MAX_RETAINED))) this.retained.delete(k);
+  }
+
+  /**
+   * Drops kept events that no longer stand: of a plugin removed, disabled, not run on that working server any more, or
+   * replaced by a new version (whose daemon part sends its own from `start`).
+   */
+  private forgetEvents(): void {
+    for (const [key, r] of this.retained) {
+      const entry = this.deps.registry.get(r.event.plugin);
+      const state = this.state(r.event.plugin);
+      if (entry?.revision?.hash === r.hash && state.enabled && chosen(state.machines, r.event.machine)) continue;
+      this.retained.delete(key);
+    }
   }
 
   private async sendCode(peer: Peer<HubToDaemon>, plugin: unknown, hash: unknown): Promise<void> {
