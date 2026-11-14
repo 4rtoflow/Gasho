@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { commandOf, installOf, serviceCommand } from "../src/install.ts";
-import { atLeast, formatChecks, launchdPlist, servicePath, systemdUnit, versionOf } from "../src/setup.ts";
+import { commandOf, installOf, layoutOf, serviceCommand } from "../src/install.ts";
+import { activateCommands, atLeast, formatChecks, launchdPlist, serviceFile, servicePath, systemdUnit, versionOf } from "../src/setup.ts";
 
 test("versions are read from what the tools print, and compared", () => {
   assert.deepEqual(versionOf("v24.22.2"), [24, 22, 2]);
@@ -16,6 +16,20 @@ test("versions are read from what the tools print, and compared", () => {
 test("the service gets Node.js's folder first, then the shell's PATH, each once", () => {
   assert.equal(servicePath("/opt/node/bin/node", "/usr/bin:/opt/node/bin:/home/u/.local/bin"), "/opt/node/bin:/usr/bin:/home/u/.local/bin");
   assert.equal(servicePath("/usr/bin/node", undefined), "/usr/bin");
+});
+
+test("the folders npm puts on PATH while npx runs are left out of the service's PATH", () => {
+  const npxPath = [
+    "/home/u/.npm/_npx/24d82d1acaca0cc6/node_modules/.bin",
+    "/home/u/node_modules/.bin",
+    "/home/node_modules/.bin",
+    "/node_modules/.bin",
+    "/opt/node/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin",
+    "/opt/node/bin",
+    "/home/u/.local/bin",
+    "/usr/bin",
+  ].join(":");
+  assert.equal(servicePath("/opt/node/bin/node", npxPath), "/opt/node/bin:/home/u/.local/bin:/usr/bin");
 });
 
 const repo = "/home/u/repos/Gasho 100%";
@@ -66,10 +80,11 @@ test("the checks are listed with their marks, the names lined up, and a summary"
 
 test("how gasho-daemon was installed decides the command to suggest and what its service runs", () => {
   const node = "/opt/node/bin/node";
+  const layout = layoutOf({ GASHO_DAEMON_HOME: "/home/u/.local/share/gasho/daemon" });
   const repo = installOf("/home/u/repos/Gasho/apps/daemon/src/cli.ts");
   assert.deepEqual(repo, { kind: "repo", repo: "/home/u/repos/Gasho" });
   assert.equal(commandOf(repo), "node apps/daemon/src/cli.ts");
-  assert.deepEqual(serviceCommand(repo, node, "1.2.3", "/home/u"), {
+  assert.deepEqual(serviceCommand(repo, node, "1.2.3", "/home/u", layout), {
     argv: [node, "/home/u/repos/Gasho/apps/daemon/src/cli.ts"],
     cwd: "/home/u/repos/Gasho",
   });
@@ -77,12 +92,39 @@ test("how gasho-daemon was installed decides the command to suggest and what its
   // npx keeps the package in a cache npm may clear: the service runs npx again, for the same version.
   const npx = installOf("/home/u/.npm/_npx/0123abcd/node_modules/@4rtoflow/gasho-daemon/lib/cli.js");
   assert.equal(commandOf(npx), "npx @4rtoflow/gasho-daemon");
-  assert.deepEqual(serviceCommand(npx, node, "1.2.3", "/home/u"), {
+  assert.deepEqual(serviceCommand(npx, node, "1.2.3", "/home/u", layout), {
     argv: ["/opt/node/bin/npx", "--yes", "--prefer-offline", "@4rtoflow/gasho-daemon@1.2.3"],
     cwd: "/home/u",
   });
 
   const global = installOf("/opt/node/lib/node_modules/@4rtoflow/gasho-daemon/lib/cli.js");
   assert.equal(commandOf(global), "gasho-daemon");
-  assert.deepEqual(serviceCommand(global, node, "1.2.3", "/home/u").argv, [node, "/opt/node/lib/node_modules/@4rtoflow/gasho-daemon/lib/cli.js"]);
+  assert.deepEqual(serviceCommand(global, node, "1.2.3", "/home/u", layout).argv, [node, "/opt/node/lib/node_modules/@4rtoflow/gasho-daemon/lib/cli.js"]);
+
+  // Installed by `service install`: Node.js runs it through its real path, in its own folder of versions; the service
+  // runs the version that `current` links to, so that an update changes the link alone.
+  const managed = installOf("/home/u/.local/share/gasho/daemon/versions/0.15.2/node_modules/@4rtoflow/gasho-daemon/lib/cli.js", [layout.versions]);
+  assert.deepEqual(managed, { kind: "managed", version: "0.15.2" });
+  assert.equal(commandOf(managed), "npx @4rtoflow/gasho-daemon");
+  assert.deepEqual(serviceCommand(managed, node, "0.15.2", "/home/u", layout), {
+    argv: [node, "/home/u/.local/share/gasho/daemon/current/node_modules/@4rtoflow/gasho-daemon/lib/cli.js"],
+    cwd: "/home/u",
+  });
+  // Not a folder of a version: an ordinary package.
+  assert.equal(installOf("/home/u/.local/share/gasho/daemon/versions/.0.15.2-1-x/node_modules/@4rtoflow/gasho-daemon/lib/cli.js", [layout.versions]).kind, "package");
+});
+
+test("service install writes the unit where systemd or launchd reads it, and restarts the daemon with it", () => {
+  assert.equal(serviceFile("linux", "/home/u", {}), "/home/u/.config/systemd/user/gasho-daemon.service");
+  assert.equal(serviceFile("linux", "/home/u", { XDG_CONFIG_HOME: "/cfg" }), "/cfg/systemd/user/gasho-daemon.service");
+  assert.equal(serviceFile("darwin", "/Users/u", {}), "/Users/u/Library/LaunchAgents/local.gasho.daemon.plist");
+  assert.equal(serviceFile("win32", "C:/u", {}), undefined);
+  assert.deepEqual(
+    activateCommands("linux", "/x", 1000).map((c) => c.argv.join(" ")),
+    ["systemctl --user daemon-reload", "systemctl --user enable gasho-daemon", "systemctl --user restart gasho-daemon"],
+  );
+  assert.deepEqual(activateCommands("darwin", "/Users/u/Library/LaunchAgents/local.gasho.daemon.plist", 501), [
+    { argv: ["launchctl", "bootout", "gui/501/local.gasho.daemon"], mayFail: true },
+    { argv: ["launchctl", "bootstrap", "gui/501", "/Users/u/Library/LaunchAgents/local.gasho.daemon.plist"] },
+  ]);
 });

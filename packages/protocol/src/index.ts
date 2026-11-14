@@ -282,6 +282,45 @@ export interface MachineInfo {
   features?: InputFeature[];
   /** Whether gasho-daemon lists a folder's past conversations and opens one again (session.history, session.resume). */
   canResume?: boolean;
+  /** Whether Gasho can update this gasho-daemon, and how an update goes (absent from one older than updates from Gasho). */
+  update?: DaemonUpdateInfo;
+}
+
+/** A step of an update of gasho-daemon (daemon.update), in order. */
+export type DaemonUpdateStep = "install" | "check" | "wait" | "restart";
+
+/**
+ * Updating gasho-daemon from Gasho (daemon.update). gasho-daemon installs each version in a folder of its own beside
+ * the others, and its service (systemd, launchd) runs the one chosen; it can be updated from Gasho only when it runs
+ * that way (`gasho-daemon service install`).
+ */
+export interface DaemonUpdateInfo {
+  /** Whether daemon.update can be sent. */
+  canUpdate: boolean;
+  /** Why it cannot, for people. */
+  reason?: string;
+  /** What to run on the working server to update it by hand, or to make it updatable from Gasho. */
+  command?: string;
+  /** The versions installed beside the running one, which daemon.update switches to without downloading them. */
+  installed?: string[];
+  /** The version this one replaced, when it was started by an update: the one to go back to. */
+  previous?: string;
+  /** An update under way: the version it goes to, and its step (since `at`, ms since the epoch). */
+  progress?: { version: string; step: DaemonUpdateStep; at: number };
+  /** The last update, when it failed; nothing was changed. */
+  failed?: { version: string; error: string; at: number };
+}
+
+/** The latest published versions, as the Gasho server last looked them up on the package registry. */
+export interface LatestVersions {
+  /** gasho-daemon (@4rtoflow/gasho-daemon). */
+  daemon?: string;
+  /** When they were last looked up (ms since the epoch). */
+  checkedAt?: number;
+  /** Why the last look-up failed. */
+  error?: string;
+  /** A look-up is under way. */
+  checking?: boolean;
 }
 
 /** Something registered with the Gasho server: a browser or a working server. */
@@ -540,6 +579,8 @@ export type DaemonToHub =
       features?: InputFeature[];
       /** Answers session.history and session.resume. */
       canResume?: boolean;
+      /** Whether Gasho can update it, and the update under way (sent again at each step). */
+      update?: DaemonUpdateInfo;
     }
   | { type: "command.result"; requestId: string; result: CommandResult }
   | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
@@ -578,8 +619,12 @@ export type HubToClient =
       events: MachineHookEvent[];
       /** The installed plugins (absent from a Gasho server without plugins). */
       plugins?: PluginInfo[];
+      /** The latest published versions (absent from a Gasho server that does not look them up). */
+      latest?: LatestVersions;
     }
   | { type: "machine"; machine: MachineInfo }
+  /** The latest published versions, whenever they were looked up again. */
+  | { type: "latest"; latest: LatestVersions }
   | { type: "machine.removed"; id: string }
   | ({ type: "transcript.page"; machine: string; sessionId: string } & TranscriptPage)
   | { type: "transcript.append"; machine: string; sessionId: string; entries: TranscriptEntry[] }
@@ -608,6 +653,8 @@ export type ClientToHub =
   /** A file inside the session's folder ("src/app.ts"): its text, or what kind of file it is. */
   | { type: "file.get"; machine: string; sessionId: string; path: string }
   | { type: "notification.read"; ids: string[] }
+  /** Looks up the latest published versions now (answered with latest). */
+  | { type: "latest.check" }
   | ({ requestId: string; machine: string } & SessionCommand)
   /**
    * Calls a method of a plugin's daemon part on a working server (answered with plugin.response). `summary`: what the
@@ -728,7 +775,15 @@ export type SessionCommand =
    * the result says so (`conflict`). Without it, the file is overwritten. `create`: makes a new file instead, in a
    * folder that is there; nothing that is already there is overwritten.
    */
-  | { type: "file.write"; sessionId: string; path: string; content: string; baseHash?: string; create?: boolean };
+  | { type: "file.write"; sessionId: string; path: string; content: string; baseHash?: string; create?: boolean }
+  /**
+   * Updates gasho-daemon to `version`, or takes it back to an older one, when its `update.canUpdate` (gasho-daemon
+   * says so only from the version that brought updates from Gasho on). gasho-daemon installs that version beside the running one, checks that it starts, waits for the
+   * inputs it still has to send, switches to it and ends, for its service to start the new version. The result comes
+   * as soon as the update has begun; `update.progress` follows it, and the new version's connection ends it (or
+   * `update.failed`, with nothing changed).
+   */
+  | { type: "daemon.update"; version: string };
 
 export interface CommandResult {
   ok: boolean;

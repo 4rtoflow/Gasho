@@ -27,6 +27,7 @@ import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { isInside, statusLineLaunch, statusLineOf, userStatusLine } from "./statusline.ts";
 import { HubClient } from "./hub-client.ts";
+import { type Install, type Layout, layoutOf } from "./install.ts";
 import { answersMessage, OPEN_QUESTION, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
 import {
   atBottom,
@@ -75,6 +76,7 @@ import { SessionTerminals, Terminals } from "./terminal.ts";
 import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
+import { npmOf, Updater } from "./self-update.ts";
 import { log, str } from "./util.ts";
 
 export const DAEMON_VERSION = "0.14.0";
@@ -125,6 +127,16 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const MODELS_MAX_AGE_MS = 24 * 3600_000;
 /** At most one look at the /model picker just to read the model names, per this interval. */
 const MODELS_PROBE_INTERVAL_MS = 10 * 60_000;
+/** How long after starting the folders of versions no longer used are removed (see Updater.prune). */
+const PRUNE_VERSIONS_MS = 2 * 60_000;
+
+/** How this gasho-daemon was installed and runs, for updates from Gasho (see self-update.ts). */
+export interface UpdateSetup {
+  install: Install;
+  layout: Layout;
+  /** Run as the service `service install` set up. */
+  service: boolean;
+}
 
 interface Tracked {
   info: SessionInfo;
@@ -197,13 +209,28 @@ export class Daemon {
   private prompts = new Map<string, { at: number; text: string }[]>();
   /** The daemon parts of plugins (docs/plugins.md). */
   private plugins: PluginRunner;
+  /** Updates of gasho-daemon from Gasho. */
+  private updater: Updater;
 
   /** How long the prompt box may take to let go of a text after Enter (see typeInput). */
   private enterWaitMs: number;
 
-  constructor(cfg: DaemonConfig, opts: { enterWaitMs?: number } = {}) {
+  /** `update`: how it was installed (without it, as from a clone: Gasho cannot update it). */
+  constructor(cfg: DaemonConfig, opts: { enterWaitMs?: number; update?: UpdateSetup } = {}) {
     this.cfg = cfg;
     this.enterWaitMs = opts.enterWaitMs ?? ENTER_WAIT_MS;
+    const setup = opts.update ?? { install: { kind: "repo", repo: "" }, layout: layoutOf(), service: false };
+    this.updater = new Updater({
+      ...setup,
+      version: DAEMON_VERSION,
+      npm: npmOf(process.env, process.execPath),
+      node: process.execPath,
+      env: process.env,
+      waiting: () => this.inputsToType(),
+      changed: () => this.emitCapabilities(),
+      exit: (code) => process.exit(code),
+      log: (s) => log(s),
+    });
     this.terminals = new SessionTerminals(new Terminals({ stateDir: cfg.stateDir, env: cleanEnv() }), new Zellij(cleanEnv()));
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
     this.plugins = new PluginRunner({
@@ -266,6 +293,8 @@ export class Daemon {
       .catch(() => undefined);
     await this.refreshFolders();
     setInterval(() => void this.refreshFolders(), FOLDERS_REFRESH_MS).unref();
+    await this.updater.load();
+    setTimeout(() => void this.updater.prune().catch((e: unknown) => log("could not remove the versions no longer used", e)), PRUNE_VERSIONS_MS).unref();
 
     this.hub.connect();
     startHookServer({
@@ -552,7 +581,15 @@ export class Daemon {
       modelsAt: this.models?.at,
       features: [...INPUT_FEATURES],
       canResume: true,
+      update: this.updater.info(),
     });
+  }
+
+  /** Inputs still to be typed into sessions, the one being typed included: they are not kept over a restart. */
+  private inputsToType(): number {
+    let n = this.flushing.size;
+    for (const m of this.managed.all()) n += this.managed.waiting(m.sessionId).filter((input) => !input.auto).length;
+    return n;
   }
 
   private modelsFile(): string {
@@ -824,7 +861,8 @@ export class Daemon {
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
-      case "file.write": {
+      case "file.write":
+      case "daemon.update": {
         let result: CommandResult;
         try {
           switch (m.type) {
@@ -869,6 +907,9 @@ export class Daemon {
               break;
             case "file.write":
               result = await this.writeFile(m);
+              break;
+            case "daemon.update":
+              result = this.updater.start(m.version);
               break;
           }
         } catch (e) {

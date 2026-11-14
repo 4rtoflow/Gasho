@@ -7,6 +7,7 @@ import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { SessionActionDialog, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
+import { updateTo } from "@/lib/daemon-update";
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery, useWindowWidth } from "@/lib/media";
 import { arrangeSessions, rememberSessions, useSavedOrder } from "@/lib/order";
@@ -140,7 +141,7 @@ export function App() {
   useEffect(() => {
     if (isOldGitHubLink(location.hash)) go(route, { replace: true });
   }, [route]);
-  const { auth, me, machines, notifications, connected } = useAppState();
+  const { auth, me, machines, notifications, connected, latest } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
   // What was picked from a session tab's menu (rename, fork, remove); its dialog is open meanwhile.
   const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
@@ -178,7 +179,7 @@ export function App() {
       items: [
         { id: "home", label: "ホーム", icon: <Home />, badge: unread || undefined },
         ...pluginItems.map(({ id, label, icon, badge }) => ({ id, label, icon, badge })),
-        { id: "devices", label: "端末", icon: <KeyRound /> },
+        { id: "devices", label: "端末", icon: <KeyRound />, badge: machines.some((m) => updateTo(m, latest)) ? "更新" : undefined },
         { id: "plugins", label: "プラグイン", icon: <Puzzle /> },
         { id: "settings", label: "設定", icon: <Settings /> },
       ],
