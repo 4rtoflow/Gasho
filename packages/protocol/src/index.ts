@@ -32,6 +32,16 @@ export interface SessionRepo {
   github?: GitHubRepo;
 }
 
+/** The git worktree a session's folder is in (gasho-daemon 0.15.0 and later). */
+export interface SessionWorktree {
+  /** The worktree's top folder. */
+  path: string;
+  /** The repository: the folder of its main worktree (of the repository itself, when bare). Its worktrees share it. */
+  repo: string;
+  /** Absent when HEAD is detached. */
+  branch?: string;
+}
+
 export interface SessionInfo {
   /** Local session id (UUID). */
   sessionId: string;
@@ -58,6 +68,8 @@ export interface SessionInfo {
   pendingInputs?: number;
   /** Repositories inside the folder, when the folder is not in a repository but holds some (a workspace of repos). */
   repos?: SessionRepo[];
+  /** Absent when the folder is not in a repository. */
+  worktree?: SessionWorktree;
   /** The model the session uses, as Claude Code names it ("Opus 5.5"); from the transcript. */
   model?: string;
   /** Sessions started from Gasho: the effort level and ultracode as Claude Code shows them above the prompt. */

@@ -4,6 +4,8 @@ import type { CommandResult, InputFeature, MachineInfo, SessionInfo, SessionMode
 import { RepoPicker } from "@/components/repo-picker";
 import { EffortPicker, UltracodeToggle } from "@/components/session-controls";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
+import type { SessionActionRequest } from "@/components/session-menu";
+import { SessionTabs } from "@/components/session-tabs";
 import { StatusBadge } from "@/components/status-badge";
 import { Transcript } from "@/components/transcript";
 import { PromptInput, type PromptModel } from "@/components/ui/prompt-input";
@@ -21,13 +23,27 @@ import { promptDraft, usePicks } from "@/lib/drafts";
 import { addPending, noneWaiting, pendingShown, removePending, settlePending, usePending } from "@/lib/pending";
 import { go, type SessionPanel } from "@/lib/route";
 import { closeSessionHeaderOnPhone, useSessionHeaderShown } from "@/lib/session-header";
+import { rememberOpened, worktreeId } from "@/lib/sessions";
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
 import { PluginHeaderItems } from "@/plugins/parts";
 
-/** `panel`: the panel open beside the session (a computer), if any; its link in the header shows as open. */
-export function SessionView({ machine, sessionId, panel }: { machine: string; sessionId: string; panel?: SessionPanel }) {
+/**
+ * `panel`: the panel open beside the session (a computer), if any; its link in the header shows as open.
+ * `onSessionAction`: an item picked from a tab's menu (rename, fork, remove); the app opens its dialog.
+ */
+export function SessionView({
+  machine,
+  sessionId,
+  panel,
+  onSessionAction,
+}: {
+  machine: string;
+  sessionId: string;
+  panel?: SessionPanel;
+  onSessionAction: (request: SessionActionRequest) => void;
+}) {
   const { machines, transcripts } = useAppState();
   const now = useNow();
   const headerShown = useSessionHeaderShown();
@@ -43,6 +59,10 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
     if (m?.connected && shown) loadTranscript(machine, sessionId);
   }, [machine, sessionId, m?.connected, shown]);
   useEffect(() => closeSessionHeaderOnPhone(), [machine, sessionId]);
+  const worktree = s && worktreeId(machine, s);
+  useEffect(() => {
+    if (worktree && shown) rememberOpened(worktree, sessionId);
+  }, [worktree, shown, sessionId]);
 
   if (!m || !s || !shown) {
     return (
@@ -74,6 +94,7 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
 
   return (
     <div className="flex h-full flex-col">
+      <SessionTabs machine={m} session={s} onAction={onSessionAction} />
       {headerShown ? (
         <header className="shrink-0 space-y-2 border-b border-border px-4 py-3 md:px-6">
           <BackLink />

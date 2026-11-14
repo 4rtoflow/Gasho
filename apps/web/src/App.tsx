@@ -1,13 +1,13 @@
 import { Home, KeyRound, Plus, Puzzle } from "lucide-react";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useState } from "react";
+import type { SessionStatus } from "@gasho/protocol";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
-import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
+import { SessionActionDialog, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
-import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
-import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
+import { notificationShown, sessionToOpen, worktreeId, worktreesByLastUse, type WorktreeSessions } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { PluginBadgeProbes, PluginPageView, PluginPanelView, usePluginBadges } from "@/plugins/parts";
@@ -20,7 +20,11 @@ import { PairView } from "@/views/pair";
 import { PluginsView } from "@/views/plugins";
 import { SessionView } from "@/views/session";
 
-const SEP = "\u001f";
+/** A worktree's status in the sidebar: that of its most pressing session. */
+function worktreeStatus(w: WorktreeSessions): SessionStatus {
+  if (!w.machine.connected) return "unknown";
+  return (["waiting", "busy", "idle"] as const).find((st) => w.sessions.some((s) => s.status === st)) ?? "unknown";
+}
 
 /** Gasho's logo: 🙏 (合掌, gasshō). The collapsed sidebar shows the logo alone. */
 export const LOGO = "🙏";
@@ -75,9 +79,9 @@ export function App() {
   }, [route]);
   const { auth, me, machines, notifications, connected } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
-  // What was picked from a session's menu in the sidebar (rename, fork, remove); its dialog is open meanwhile.
+  // What was picked from a session tab's menu (rename, fork, remove); its dialog is open meanwhile.
   const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
-  // The dialog that starts a new session, opened from the "＋" of the sidebar's session list.
+  // The dialog that starts a new session, opened from the "＋" of the sidebar's worktree list.
   const [launchOpen, setLaunchOpen] = useState(false);
   const desktop = useMediaQuery(DESKTOP);
   // The plugins' web parts (docs/plugins.md): their sidebar items and the badges their hooks give.
@@ -89,8 +93,8 @@ export function App() {
   if (auth === "unregistered") return <PairView />;
 
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
-  // The sessions of all working servers in one list, the one used last first.
-  const sessions = sessionsByLastUse(machines);
+  // The worktrees of all working servers in one list, the one used last first.
+  const worktrees = worktreesByLastUse(machines);
   // The plugins' sidebar items: between ホーム and 端末, in the plugins' order. Each opens a page of its plugin.
   const pluginItems = parts.flatMap(({ info, def }) =>
     (def.sidebar ?? []).map((item) => {
@@ -110,25 +114,25 @@ export function App() {
     },
     {
       // Shown even without sessions, for its "＋".
-      title: "セッション",
+      title: "worktree",
       action: { label: "新しいセッション", icon: <Plus />, onClick: () => setLaunchOpen(true) },
-      items: sessions.map(({ machine: m, session: s }) => ({
-        id: [m.id, s.sessionId].join(SEP),
-        label: sessionLabel(s),
-        icon: <StatusDot status={m.connected ? s.status : "unknown"} />,
-        badge: !m.connected ? "オフライン" : s.status === "waiting" ? "確認" : undefined,
-        // Right-click (a long press on a phone): rename, fork, remove.
-        wrap: (button: ReactElement) => (
-          <SessionContextMenu machine={m} session={s} onPick={setSessionAction}>
-            {button}
-          </SessionContextMenu>
-        ),
+      items: worktrees.map((w) => ({
+        id: w.id,
+        label: w.label,
+        // The working server too, when there are several.
+        description: [w.repo, machines.length > 1 ? w.machine.name : undefined].filter(Boolean).join(" · ") || undefined,
+        icon: <StatusDot status={worktreeStatus(w)} />,
+        badge: !w.machine.connected ? "オフライン" : w.sessions.some((s) => s.status === "waiting") ? "確認" : undefined,
       })),
     },
   ];
+  const openSession =
+    route.name === "session" ? machines.find((m) => m.id === route.machine)?.sessions.find((s) => s.sessionId === route.sessionId) : undefined;
   const activeId =
     route.name === "session"
-      ? [route.machine, route.sessionId].join(SEP)
+      ? openSession
+        ? worktreeId(route.machine, openSession)
+        : ""
       : route.name === "plugin"
         ? (pluginItems.find((i) => i.plugin === route.plugin && i.page.id === route.page)?.id ?? "")
         : route.name;
@@ -143,8 +147,9 @@ export function App() {
           if (id === "home" || id === "devices" || id === "plugins") return go({ name: id });
           const item = pluginItems.find((i) => i.id === id);
           if (item) return go({ name: "plugin", plugin: item.plugin, page: item.page.id, params: item.page.params ?? {} });
-          const [machine, sessionId] = id.split(SEP);
-          if (machine && sessionId) go({ name: "session", machine, sessionId });
+          const w = worktrees.find((x) => x.id === id);
+          const s = w && sessionToOpen(w);
+          if (w && s) go({ name: "session", machine: w.machine.id, sessionId: s.sessionId });
         }}
         mobileOpen={mobileOpen}
         onMobileOpenChange={setMobileOpen}
@@ -171,7 +176,13 @@ export function App() {
             {route.name === "plugins" && <PluginsView />}
             {route.name === "plugin" && <PluginPageView plugin={route.plugin} page={route.page} params={route.params} />}
             {route.name === "session" && (desktop || !panel) && (
-              <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} panel={panel} />
+              <SessionView
+                key={`${route.machine}/${route.sessionId}`}
+                machine={route.machine}
+                sessionId={route.sessionId}
+                panel={panel}
+                onSessionAction={setSessionAction}
+              />
             )}
             {route.name === "session" && !desktop && panel && (
               <PanelView machine={route.machine} sessionId={route.sessionId} panel={panel} docked={false} />
@@ -185,7 +196,7 @@ export function App() {
         </div>
       </div>
       <PluginBadgeProbes />
-      <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} onNavigate={() => setMobileOpen(false)} />
+      <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} />
       <LaunchDialog open={launchOpen} onClose={() => setLaunchOpen(false)} onLaunched={() => setMobileOpen(false)} />
     </div>
   );

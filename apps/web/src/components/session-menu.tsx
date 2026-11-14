@@ -1,6 +1,6 @@
-// What can be done to a session from its place in the sidebar: rename it, fork it, or remove it. The menu opens with a
+// What can be done to a session from its tab above the session: rename it, fork it, or remove it. The menu opens with a
 // right-click (a long press on a touch screen, the context menu key on a keyboard). Each item opens a dialog, which the
-// app keeps at its top (SessionActionDialog): it stays open while the sidebar redraws or the drawer closes.
+// app keeps at its top (SessionActionDialog): it stays open while the tabs redraw, and when a fork opens in their place.
 import { GitFork, Pencil, Trash2 } from "lucide-react";
 import { AlertDialog, ContextMenu, Dialog } from "radix-ui";
 import { useRef, useState, type FormEvent, type ReactElement, type ReactNode } from "react";
@@ -35,7 +35,7 @@ const MENU =
 const MENU_ITEM =
   "flex w-full cursor-default items-center gap-2.5 rounded-lg px-2.5 py-1.5 outline-none select-none data-[highlighted]:bg-surface-raised data-[disabled]:pointer-events-none data-[disabled]:opacity-40 [&>svg]:size-4 [&>svg]:shrink-0";
 
-/** The menu of a session in the sidebar; `children` is the item's button, which opens it. */
+/** The menu of a session's tab; `children` is the tab, which opens it. */
 export function SessionContextMenu({
   machine,
   session,
@@ -102,34 +102,22 @@ export function SessionContextMenu({
   );
 }
 
-/**
- * The dialog for a picked menu item. `onNavigate` is called after it went to another page (to a fork, or home after
- * the open session was removed): the app closes the sidebar's drawer then.
- */
-export function SessionActionDialog({
-  request,
-  onClose,
-  onNavigate,
-}: {
-  request: SessionActionRequest | null;
-  onClose: () => void;
-  onNavigate?: () => void;
-}) {
+/** The dialog for a picked menu item. */
+export function SessionActionDialog({ request, onClose }: { request: SessionActionRequest | null; onClose: () => void }) {
   if (!request) return null;
   // A new pick starts a fresh dialog.
   const key = `${request.action}/${request.machine.id}/${request.session.sessionId}`;
-  if (request.action === "remove") return <RemoveDialog key={key} request={request} onClose={onClose} onNavigate={onNavigate} />;
-  return <NameDialog key={key} request={request} onClose={onClose} onNavigate={onNavigate} />;
+  if (request.action === "remove") return <RemoveDialog key={key} request={request} onClose={onClose} />;
+  return <NameDialog key={key} request={request} onClose={onClose} />;
 }
 
 interface DialogProps {
   request: SessionActionRequest;
   onClose: () => void;
-  onNavigate?: () => void;
 }
 
 /** Renaming a session, or forking it under a new name. */
-function NameDialog({ request: { action, machine, session }, onClose, onNavigate }: DialogProps) {
+function NameDialog({ request: { action, machine, session }, onClose }: DialogProps) {
   const fork = action === "fork";
   const current = sessionLabel(session);
   const [name, setName] = useState(() => (fork ? forkName(current) : current));
@@ -161,7 +149,6 @@ function NameDialog({ request: { action, machine, session }, onClose, onNavigate
     }
     if (fork && r.sessionId) {
       go({ name: "session", machine: machine.id, sessionId: r.sessionId });
-      onNavigate?.();
     }
     if (r.warning) setNotice(r.warning);
     else onClose();
@@ -251,7 +238,7 @@ function NameDialog({ request: { action, machine, session }, onClose, onNavigate
 }
 
 /** Removing a session: its Claude Code ends, and its conversation stays on the working server. */
-function RemoveDialog({ request: { machine, session }, onClose, onNavigate }: DialogProps) {
+function RemoveDialog({ request: { machine, session }, onClose }: DialogProps) {
   const route = useRoute();
   const { machines } = useAppState();
   const [busy, setBusy] = useState(false);
@@ -272,7 +259,6 @@ function RemoveDialog({ request: { machine, session }, onClose, onNavigate }: Di
     // The open session is gone: back home, in place of its page.
     if (route.name === "session" && route.machine === machine.id && route.sessionId === session.sessionId) {
       go({ name: "home" }, { replace: true });
-      onNavigate?.();
     }
     onClose();
   };

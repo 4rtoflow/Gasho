@@ -14,13 +14,14 @@ import type {
   SessionInfo,
   SessionModel,
   SessionRepo,
+  SessionWorktree,
   SwitchField,
   TranscriptEntry,
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
 import { listDir, readFileAt, writeFileAt } from "./files.ts";
 import { cloneRepo, createFolder } from "./folders.ts";
-import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
+import { githubRepoOf, nestedRepos, readGitGraph, worktreeOf } from "./git.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
@@ -74,9 +75,9 @@ import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.13.0";
+export const DAEMON_VERSION = "0.15.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
-/** How long the list of repositories inside a folder (and their branches) is reused. */
+/** How long the worktree a folder is in, or the repositories inside it, and their branches are reused. */
 const REPOS_CACHE_MS = 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
@@ -168,6 +169,7 @@ export class Daemon {
   private polling = false;
   private github = new Map<string, { at: number; repo?: GitHubRepo }>();
   private repos = new Map<string, { at: number; repos?: SessionRepo[] }>();
+  private worktrees = new Map<string, { at: number; worktree?: SessionWorktree }>();
   /** The terminals of the sessions Gasho started (built-in; zellij for those from gasho-daemon 0.10 and before). */
   private terminals: SessionTerminals;
   private managed: ManagedSessions;
@@ -396,6 +398,7 @@ export class Daemon {
     this.applyMeta(t);
     info.github = await this.githubOf(info.cwd);
     info.repos = await this.reposOf(info.cwd);
+    info.worktree = await this.worktreeAt(info.cwd);
   }
 
   private applyMeta(t: Tracked): void {
@@ -445,6 +448,14 @@ export class Daemon {
     const repos = await nestedRepos(cwd).catch(() => undefined);
     this.repos.set(cwd, { at: Date.now(), repos });
     return repos;
+  }
+
+  private async worktreeAt(cwd: string): Promise<SessionWorktree | undefined> {
+    const hit = this.worktrees.get(cwd);
+    if (hit && Date.now() - hit.at < REPOS_CACHE_MS) return hit.worktree;
+    const worktree = await worktreeOf(cwd);
+    this.worktrees.set(cwd, { at: Date.now(), worktree });
+    return worktree;
   }
 
   private emitSessions(): void {

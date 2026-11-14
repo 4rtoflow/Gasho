@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { GitBranch, GitCommit, GitGraph, GitHubRepo, GitRef, SessionRepo } from "@gasho/protocol";
+import type { GitBranch, GitCommit, GitGraph, GitHubRepo, GitRef, SessionRepo, SessionWorktree } from "@gasho/protocol";
 
 const execFileP = promisify(execFile);
 
@@ -120,6 +120,21 @@ export async function readGitGraph(cwd: string): Promise<GitGraph> {
     truncated: commits.length > GRAPH_LIMIT,
     ...(changes ? { changes } : {}),
   };
+}
+
+// ---- worktrees ----
+
+/** The worktree that contains `cwd`, and the repository it belongs to; undefined outside a repository. */
+export async function worktreeOf(cwd: string): Promise<SessionWorktree | undefined> {
+  const out = await git(cwd, ["rev-parse", "--show-toplevel", "--git-common-dir"]).catch(() => undefined);
+  const [top, common] = out?.split("\n") ?? [];
+  if (!top || !common) return undefined;
+  // The common folder is given relative to `cwd` in the main worktree ("../.git") and may go through a symbolic link,
+  // so the worktrees of one repository would name it differently.
+  const shared = await fs.realpath(path.resolve(cwd, common)).catch(() => undefined);
+  if (!shared) return undefined;
+  const branch = await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).then((s) => s.trim() || undefined, () => undefined);
+  return { path: top, repo: path.basename(shared) === ".git" ? path.dirname(shared) : shared, ...(branch ? { branch } : {}) };
 }
 
 // ---- folders that hold several repositories ----
