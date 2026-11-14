@@ -57,12 +57,22 @@ export class PluginBoundary extends Component<BoundaryProps, { error?: Error }> 
   }
 }
 
-/** A part of a plugin, in its scope and boundary. `hash` makes a new version start afresh. */
-function Part({ part, fallback, children }: { part: PluginPart; fallback?: ReactNode; children: ReactNode }) {
+/**
+ * A part of a plugin, in its scope and boundary. `hash` makes a new version start afresh. What the plugin draws sits
+ * in an element of its own, the only place its web.css applies to (registry.ts); `bare` leaves that out where Gasho
+ * draws the part itself (header items) or nothing is drawn (badges).
+ */
+function Part({ part, fallback, bare, children }: { part: PluginPart; fallback?: ReactNode; bare?: boolean; children: ReactNode }) {
   return (
     <PluginScope id={part.info.id}>
       <PluginBoundary key={part.info.hash} plugin={part.info.id} name={part.info.manifest.name} fallback={fallback}>
-        {children}
+        {bare ? (
+          children
+        ) : (
+          <div data-gasho-plugin={part.info.id} className="contents">
+            {children}
+          </div>
+        )}
       </PluginBoundary>
     </PluginScope>
   );
@@ -182,7 +192,7 @@ export function PluginHeaderItems({
   return (
     <>
       {items.map(({ part, item }) => (
-        <Part key={`${part.info.id}.${item.id}`} part={part} fallback={null}>
+        <Part key={`${part.info.id}.${item.id}`} part={part} fallback={null} bare>
           <HeaderItem part={part} item={item} machine={machine} session={session} panel={panel} />
         </Part>
       ))}
@@ -334,7 +344,7 @@ export function PluginBadgeProbes() {
           if (!use) return [];
           const id = `plugin:${part.info.id}:${item.id}`;
           return [
-            <Part key={id} part={part} fallback={null}>
+            <Part key={id} part={part} fallback={null} bare>
               <BadgeProbe id={id} use={use} />
             </Part>,
           ];
