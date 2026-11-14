@@ -4,6 +4,8 @@
 // in a 50-column zellij pane (Gasho's own terminals are as wide); the launches run against a fake terminal and a fake
 // `claude agents` (no claude, no terminal).
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import os from "node:os";
@@ -189,7 +191,7 @@ async function setup(o: { mcp?: boolean; warnings?: string[] } = {}) {
   };
   d.refresh = async () => undefined;
   d.refreshFolders = async () => undefined;
-  return { d, fake, folder, killed, started, done: () => fs.rm(dir, { recursive: true, force: true }) };
+  return { d, fake, folder, killed, started, agentsFile, done: () => fs.rm(dir, { recursive: true, force: true }) };
 }
 
 test("without trust, the launch stops at the question: nothing is pressed, and Claude Code's warnings come back", async () => {
@@ -257,6 +259,94 @@ test("the question about the folder's MCP servers that follows is answered with 
     assert.match(r.warning, /MCP サーバーは、使わない設定にして起動しました/);
     assert.deepEqual(fake.keys, ["Down", "Enter", "Esc"]);
   } finally {
+    await done();
+  }
+});
+
+/** A process standing in for Claude Code. It says so once it is ready for SIGTERM (one that has not set its handler yet would end on it). */
+async function child(code: string) {
+  const p = spawn(process.execPath, ["-e", `${code}; setInterval(() => {}, 1000); console.log("ready")`], { stdio: ["ignore", "pipe", "ignore"] });
+  await once(p.stdout, "data");
+  return p;
+}
+
+test("ending sessions opened outside Gasho signals the process `claude agents` lists for each, and kills none that stays", async () => {
+  const { d, agentsFile, done } = await setup();
+  const ends = await child("");
+  const stays = await child('process.on("SIGTERM", () => {})');
+  try {
+    await fs.writeFile(agentsFile, JSON.stringify([{ pid: ends.pid, sessionId: "out-1" }, { pid: stays.pid, sessionId: "out-2" }]));
+    d.endWaitMs = 500;
+    // "gone": `claude agents` no longer lists it, so it has ended already.
+    const r = await d.end(["out-1", "out-2", "gone"]);
+    assert.equal(r.ok, true);
+    assert.deepEqual([...r.ended].sort(), ["gone", "out-1"]);
+    assert.match(r.warning, /終了しませんでした/);
+    // Long enough for a kill to be seen.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(ends.signalCode, "SIGTERM");
+    assert.equal(stays.exitCode, null);
+    assert.equal(stays.signalCode, null);
+  } finally {
+    ends.kill("SIGKILL");
+    stays.kill("SIGKILL");
+    await done();
+  }
+});
+
+test("a Claude Code that Gasho is starting or removing is neither sent nor ended as one opened outside Gasho", async () => {
+  const { d, agentsFile, folder, done } = await setup();
+  // The copy a fork starts, and a session that is removed: both end a little after SIGTERM.
+  const copy = await child('process.on("SIGTERM", () => setTimeout(() => process.exit(0), 300))');
+  const mine = await child('process.on("SIGTERM", () => setTimeout(() => process.exit(0), 300))');
+  const rows = new Map([["src", process.pid], ["mine", mine.pid!]]);
+  const agents = () => writeFileSync(agentsFile, JSON.stringify([...rows].map(([sessionId, pid]) => ({ pid, sessionId, cwd: folder, status: "idle" }))));
+  agents();
+  const sent: { sessionId: string; pid?: number; managed?: boolean }[][] = [];
+  try {
+    d.cfg.pluginDataDir = path.join(folder, "plugin-data");
+    d.refresh = Object.getPrototypeOf(d).refresh;
+    d.readManagedScreens = async () => undefined;
+    d.countTokens = async () => undefined;
+    d.hub = { connected: true, send: (m: { type: string; sessions?: [] }) => m.type === "sessions" && sent.push(m.sessions!) };
+    await fs.mkdir(path.join(d.cfg.claudeDir, "projects", "p"), { recursive: true });
+    await fs.writeFile(path.join(d.cfg.claudeDir, "projects", "p", "src.jsonl"), "");
+    for (const [sessionId, pid] of rows) d.managed.add({ sessionId, terminal: `t-${sessionId}`, pid, cwd: folder, name: sessionId, launchedAt: Date.now() });
+    let loaded = false;
+    d.terminals.start = async () => {
+      rows.set("copy", copy.pid!);
+      agents();
+      return copy.pid;
+    };
+    d.terminals.screen = async () => plainScreen(loaded ? replScreen() : "");
+
+    // The copy is listed with its own id, and Gasho waits for it to load the conversation before taking it on.
+    const forking = d.fork("src", "copy");
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await d.refresh();
+    assert.deepEqual(sent.at(-1)?.map((s) => s.sessionId).sort(), ["mine", "src"]);
+    const r = await d.end(["copy"]);
+    assert.equal(r.ok, false);
+    assert.equal(copy.signalCode, null);
+    loaded = true;
+    assert.equal((await forking).ok, true);
+    assert.equal(sent.at(-1)?.find((s) => s.sessionId === "copy")?.managed, true);
+
+    // Taken off Gasho's sessions at once, it runs on until SIGTERM ends it. The refresh after it is still given a
+    // listing that has it, as one read just before it ended is.
+    assert.equal((await d.remove("mine")).ok, true);
+    assert.equal(mine.signalCode, null);
+    assert.equal(mine.exitCode, 0);
+    rows.delete("mine");
+    agents();
+    await d.refresh();
+    assert.deepEqual(
+      sent.flat().filter((s) => !s.managed && s.pid),
+      [],
+    );
+  } finally {
+    copy.kill("SIGKILL");
+    mine.kill("SIGKILL");
     await done();
   }
 });

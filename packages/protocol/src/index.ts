@@ -329,6 +329,8 @@ export interface MachineInfo {
   features?: InputFeature[];
   /** Whether gasho-daemon lists a folder's past conversations and opens one again (session.history, session.resume). */
   canResume?: boolean;
+  /** Whether gasho-daemon ends the Claude Codes started outside Gasho (session.end). */
+  canEnd?: boolean;
   /** Whether Gasho can update this gasho-daemon, and how an update goes (absent from one older than updates from Gasho). */
   update?: DaemonUpdateInfo;
   /**
@@ -739,6 +741,8 @@ export type DaemonToHub =
       features?: InputFeature[];
       /** Answers session.history and session.resume. */
       canResume?: boolean;
+      /** Answers session.end. */
+      canEnd?: boolean;
       /** Whether Gasho can update it, and the update under way (sent again at each step). */
       update?: DaemonUpdateInfo;
     }
@@ -953,6 +957,12 @@ export type SessionCommand =
    */
   | { type: "session.resume"; sessionId: string }
   /**
+   * Ends the Claude Codes that have these sessions open, started outside Gasho (in Orca, a terminal), as on a shutdown
+   * (SIGTERM), so that their conversations can be opened again from Gasho (session.history, session.resume). Their
+   * terminals stay open. One that does not end is left running.
+   */
+  | { type: "session.end"; sessionIds: string[] }
+  /**
    * Answers one of a session's `permissionRequests`. A request with `questions` takes "allow" with `answers` (one per
    * question, in order). A request with a `plan`: "allow" approves it and goes on in `mode` (when given). "deny" with
    * a `message`: Claude is told it and goes on from there (a plan: plans again), instead of stopping.
@@ -1010,6 +1020,8 @@ export interface CommandResult {
   conflict?: boolean;
   /** session.history: the conversations, the latest first. */
   history?: PastConversation[];
+  /** session.end: the sessions whose Claude Code has ended (or had ended already). */
+  ended?: string[];
 }
 
 /** A conversation Claude Code keeps on a working server, which no Claude Code has open now. */

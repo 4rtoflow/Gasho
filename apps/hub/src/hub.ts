@@ -84,6 +84,8 @@ const MAX_INPUT = 20_000;
 /** Names of sessions started from Gasho. */
 const MAX_NAME = 60;
 const MAX_SESSION_ID = 100;
+/** How many sessions one session.end ends at most. */
+const MAX_ENDS = 100;
 const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]);
@@ -297,6 +299,16 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
     case "session.remove":
     case "session.resume":
       return undefined;
+    case "session.end":
+      if (
+        !Array.isArray(cmd.sessionIds) ||
+        cmd.sessionIds.length === 0 ||
+        cmd.sessionIds.length > MAX_ENDS ||
+        cmd.sessionIds.some((id) => typeof id !== "string" || !id || id.length > MAX_SESSION_ID)
+      ) {
+        return "会話の指定が正しくありません。";
+      }
+      return undefined;
     case "session.stopTask":
       if (cmd.taskId !== undefined && (typeof cmd.taskId !== "string" || !cmd.taskId || cmd.taskId.length > MAX_TASK_ID)) return "タスクの指定が正しくありません。";
       return undefined;
@@ -428,6 +440,7 @@ export class Hub {
         m.modelsAt = typeof msg.modelsAt === "number" && Number.isFinite(msg.modelsAt) ? msg.modelsAt : undefined;
         m.features = Array.isArray(msg.features) ? [...new Set(msg.features.filter((f) => FEATURES.has(f)))] : undefined;
         m.canResume = msg.canResume === true || undefined;
+        m.canEnd = msg.canEnd === true || undefined;
         m.update = updateInfoOf(msg.update);
         this.broadcast({ type: "machine", machine: m });
         break;
@@ -615,6 +628,7 @@ export class Hub {
       case "session.remove":
       case "session.history":
       case "session.resume":
+      case "session.end":
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
@@ -658,6 +672,7 @@ export class Hub {
       "session.remove": REMOVE_TIMEOUT_MS,
       "session.history": REQUEST_TIMEOUT_MS,
       "session.resume": LAUNCH_TIMEOUT_MS,
+      "session.end": REMOVE_TIMEOUT_MS,
       "permission.answer": REQUEST_TIMEOUT_MS,
       "folder.create": REQUEST_TIMEOUT_MS,
       "repo.clone": CLONE_TIMEOUT_MS,
@@ -679,7 +694,7 @@ export class Hub {
   /**
    * The audit log's words for a command: an input's text (with what it switches and the names and sizes of its files,
    * never their contents), the folder of a launch (and whether Claude Code was told to trust it), a session's name (the
-   * new one for a rename, the copy's for a fork, the removed session's for a removal), the folder made, the
+   * new one for a rename, the copy's for a fork, the removed session's for a removal, the ended sessions'), the folder made, the
    * repository cloned and where to, the folder of a repository registered or taken off, or the file written (its path from the session's folder and its size, never what
    * was written; "[new]" when it was made).
    */
@@ -721,6 +736,18 @@ export class Hub {
         return answerSummary(cmd, this.request(machine, cmd.sessionId, cmd.permissionId));
       case "session.resume":
         return cmd.sessionId;
+      case "session.end": {
+        // Once ended, the sessions are gone from the list: the record keeps their names, as the screen showed them (the
+        // title first: Gasho gave them no name).
+        const sessions = this.machines.get(machine)?.sessions ?? [];
+        return cmd.sessionIds
+          .map((id) => {
+            const s = sessions.find((x) => x.sessionId === id);
+            return s?.title || s?.name || id;
+          })
+          .join(", ")
+          .slice(0, 300);
+      }
       case "session.stopTask": {
         // What was stopped, as the session showed it: it is gone once stopped.
         if (cmd.taskId === undefined) return "[all]";
@@ -752,6 +779,9 @@ export class Hub {
     if (cmd.type === "repo.register" || cmd.type === "repo.unregister") {
       // A gasho-daemon that registers repositories sends them as soon as it connects.
       return !m?.connected || m.repos ? undefined : "この working server の gasho-daemon は古いため、リポジトリを登録できません。gasho-daemon を更新してください。";
+    }
+    if (cmd.type === "session.end") {
+      return !m || m.canEnd ? undefined : "この working server の gasho-daemon は古いため、Gasho の外で開いている会話を終了できません。gasho-daemon を更新してください。";
     }
     if (cmd.type === "session.history" || cmd.type === "session.resume") {
       return !m || m.canResume ? undefined : "この working server の gasho-daemon は古いため、過去の会話を一覧にも開き直しもできません。gasho-daemon を更新してください。";

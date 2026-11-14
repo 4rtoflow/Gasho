@@ -79,6 +79,30 @@ test("remembered worktrees without sessions come last, once each; the tab after 
   assert.equal(tabAfterRemoval(one, "a"), undefined);
 });
 
+test("the sessions open outside Gasho go with the worktree they are in, make no row of their own, and need a process", () => {
+  const app = { path: "/src/app", repo: "/src/app", branch: "main" };
+  const feat = { path: "/src/app-x", repo: "/src/app", branch: "feat/x" };
+  const outside = (id: string, extra: Partial<SessionInfo>) => session(id, { managed: undefined, pid: 100, ...extra });
+  const mac: MachineInfo = {
+    ...machine("mac", [
+      session("a", { cwd: "/src/app", worktree: app, lastActivityAt: 1 }),
+      outside("o2", { cwd: "/src/app/web", worktree: app, startedAt: 20 }),
+      outside("o1", { cwd: "/src/app", worktree: app, startedAt: 10 }),
+      // Claude Code runs it in the background, with no process to end.
+      outside("bg", { cwd: "/src/app", worktree: app, pid: undefined, kind: "background" }),
+      outside("x", { cwd: "/src/app-x", worktree: feat }),
+      // In a folder the sidebar has no row for.
+      outside("elsewhere", { cwd: "/tmp/scratch" }),
+    ]),
+    repos: [{ path: "/src/app", worktrees: [{ path: "/src/app", branch: "main" }, { path: "/src/app-x", branch: "feat/x" }] }],
+  };
+  const list = worktreesByLastUse([mac]);
+  assert.deepEqual(
+    list.map((w) => `${w.label}: ${w.sessions.map((s) => s.sessionId).join(",")} / ${w.outside.map((s) => s.sessionId).join(",")}`),
+    ["main: a / o1,o2", "feat/x:  / x"],
+  );
+});
+
 test("a registered repository's other worktrees follow those with sessions, and git's list decides which remembered ones stay", () => {
   const app = { path: "/src/app", repo: "/src/app", branch: "main" };
   const mac: MachineInfo = {

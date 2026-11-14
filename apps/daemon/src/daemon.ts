@@ -216,6 +216,14 @@ export class Daemon {
   private cfg: DaemonConfig;
   private hub: HubClient;
   private tracked = new Map<string, Tracked>();
+  /** How long a Claude Code started outside Gasho may take to end after SIGTERM (see end). */
+  private endWaitMs = REMOVE_WAIT_MS;
+  /**
+   * The PIDs of the Claude Codes Gasho is starting or has started in this run, and of one it is removing, until they
+   * end and `claude agents` no longer lists them. While one starts or is being removed, it is not among Gasho's
+   * sessions, and is still none started outside Gasho (see emitSessions, end).
+   */
+  private ownPids = new Set<number>();
   private lastSent = "";
   private refreshing = false;
   private refreshAgain = false;
@@ -451,6 +459,8 @@ export class Daemon {
         this.tracked.delete(id);
         this.permissions.settleSession(id);
       }
+      // One that ended while `claude agents` was read is still in rows.
+      for (const pid of this.ownPids) if (!isAlive(pid) && !rows.some((r) => r.pid === pid)) this.ownPids.delete(pid);
       await this.forgetEndedSessions(seen);
       await this.readManagedScreens();
       await this.countTokens();
@@ -604,8 +614,14 @@ export class Daemon {
     return worktree;
   }
 
+  private isOwn(pid: number | undefined): boolean {
+    return pid !== undefined && this.ownPids.has(pid);
+  }
+
   private emitSessions(): void {
     const sessions = [...this.tracked.values()]
+      // Not yet, or no longer, among Gasho's sessions: sent, it would show as one opened outside Gasho.
+      .filter((t) => this.managed.has(t.info.sessionId) || !this.isOwn(t.info.pid))
       .map((t) => {
         const m = this.managed.get(t.info.sessionId);
         // What gasho-daemon sends on its own (a name from the first message) is nobody's input waiting.
@@ -673,6 +689,7 @@ export class Daemon {
       modelsAt: this.models?.at,
       features: [...INPUT_FEATURES],
       canResume: true,
+      canEnd: true,
       update: this.updater.info(),
     });
   }
@@ -953,6 +970,7 @@ export class Daemon {
       case "session.remove":
       case "session.history":
       case "session.resume":
+      case "session.end":
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
@@ -989,6 +1007,9 @@ export class Daemon {
               break;
             case "session.resume":
               result = await this.resume(m.sessionId);
+              break;
+            case "session.end":
+              result = await this.end(m.sessionIds);
               break;
             case "permission.answer": {
               if (m.permissionId.startsWith(OPEN_QUESTION)) {
@@ -1206,6 +1227,7 @@ export class Daemon {
       log(`could not start a terminal for "${rcName}"`, e);
       return { error: "Claude Code を起動できませんでした（端末を用意できませんでした）。" };
     }
+    this.ownPids.add(pid);
     log(`launching "${rcName}" in ${dir} (terminal ${terminal})${claudeArgs.length > 0 ? ` with ${claudeArgs.join(" ")}` : ""}`);
 
     const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
@@ -1424,6 +1446,51 @@ export class Daemon {
   }
 
   /**
+   * Ends Claude Codes started outside Gasho (in Orca, a terminal) with SIGTERM, as on a shutdown: their conversations
+   * are kept, and can then be opened again from Gasho (see history, resume). Their terminals are not Gasho's, and stay
+   * open. As in remove, only a process that `claude agents` lists with the session's id is signalled. One that does
+   * not end is left running rather than killed: it may be in the middle of writing its conversation.
+   */
+  private async end(sessionIds: string[]): Promise<CommandResult> {
+    // A Claude Code that a plugin runs in its own folder is no session (see fromPlugin), and is never signalled.
+    const rows = (await listAgents(this.cfg.claudeBin)).filter((r) => !r.cwd || !isInside(r.cwd, this.cfg.pluginDataDir));
+    if (sessionIds.some((id) => this.managed.has(id) || rows.some((r) => r.sessionId === id && this.isOwn(r.pid)))) {
+      return { ok: false, error: "Gasho が起動したセッションは、ここでは終了できません。終了するときは、セッションを削除してください。" };
+    }
+    const label = (id: string) => {
+      const info = this.tracked.get(id)?.info;
+      return info?.title || info?.name || id.slice(0, 8);
+    };
+    const ended: string[] = [];
+    const signalled: { id: string; pid: number }[] = [];
+    const noProcess: string[] = [];
+    for (const id of sessionIds) {
+      const row = rows.find((r) => r.sessionId === id);
+      if (!row) ended.push(id);
+      else if (!row.pid) noProcess.push(id);
+      else signalled.push({ id, pid: row.pid });
+    }
+    for (const { pid } of signalled) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // ended already
+      }
+    }
+    for (let waited = 0; waited < this.endWaitMs && signalled.some((s) => isAlive(s.pid)); waited += 250) await sleep(250);
+    const running = signalled.filter((s) => isAlive(s.pid)).map((s) => s.id);
+    ended.push(...signalled.filter((s) => !running.includes(s.id)).map((s) => s.id));
+    if (ended.length > 0) log(`ended Claude Code outside Gasho: ${ended.map(label).join(", ")}`);
+    const problems = [
+      running.length > 0 && `次の会話の Claude Code は終了しませんでした。元の端末で終了してください：${running.map(label).join("、")}`,
+      noProcess.length > 0 && `次の会話はバックグラウンドで動いているため、終了できません：${noProcess.map(label).join("、")}`,
+    ].filter((p): p is string => Boolean(p));
+    await this.refresh();
+    if (ended.length === 0) return { ok: false, error: problems.join(" ") || "終了する会話がありません。" };
+    return { ok: true, ended, ...(problems.length > 0 ? { warning: problems.join(" ") } : {}) };
+  }
+
+  /**
    * Renames a session started from Gasho: in Gasho at once, and in Claude Code with /rename, which also renames its
    * Remote Control session (the name in the official apps). /rename is typed like an input, so only while the session
    * is idle: it waits while the session works. A /rename still waiting is replaced, not sent too.
@@ -1467,12 +1534,14 @@ export class Daemon {
     const m = this.managed.get(sessionId);
     if (!m) return { ok: false, error: "このセッションは削除できません。削除できるのは、Gasho が起動したセッションだけです。" };
     // From here on nothing is typed into it, and Gasho no longer shows it.
+    this.ownPids.add(m.pid);
     this.managed.remove(sessionId);
     for (const map of [this.settleUntil, this.lastStop, this.latePicker, this.prompts, this.titleSent]) map.delete(sessionId);
     await this.managed.save();
     this.emitSessions();
     const row = (await listAgents(this.cfg.claudeBin).catch(() => [] as AgentRow[])).find((r) => r.pid === m.pid);
     const ours = row?.sessionId === sessionId;
+    if (!ours) this.ownPids.delete(m.pid);
     if (ours) {
       try {
         process.kill(m.pid, "SIGTERM");

@@ -1,10 +1,13 @@
-// Gasho shows only the sessions it started (from its own launcher); others running on a working server are not shown.
+// Gasho shows only the sessions it started (from its own launcher). Others running on a working server are only listed
+// above the tabs of their worktree, to be ended there and opened again from Gasho (see outside-sessions).
 import type { GashoNotification, GitHubRepo, MachineInfo, RegisteredRepo, SessionInfo } from "@gasho/protocol";
 import { basename } from "./format.ts";
 
 export function shownSessions(m: MachineInfo): SessionInfo[] {
   return m.sessions.filter((s) => s.managed);
 }
+
+const byStart = (a: SessionInfo, b: SessionInfo) => (a.startedAt ?? 0) - (b.startedAt ?? 0) || a.sessionId.localeCompare(b.sessionId);
 
 /** When a session was last used: its latest activity, or for one with no conversation yet, when it started. */
 const lastUsed = (s: SessionInfo): number => s.lastActivityAt ?? s.startedAt ?? 0;
@@ -35,6 +38,11 @@ export interface WorktreeSessions {
   github?: GitHubRepo;
   /** In the order they started, which is the order of the tabs. Empty for one of a registered repository or remembered. */
   sessions: SessionInfo[];
+  /**
+   * The sessions in it that Claude Codes started outside Gasho (in Orca, a terminal) have open, which session.end can
+   * end: those with a process. In the order they started. They make no worktree of their own.
+   */
+  outside: SessionInfo[];
 }
 
 /** A worktree this browser keeps in the sidebar once its sessions are gone, until it is taken off (see remembered-worktrees). */
@@ -93,11 +101,11 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
       const path = w?.path ?? s.cwd;
       const repo = w ? repoName(w.repo, s.github) : s.github?.name;
       const facts = known({ repo, branch: w?.branch, repoFolder: w?.repo, github: s.github });
-      byId.set(id, { id, machine, label: w?.branch ?? basename(path), path, subfolders: Boolean(w), registered: false, ...facts, sessions: [s] });
+      byId.set(id, { id, machine, label: w?.branch ?? basename(path), path, subfolders: Boolean(w), registered: false, ...facts, sessions: [s], outside: [] });
     }
   }
   const worktrees = [...byId.values()];
-  for (const w of worktrees) w.sessions.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0) || a.sessionId.localeCompare(b.sessionId));
+  for (const w of worktrees) w.sessions.sort(byStart);
   const latest = (w: WorktreeSessions) => Math.max(...w.sessions.map(lastUsed));
   worktrees.sort((a, b) => latest(b) - latest(a) || a.id.localeCompare(b.id));
   for (const machine of machines) {
@@ -114,7 +122,7 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
           continue;
         }
         const facts = known({ repo: repoName(r.path, r.github), branch: t.branch, repoFolder: r.path, github: r.github });
-        const w: WorktreeSessions = { id, machine, label, path: t.path, subfolders: true, registered: true, ...facts, sessions: [] };
+        const w: WorktreeSessions = { id, machine, label, path: t.path, subfolders: true, registered: true, ...facts, sessions: [], outside: [] };
         byId.set(id, w);
         worktrees.push(w);
       }
@@ -124,9 +132,15 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
     const machine = machines.find((m) => m.id === r.machine);
     const id = worktreeKey(r.machine, r.path);
     if (!machine || byId.has(id) || machine.repos?.some((x) => x.path === r.repoFolder)) continue;
-    byId.set(id, { id, machine, label: r.label, path: r.path, subfolders: r.subfolders, registered: false, ...known(r), sessions: [] });
+    byId.set(id, { id, machine, label: r.label, path: r.path, subfolders: r.subfolders, registered: false, ...known(r), sessions: [], outside: [] });
     worktrees.push(byId.get(id)!);
   }
+  for (const machine of machines) {
+    for (const s of machine.sessions) {
+      if (!s.managed && s.pid) byId.get(worktreeId(machine.id, s))?.outside.push(s);
+    }
+  }
+  for (const w of worktrees) w.outside.sort(byStart);
   return worktrees;
 }
 

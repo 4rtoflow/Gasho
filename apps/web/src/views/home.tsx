@@ -22,6 +22,7 @@ import {
   Moon,
   Pencil,
   Plus,
+  Power,
   Puzzle,
   Rocket,
   RotateCcw,
@@ -671,6 +672,7 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:session.rename": Pencil,
   "Gasho:session.fork": GitFork,
   "Gasho:session.remove": Trash2,
+  "Gasho:session.end": Power,
   "Gasho:permission.answer": ShieldCheck,
   "Gasho:folder.create": FolderPlus,
   "Gasho:repo.clone": FolderDown,
@@ -787,6 +789,7 @@ function operationText(e: MachineHookEvent): string {
   if (e.event === "Gasho:session.rename") return summary ? `名前を変更：${summary}` : "名前を変えた";
   if (e.event === "Gasho:session.fork") return summary ? `フォーク：${summary}` : "フォークした";
   if (e.event === "Gasho:session.remove") return summary ? `削除：${summary}` : "セッションを削除した";
+  if (e.event === "Gasho:session.end") return `Gasho の外の会話を終了：${summary}`;
   // "[allow] Bash npm test": the answer, then the tool and what it was asked for. "[answer] Color → Blue": Claude's
   // questions answered; "[approve] title", "[revise] what to change": a plan approved, or sent back.
   if (e.event === "Gasho:permission.answer") {

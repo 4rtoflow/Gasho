@@ -611,6 +611,32 @@ test("registering a repository goes to a gasho-daemon that sends its repositorie
   assert.deepEqual(summaries, [["Gasho:repo.unregister", "/home/rg/repos/app"]]);
 });
 
+test("ending sessions opened outside Gasho goes to a gasho-daemon that can, and the record keeps their names", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.16.0" });
+  const outside = (sessionId: string, name: string) => ({ sessionId, cwd: "/w", name, status: "idle" as const, rcMode: "none" as const, prLinks: [] });
+  hub.onDaemonMessage(d, { type: "sessions", sessions: [outside("o1", "orca-a"), outside("o2", "orca-b")] });
+  hub.onClientMessage(c, { type: "session.end", requestId: "r0", machine: machineId, sessionIds: ["o1", "o2"] });
+  const reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && reply.requestId === "r0" && !reply.result.ok);
+  assert.match(reply.result.error ?? "", /Gasho の外で開いている会話を終了できません/);
+  assert.notEqual(d.sent.at(-1)?.type, "session.end");
+
+  hub.onDaemonMessage(d, { type: "capabilities", canLaunch: true, folders: [], canResume: true, canEnd: true });
+  hub.onClientMessage(c, { type: "session.end", requestId: "r1", machine: machineId, sessionIds: [] });
+  const invalid = c.sent.at(-1);
+  assert.ok(invalid?.type === "command.result" && invalid.result.error === "会話の指定が正しくありません。");
+  hub.onClientMessage(c, { type: "session.end", requestId: "r2", machine: machineId, sessionIds: ["o1", "o2"] });
+  const sent = d.sent.at(-1);
+  assert.ok(sent?.type === "session.end");
+  assert.deepEqual(sent.sessionIds, ["o1", "o2"]);
+  const summaries = c.sent.flatMap((m) => (m.type === "event" ? [[m.event.event, m.event.summary?.replace(/ \(by .*\)$/, "")]] : []));
+  assert.deepEqual(summaries, [["Gasho:session.end", "orca-a, orca-b"]]);
+});
+
 test("validateCommand checks an answer to a permission request", () => {
   const ok = { type: "permission.answer" as const, sessionId: "s1", permissionId: "p1", decision: "allow" as const };
   assert.equal(validateCommand(ok), undefined);
