@@ -74,7 +74,7 @@ import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.12.0";
+export const DAEMON_VERSION = "0.12.1";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;

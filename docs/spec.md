@@ -160,7 +160,7 @@ working server は、ホスト名ではなく登録時に発行した ID で区�
 Gasho が起動するセッションは、gasho-daemon がセッションごとに起動する小さなプロセス（端末）の中で動く。端末は、node-pty で疑似端末を作って Claude Code を動かし、画面を xterm.js（VS Code の端末と同じもの）で保つ。gasho-daemon は、Unix ソケット（`~/.config/gasho/terminals/<名前>.sock`）で、画面の取得、キーと貼り付けの入力、終了を頼む。
 
 - 端末は gasho-daemon とは別のプロセスなので、gasho-daemon を動かし直してもセッションは続く。gasho-daemon は起動したとき、記録（`managed.json`）にあるセッションのうち、端末が答え、Claude Code の PID が合うものを引き継ぐ
-- systemd のユーザーマネージャーがあるマシンでは、端末を `systemd-run --user --scope` で起動し、セッションごとのスコープ（`gasho-<名前>-xxxx.scope`）に入れる。systemd はサービスを止めるときにサービスの中のプロセスをすべて止める（KillMode の既定）ため、サービスの外に出しておく
+- systemd のユーザーマネージャーがあるマシンでは、端末を `systemd-run --user --scope` で起動し、セッションごとのスコープ（`gasho-<名前>-xxxx.scope`）に入れる。systemd はサービスを止めるときにサービスの中のプロセスをすべて止める（KillMode の既定）ため、サービスの外に出しておく。systemd 254 以降の `systemd-run` は、`--scope` でもコマンドの引数の `$` を環境変数として展開する（`$$` は `$` になる）ので、`--expand-environment=no` を付けて、パスをそのまま渡す。254 より前の版はこの指定を知らないが、展開もしないので付けない。どちらにするかは、最初に1回、`$$` を表示させて確かめる
 - 端末の大きさは 50 桁 × 50 行。画面を読む規則は、この大きさの画面で確かめている
 - 画面は、薄い文字（SGR 2）と反転（SGR 7）だけを印にした文字列で受け取り、zellij の `dump-screen --ansi` と同じ読み方で読む
 - キーは、端末が送るのと同じバイト列にする。矢印は、Claude Code が選んだカーソルキーのモードに合わせる。キーとキーのあいだは 25 ミリ秒あける（Claude Code は、Esc だけのキーと、Esc で始まるほかのキーを、続く入力までの時間で見分けるため）

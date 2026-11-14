@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Terminal } from "@xterm/headless";
-import { readScreen, scopeArgs, type Screen, type Zellij } from "./managed.ts";
+import { NO_EXPANSION, readScreen, scopeArgs, type Screen, type Zellij } from "./managed.ts";
 
 const execFileP = promisify(execFile);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -201,15 +201,15 @@ export async function terminalWorks(): Promise<boolean> {
 export class Terminals {
   readonly dir: string;
   private env: Record<string, string>;
-  /** Whether systemd-run can start user scopes here (checked once). */
-  private scopes: Promise<boolean> | undefined;
+  /** What systemd-run needs to start user scopes here, or undefined when it cannot (checked once; see scopeFlags). */
+  private scopes: Promise<readonly string[] | undefined> | undefined;
   private works: Promise<boolean> | undefined;
 
   /** `env` is what the hosts run with; `scopes: false` never puts them in a systemd scope (for tests). */
   constructor(o: { stateDir: string; env: Record<string, string>; scopes?: boolean }) {
     this.dir = terminalsDir(o.stateDir);
     this.env = o.env;
-    if (o.scopes === false) this.scopes = Promise.resolve(false);
+    if (o.scopes === false) this.scopes = Promise.resolve(undefined);
   }
 
   socketOf(name: string): string {
@@ -237,7 +237,8 @@ export class Terminals {
     const logFile = path.join(this.dir, `${o.name}.log`);
     const out = await fs.open(logFile, "a", 0o600);
     const host = [process.execPath, HOST_FILE, configFile];
-    const command = (await this.canScope()) ? ["systemd-run", ...scopeArgs(o.name), ...host] : host;
+    const extra = await this.scopeFlags();
+    const command = extra ? ["systemd-run", ...scopeArgs(o.name, extra), ...host] : host;
     let failed: string | undefined;
     try {
       const child = spawn(command[0] ?? "", command.slice(1), { detached: true, stdio: ["ignore", out.fd, out.fd], env: this.env });
@@ -304,14 +305,24 @@ export class Terminals {
     await request(this.socketOf(name), { op: "kill" }, 5000).catch(() => undefined);
   }
 
-  private canScope(): Promise<boolean> {
-    this.scopes ??= execFileP("systemd-run", ["--user", "--scope", "--quiet", "--collect", "true"], {
-      env: this.env,
-      timeout: 15_000,
-    }).then(
-      () => true,
-      () => false,
-    );
+  /**
+   * How systemd-run starts a user scope here that runs its command as it is given, "$" included (see NO_EXPANSION):
+   * each way is tried on a node that prints "$$", with --expand-environment=no first, then without it (systemd older
+   * than 254). Undefined when neither prints it unchanged, or when there is no user manager (macOS): terminals then
+   * start without a scope of their own.
+   */
+  private scopeFlags(): Promise<readonly string[] | undefined> {
+    this.scopes ??= (async () => {
+      for (const extra of [NO_EXPANSION, []]) {
+        const command = ["--user", "--scope", "--quiet", "--collect", ...extra, "--", process.execPath, "-p", "'$$'"];
+        const printed = await execFileP("systemd-run", command, { env: this.env, timeout: 15_000 }).then(
+          (r) => r.stdout.trim(),
+          () => undefined,
+        );
+        if (printed === "$$") return extra;
+      }
+      return undefined;
+    })();
     return this.scopes;
   }
 }
