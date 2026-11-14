@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { sdkDependencies } from "./tools.ts";
 
 const sdk = path.resolve(import.meta.dirname, "..");
 const root = path.resolve(sdk, "../..");
@@ -35,10 +36,7 @@ for (const f of ["src/exports.js", "src/exports.d.ts", "theme.css", "plugin.css"
 fs.chmodSync(path.join(out, "bin/gasho-plugin.mjs"), 0o755);
 
 // The build command's tools, at the versions Gasho's screen is built with.
-const web = read(path.join(root, "apps/web/package.json"));
-const tools = { ...web.dependencies, ...web.devDependencies } as Record<string, string>;
-const dependencies = Object.fromEntries(["vite", "@vitejs/plugin-react", "@tailwindcss/vite", "tailwindcss"].map((n) => [n, tools[n]]));
-if (Object.values(dependencies).some((v) => !v)) throw new Error("a build tool is missing from apps/web/package.json");
+const { dependencies, peerDependencies } = sdkDependencies(read(path.join(root, "apps/web/package.json")));
 
 const pkg = {
   name: "@4rtoflow/gasho-plugin-sdk",
@@ -55,7 +53,7 @@ const pkg = {
   bin: { "gasho-plugin": "bin/gasho-plugin.mjs" },
   files: ["lib", "src", "bin", "theme.css", "plugin.css"],
   dependencies,
-  peerDependencies: { react: tools.react },
+  peerDependencies,
   engines: { node: ">=24" },
   repository: { type: "git", url: "git+https://github.com/4rtoflow/Gasho.git", directory: "packages/plugin-sdk" },
   homepage: "https://github.com/4rtoflow/Gasho/blob/main/docs/plugins.md",
