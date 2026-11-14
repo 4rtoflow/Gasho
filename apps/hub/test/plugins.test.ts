@@ -61,7 +61,7 @@ test("checkManifest takes a good manifest and says what is wrong with a bad one"
   assert.match(bad({}, "other"), /フォルダーの名前/);
   assert.match(bad({ api: "2.0" }), /API 2\.0/);
   assert.match(bad({ api: "1.9" }), /API 1\.9/);
-  assert.match(bad({ api: "1.3" }), /この Gasho は 1\.2 までです/);
+  assert.match(bad({ api: "1.4" }), /この Gasho は 1\.3 までです/);
   assert.match(bad({ version: "1" }), /version/);
   assert.match(bad({ web: { js: "../x.js" } }), /web\.js/);
   assert.match(bad({}, "hello", new Set(["gasho-plugin.json", "web.js", "web.css"])), /daemon\.js のファイル（daemon\.js）がありません/);

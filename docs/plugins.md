@@ -144,7 +144,7 @@ GitHub プラグインの場合は、次のようになる。
 | `id` | 英小文字で始まり、英小文字・数字・`-` からなる2〜32文字。GashoPlugins のディレクトリの名前と同じにする。URL、保存のキー、操作のログに使う |
 | `name`、`description` | 画面に出す名前（40文字まで）と説明 |
 | `version` | プラグインの版（1.2.0 の形）。GashoPlugins に新しい版を出すときに上げる。プラグインの画面は、カタログの版が入れた版より新しいときに「更新」を出す。ホットリロードで入れ替えるかは、版ではなく中身のハッシュで判断する |
-| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity`、daemon の部分の `ctx.github` を足した |
+| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した |
 | `web`、`daemon` | 画面の部分と daemon の部分のファイル。少なくともどちらか1つは要る |
 | `methods` | 画面の部分から呼べる、daemon の部分のメソッド。`kind` は、読むだけのもの（`read`）か、何かを変えるもの（`write`）か。`write` の呼び出しは操作のログに残す。`timeoutSeconds` は待つ時間で、既定は15秒、長くても120秒まで |
 | `permissions` | 読む・出す以外に、画面の部分がすること。`session.input`（セッションに発言を送る）と `session.launch`（セッションを起動する。API 1.1） |
@@ -474,7 +474,7 @@ export default defineDaemonPlugin({
 | `ctx.dataDir` | その working server での、このプラグイン専用のフォルダー（`~/.local/share/gasho/plugin-data/<ID>/`）。呼び出しをまたいで覚えておくもの（選んだ項目など）を置く。プラグインを更新しても外しても残る（API 1.1） |
 | `ctx.signal` | 待つ時間を過ぎたときと、子プロセスを止めるときに、中断を知らせる AbortSignal |
 | `ctx.exec(コマンド, 引数, 指定)` | コマンドを、シェルを通さず、制御端末なしで実行する。gh と git が入力を求めて止まらないよう、`GH_PROMPT_DISABLED=1` と `GIT_TERMINAL_PROMPT=0` を付け、待つ時間と出力の大きさに上限を付ける。待つ時間を過ぎたら、プロセスグループに SIGTERM を送る |
-| `ctx.github` | working server の gh を、gasho-daemon に実行してもらう。`read(引数, 指定)` で読み、`write(引数, { repo })` で GitHub を変える。gh は `ctx.exec` ではなく、これで動かす（「GitHub を読む・変える」、API 1.2） |
+| `ctx.github` | working server の gh を、gasho-daemon に実行してもらう。`read(引数, 指定)` で読み、`write(引数, { repo })` で GitHub を変える。gh は `ctx.exec` ではなく、これで動かす（「GitHub を読む・変える」、API 1.3） |
 | `ctx.emit(topic, data, 指定)` | 画面にイベントを送る（P8） |
 | `ctx.log(…)` | gasho-daemon のログに、プラグインの ID を付けて書く |
 
@@ -482,7 +482,7 @@ export default defineDaemonPlugin({
 
 呼び出しがなくても続ける処理（ファイルの監視、一定の間隔の処理）は、`start(ctx)` で始め、`stop()` で止める。`start` は、子プロセスを起動したときに呼ぶ。`stop` は、プラグインを無効にしたとき、外したとき、ホットリロードで古い版を止めるとき、gasho-daemon が止まるときに呼ぶ。
 
-### GitHub を読む・変える（API 1.2）
+### GitHub を読む・変える（API 1.3）
 
 daemon の部分は、gh を `ctx.exec` で動かさず、`ctx.github` で gasho-daemon に頼む。GitHub の API は、1時間に使える量が決まっている（GraphQL は5000点）。プラグインが別々に gh で同じ Issue や Pull request を読むと、この量を早く使い切る。gasho-daemon がすべてのプラグインの gh をまとめて実行し、結果を記録しておけば、同じ問い合わせには gh を実行せずに答えられる。
 

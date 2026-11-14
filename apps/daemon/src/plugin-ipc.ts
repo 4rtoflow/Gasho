@@ -27,7 +27,7 @@ export interface LocalWire {
   dataDir: string;
 }
 
-/** What a daemon part asks gh for (ctx.github, plugin API 1.2). gasho-daemon runs gh itself (github.ts). */
+/** What a daemon part asks gh for (ctx.github, plugin API 1.3). gasho-daemon runs gh itself (github.ts). */
 export interface GitHubAsk {
   args: string[];
   /** owner/name. */

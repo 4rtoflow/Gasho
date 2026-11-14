@@ -84,7 +84,7 @@ export interface GitHubWriteOptions {
 }
 
 /**
- * The GitHub CLI (gh) of the working server, run by gasho-daemon for every plugin (plugin API 1.2). Give the arguments
+ * The GitHub CLI (gh) of the working server, run by gasho-daemon for every plugin (plugin API 1.3). Give the arguments
  * of gh, without "gh"; there is no folder or environment of the plugin's own, so name the repository with --repo. It
  * answers and fails as exec does.
  */
@@ -122,7 +122,7 @@ export interface DaemonContext {
    * that gh and git fail rather than wait for input.
    */
   exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
-  /** gh, run by gasho-daemon: use this rather than exec("gh", …) (plugin API 1.2). */
+  /** gh, run by gasho-daemon: use this rather than exec("gh", …) (plugin API 1.3). */
   github: DaemonGitHub;
   /** Writes to gasho-daemon's log, with the plugin's id. */
   log(...args: unknown[]): void;
