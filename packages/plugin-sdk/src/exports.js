@@ -13,6 +13,7 @@ export const SDK_EXPORTS = [
   "useNavigation",
   "useSendInput",
   "useLaunchSession",
+  "useSessionActivity",
   "useNow",
   "githubRepos",
   "panelRepo",
