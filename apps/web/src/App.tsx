@@ -232,6 +232,7 @@ export function App() {
               <WorktreeView
                 key={worktreeKey(route.machine, route.path)}
                 worktree={worktrees.find((w) => w.id === worktreeKey(route.machine, route.path))}
+                view={route.view}
                 onSessionAction={setSessionAction}
               />
             )}

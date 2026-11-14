@@ -179,6 +179,13 @@ function useNavigation(): Navigation {
     return { name: "session", machine: w.machine, sessionId: w.sessionId, panel: { kind: "plugin", plugin, id, params: params ?? {} } };
   };
   const pageRoute = (id: string, params?: Params): Route => ({ name: "plugin", plugin, page: id, params: params ?? {} });
+  // The worktree on screen, or the worktree of the session on screen (see worktreeId).
+  const worktreeRoute = (id: string, params?: Params, at?: { machine: string; path: string }): Route => {
+    const s = here && getAppState().machines.find((m) => m.id === here.machine)?.sessions.find((x) => x.sessionId === here.sessionId);
+    const w = at ?? (route.name === "worktree" ? route : s && here ? { machine: here.machine, path: s.worktree?.path ?? s.cwd } : undefined);
+    if (!w) throw new Error("どの worktree の画面かが分かりません（openWorktreeView に at を渡してください）。");
+    return { name: "worktree", machine: w.machine, path: w.path, view: { plugin, id, params: params ?? {} } };
+  };
   return {
     pageHref: (id, params) => hrefOf(pageRoute(id, params)),
     openPage: (id, params) => go(pageRoute(id, params)),
@@ -194,6 +201,8 @@ function useNavigation(): Navigation {
     back: (panel) => backTo(panelRoute(panel.id, panel.params)),
     sessionHref: (machine, sessionId) => hrefOf({ name: "session", machine, sessionId }),
     openSession: (machine, sessionId) => go({ name: "session", machine, sessionId }),
+    worktreeHref: (id, params, at) => hrefOf(worktreeRoute(id, params, at)),
+    openWorktreeView: (id, params, at) => go(worktreeRoute(id, params, at)),
   };
 }
 

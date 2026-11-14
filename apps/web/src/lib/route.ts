@@ -17,6 +17,13 @@ export interface SessionPanel {
   params?: Record<string, string>;
 }
 
+/** A screen a plugin's tab opens in a worktree (docs/plugins.md): the plugin, its view, and the view's params (the URL's query). */
+export interface WorktreeView {
+  plugin: string;
+  id: string;
+  params: Record<string, string>;
+}
+
 /** The params of a plugin's page or panel, from the query of the URL. */
 function paramsOf(query: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -62,23 +69,31 @@ export type Route =
   /** A page of a plugin: #/p/<plugin>/<page>?<params>. */
   | { name: "plugin"; plugin: string; page: string; params: Record<string, string> }
   | { name: "session"; machine: string; sessionId: string; panel?: SessionPanel }
-  /** A worktree with no session open: #/w/<machine>/<its top folder>. */
-  | { name: "worktree"; machine: string; path: string };
+  /**
+   * A worktree with no session open: #/w/<machine>/<its top folder>. With `view`, a screen of a plugin's tab of it:
+   * …/p/<plugin>/<view>?<params>.
+   */
+  | { name: "worktree"; machine: string; path: string; view?: WorktreeView };
 
 export function parseHash(hash: string): Route {
   if (hash === "#/devices") return { name: "devices" };
   if (hash === "#/settings") return { name: "settings" };
   if (hash === "#/plugins") return { name: "plugins" };
-  const worktree = hash.match(/^#\/w\/([^/]+)\/([^/]+)$/);
+  // A plugin's page, a plugin's panel of a session and a plugin's screen of a worktree: …/p/<plugin>/<id>, with the
+  // params as the query.
+  const [where, query] = hash.split("?", 2) as [string, string | undefined];
+  const worktree = where.match(/^#\/w\/([^/]+)\/([^/]+)(?:\/p\/([^/]+)\/([^/]+))?$/);
   if (worktree?.[1] && worktree[2]) {
     try {
-      return { name: "worktree", machine: decodeURIComponent(worktree[1]), path: decodeURIComponent(worktree[2]) };
+      const at = { machine: decodeURIComponent(worktree[1]), path: decodeURIComponent(worktree[2]) };
+      if (!worktree[3] || !worktree[4]) return { name: "worktree", ...at };
+      const plugin = decodeURIComponent(worktree[3]);
+      if (!PLUGIN_ID.test(plugin)) return { name: "home" };
+      return { name: "worktree", ...at, view: { plugin, id: decodeURIComponent(worktree[4]), params: paramsOf(query) } };
     } catch {
       return { name: "home" };
     }
   }
-  // A plugin's page, and a plugin's panel of a session: …/p/<plugin>/<id>, with the params as the query.
-  const [where, query] = hash.split("?", 2) as [string, string | undefined];
   const page = where.match(/^#\/p\/([^/]+)\/([^/]+)$/);
   if (page?.[1] && page[2]) {
     try {
@@ -140,8 +155,12 @@ export function hrefOf(r: Route): string {
   if (r.name === "settings") return "#/settings";
   if (r.name === "plugins") return "#/plugins";
   if (r.name === "plugin") return `#/p/${encodeURIComponent(r.plugin)}/${encodeURIComponent(r.page)}${queryOf(r.params)}`;
-  // The folder is one segment, its slashes encoded.
-  if (r.name === "worktree") return `#/w/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.path)}`;
+  if (r.name === "worktree") {
+    // The folder is one segment, its slashes encoded.
+    const base = `#/w/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.path)}`;
+    if (!r.view) return base;
+    return `${base}/p/${encodeURIComponent(r.view.plugin)}/${encodeURIComponent(r.view.id)}${queryOf(r.view.params)}`;
+  }
   const base = `#/s/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.sessionId)}`;
   if (!r.panel) return base;
   if (r.panel.kind === "plugin") {

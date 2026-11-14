@@ -1,25 +1,29 @@
 // The tabs above a session: the sessions Gasho shows in the same worktree, in the order they started. A tab opens its
 // session; a right-click (a long press on a phone) opens the session's menu (see session-menu). The button before the
-// tabs lists the worktree's past conversations (see session-history); "＋" after them starts a new session in it.
+// tabs lists the worktree's past conversations (see session-history); "＋" after them starts a new session in it. The
+// plugins' tabs of the worktree come last (docs/plugins.md, P14).
 import { LoaderCircle, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { SessionHistory } from "@/components/session-history";
 import { SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { sessionLabel } from "@/lib/format";
-import { go } from "@/lib/route";
+import { go, type WorktreeView } from "@/lib/route";
 import type { WorktreeSessions } from "@/lib/sessions";
 import { sendCommand } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { PluginWorktreeTabs } from "@/plugins/parts";
 
-/** `current`: the session open below, if any. */
+/** `current`: the session open below, if any. `view`: the plugin's screen open below instead, if any. */
 export function SessionTabs({
   worktree,
   current,
+  view,
   onAction,
 }: {
   worktree: WorktreeSessions;
   current?: string;
+  view?: WorktreeView;
   onAction: (request: SessionActionRequest) => void;
 }) {
   const { machine, sessions } = worktree;
@@ -94,6 +98,7 @@ export function SessionTabs({
       >
         {launching ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
       </button>
+      <PluginWorktreeTabs worktree={worktree} open={view} />
       {error && (
         <p role="alert" title={error} className="self-center truncate text-xs text-red-400">
           {error}

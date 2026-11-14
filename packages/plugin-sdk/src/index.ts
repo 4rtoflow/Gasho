@@ -121,6 +121,58 @@ export interface ConversationEndItem {
   component: ComponentType<ConversationEndProps>;
 }
 
+/** A worktree of a working server, for the tabs a plugin adds to it and the screens they open (P14). Plugin API 1.4. */
+export interface WorktreeInfo {
+  /** Its top folder on the working server. For sessions in a folder outside a repository, that folder. */
+  path: string;
+  /** The branch checked out. Absent when HEAD is detached, outside a repository, and from an older gasho-daemon. */
+  branch?: string;
+  /** The folder of its repository: of the main worktree, which all the repository's worktrees share. Absent outside one. */
+  repo?: string;
+  /** Its repository on GitHub, if it is there. */
+  github?: GitHubRepo;
+  /** Gasho's sessions in it, in the order of their tabs. None for a worktree the sidebar keeps once its sessions are gone. */
+  sessions: SessionInfo[];
+}
+
+/** A worktree, for the tabs a plugin adds to it (P14). */
+export interface WorktreeContext {
+  machine: MachineInfo;
+  worktree: WorktreeInfo;
+  /** This plugin's daemon part on the worktree's working server. */
+  daemon: DaemonReadiness;
+}
+
+/** A tab beside a worktree's sessions (P14). Pressing it opens the plugin's `worktreeViews[view]` with `params` there. */
+export interface WorktreeTab {
+  label: string;
+  icon?: Icon;
+  /** Shown on hover (by default the label). */
+  title?: string;
+  view: string;
+  params?: Params;
+  /** A number or a short text beside the label. */
+  badge?: string | number;
+}
+
+/**
+ * What adds tabs to the worktrees (P14). They go after the sessions' tabs and their "＋". Plugin API 1.4.
+ * `useTabs` is a React hook, called whenever a worktree's tabs are drawn: the tabs for that worktree (none, one or several).
+ */
+export interface WorktreeTabItem {
+  id: string;
+  /** Where its tabs go among the plugins' tabs: a smaller one comes first. By default 500. */
+  order?: number;
+  useTabs: (ctx: WorktreeContext) => WorktreeTab[] | undefined;
+}
+
+/** A screen a worktree's tab opens, below the tabs, where a session shows (P14): #/w/<machine>/<folder>/p/<plugin>/<view>?<params>. */
+export interface WorktreeViewProps {
+  machine: MachineInfo;
+  worktree: WorktreeInfo;
+  params: Params;
+}
+
 /** What the web part of a plugin adds to Gasho's screen (its web.js exports it as default). */
 export interface PluginDefinition {
   sidebar?: SidebarItem[];
@@ -132,6 +184,10 @@ export interface PluginDefinition {
   settings?: ComponentType;
   /** Parts at the end of a session's conversation (P13). Plugin API 1.2. */
   conversationEnd?: ConversationEndItem[];
+  /** Tabs beside a worktree's sessions (P14). Plugin API 1.4. */
+  worktreeTabs?: WorktreeTabItem[];
+  /** The screens the worktree's tabs open (P14). Plugin API 1.4. */
+  worktreeViews?: Record<string, ComponentType<WorktreeViewProps>>;
 }
 
 /** A call of a method of the plugin's daemon part (P7). */
@@ -182,6 +238,13 @@ export interface Navigation {
   sessionHref(machine: string, sessionId: string): string;
   /** Opens Gasho's screen of a session (plugin API 1.1). */
   openSession(machine: string, sessionId: string): void;
+  /**
+   * A screen of the plugin's worktree tabs (P14): in the worktree on screen (or the worktree of the session on screen),
+   * or in `at` (its working server and top folder). Plugin API 1.4.
+   */
+  worktreeHref(view: string, params?: Params, at?: { machine: string; path: string }): string;
+  /** Opens a screen of the plugin's worktree tabs, as worktreeHref (a new entry of the browser's history). Plugin API 1.4. */
+  openWorktreeView(view: string, params?: Params, at?: { machine: string; path: string }): void;
 }
 
 /**
