@@ -33,9 +33,19 @@ export const STATUS_TONE: Record<SessionStatus, BadgeTone> = {
   unknown: "neutral",
 };
 
+/** What a waiting session waits for, from what `claude agents` says ("input needed": Claude's question, for one). */
 export function waitingLabel(waitingFor: string | undefined): string | undefined {
   if (!waitingFor) return undefined;
-  return waitingFor === "permission prompt" ? "権限の確認" : waitingFor;
+  return { "permission prompt": "権限の確認", "input needed": "回答待ち" }[waitingFor] ?? waitingFor;
+}
+
+/** …and on the home screen, a question or a plan as such, when Gasho holds it (see PermissionRequestInfo). */
+export function waitingText(s: SessionInfo): string {
+  const requests = s.permissionRequests ?? [];
+  const last = requests[requests.length - 1];
+  if (last?.toolName === "AskUserQuestion") return "質問への回答を待っています";
+  if (last?.toolName === "ExitPlanMode") return "計画の承認を待っています";
+  return waitingLabel(s.waitingFor) ?? "確認を待っています";
 }
 
 export function basename(p: string): string {
@@ -46,10 +56,6 @@ export function sessionLabel(s: SessionInfo): string {
   // Sessions started from Gasho show the name the user gave them rather than the generated title.
   if (s.managed && s.name) return s.name;
   return s.title || s.name || basename(s.cwd) || s.sessionId.slice(0, 8);
-}
-
-export function claudeUrl(s: SessionInfo): string | undefined {
-  return s.bridgeSessionId ? `https://claude.ai/code/${s.bridgeSessionId}` : undefined;
 }
 
 export function repoLabel(s: SessionInfo): string {

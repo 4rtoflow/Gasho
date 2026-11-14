@@ -4,6 +4,7 @@
 // its end, from here, as being sent; the entry Claude Code records takes its place.
 import { useCallback, useSyncExternalStore } from "react";
 import type { TranscriptEntry } from "@gasho/protocol";
+import { isShellInput } from "./shell.ts";
 
 export interface PendingMessage {
   id: string;
@@ -78,6 +79,8 @@ export function pendingShown(
 const lists = new Map<string, PendingMessage[]>();
 const listeners = new Set<() => void>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Whether each session is working, as last told (see sessionWorking). */
+const working = new Map<string, boolean>();
 const NONE: PendingMessage[] = [];
 
 function set(key: string, list: PendingMessage[]): void {
@@ -110,7 +113,25 @@ export function settlePending(key: string, id: string, state: "queued" | "sent")
   set(key, list.map((p) => (p.id === id ? { ...p, state, at: Date.now() } : p)));
   if (state === "sent") {
     clearTimeout(timers.get(id));
-    timers.set(id, setTimeout(() => removePending(key, id), SENT_GRACE_MS));
+    timers.delete(id);
+    // A shell command runs as long as the session works (see sessionWorking).
+    const shell = isShellInput(list.find((p) => p.id === id)?.text ?? "");
+    if (!shell || !working.get(key)) timers.set(id, setTimeout(() => removePending(key, id), SENT_GRACE_MS));
+  }
+}
+
+/**
+ * Whether the session is working. Claude Code records a shell command ("!") only once it has ended, so one typed into
+ * the session from here stays shown, as running, while the session works; once it stops, the command goes
+ * SENT_GRACE_MS later, by when the conversation shows it (a command that was stopped is not recorded at all).
+ */
+export function sessionWorking(key: string, now: boolean): void {
+  working.set(key, now);
+  for (const p of lists.get(key) ?? []) {
+    if (p.state !== "sent" || !isShellInput(p.text)) continue;
+    clearTimeout(timers.get(p.id));
+    timers.delete(p.id);
+    if (!now) timers.set(p.id, setTimeout(() => removePending(key, p.id), SENT_GRACE_MS));
   }
 }
 
@@ -120,10 +141,15 @@ export function noneWaiting(key: string): void {
 }
 
 /** The messages sent from here to a session that are not over yet (see pendingShown for which to show). */
+export function pendingOf(key: string): PendingMessage[] {
+  return lists.get(key) ?? NONE;
+}
+
+/** pendingOf, kept up to date in a component. */
 export function usePending(key: string): PendingMessage[] {
   const subscribe = useCallback((l: () => void) => {
     listeners.add(l);
     return () => listeners.delete(l);
   }, []);
-  return useSyncExternalStore(subscribe, () => lists.get(key) ?? NONE);
+  return useSyncExternalStore(subscribe, () => pendingOf(key));
 }

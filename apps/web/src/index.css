@@ -100,3 +100,13 @@
     @apply font-sans;
     }
 }
+/* The conversation of the session screen (and its sample on the settings screen), at the text size picked on the
+   settings screen: --chat-scale is set on it (lib/chat-text.ts), 1 being the standard size. Tailwind's text-xs …
+   text-lg read these variables, so the text in it follows; the sizes it gives in px are written as
+   text-[length:calc(…px*var(--chat-scale,1))]. Only the text changes: icons and spacing stay as they are. */
+.chat-text {
+  --text-xs: calc(0.75rem * var(--chat-scale, 1));
+  --text-sm: calc(0.875rem * var(--chat-scale, 1));
+  --text-base: calc(1rem * var(--chat-scale, 1));
+  --text-lg: calc(1.125rem * var(--chat-scale, 1));
+}

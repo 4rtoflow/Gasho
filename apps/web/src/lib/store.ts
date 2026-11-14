@@ -4,6 +4,8 @@ import type {
   ClientToHub,
   CommandResult,
   DeviceInfo,
+  DirListing,
+  FileContent,
   GashoNotification,
   GitGraph,
   HubToClient,
@@ -37,6 +39,22 @@ export interface GraphState {
   at?: number;
 }
 
+/** A folder inside a session's folder. */
+export interface DirState {
+  loading: boolean;
+  dir?: DirListing;
+  error?: string;
+  at?: number;
+}
+
+/** A file inside a session's folder. */
+export interface FileState {
+  loading: boolean;
+  file?: FileContent;
+  error?: string;
+  at?: number;
+}
+
 export type AuthState = "checking" | "registered" | "unregistered" | "unreachable";
 
 export interface State {
@@ -49,6 +67,9 @@ export interface State {
   transcripts: Record<string, TranscriptState>;
   /** Keyed by graphKey(machine, sessionId, repo). */
   graphs: Record<string, GraphState>;
+  /** Keyed by fileKey(machine, sessionId, path). */
+  dirs: Record<string, DirState>;
+  files: Record<string, FileState>;
   /** The plugins installed on the Gasho server (docs/plugins.md). */
   plugins: PluginInfo[];
 }
@@ -60,8 +81,20 @@ const MAX_NOTIFICATIONS = 200;
 export const transcriptKey = (machine: string, sessionId: string): string => `${machine}\u0000${sessionId}`;
 /** A branch graph per session and, in a folder of several repositories, per repository. */
 export const graphKey = (machine: string, sessionId: string, repo?: string): string => `${machine}\u0000${sessionId}\u0000${repo ?? ""}`;
+/** A folder or a file inside a session's folder, by its path from there ("" for the folder itself). */
+export const fileKey = (machine: string, sessionId: string, path: string): string => `${machine}\u0000${sessionId}\u0000${path}`;
 
-const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {}, plugins: [] };
+const EMPTY: Omit<State, "auth"> = {
+  connected: false,
+  machines: [],
+  notifications: [],
+  events: [],
+  transcripts: {},
+  graphs: {},
+  dirs: {},
+  files: {},
+  plugins: [],
+};
 let state: State = { auth: "checking", ...EMPTY };
 const listeners = new Set<() => void>();
 
@@ -78,11 +111,60 @@ function setGraph(key: string, g: GraphState): void {
   update({ graphs: { ...state.graphs, [key]: g } });
 }
 
+function setDir(key: string, d: DirState): void {
+  update({ dirs: { ...state.dirs, [key]: d } });
+}
+
+function setFile(key: string, f: FileState): void {
+  update({ files: { ...state.files, [key]: f } });
+}
+
 let socket: WebSocket | undefined;
 let backoff = 1000;
+/** The next try after a failure: start() while the Gasho server is unreachable, connect() after the connection dropped. */
+let retry: { timer: ReturnType<typeof setTimeout>; run: () => void } | undefined;
+
+function retryLater(run: () => void, ms: number): void {
+  cancelRetry();
+  retry = {
+    run,
+    timer: setTimeout(() => {
+      retry = undefined;
+      run();
+    }, ms),
+  };
+}
+
+function cancelRetry(): void {
+  if (retry) clearTimeout(retry.timer);
+  retry = undefined;
+}
+
+/**
+ * Tries again at once, instead of after the back-off, when the app comes back on screen or the network comes back.
+ * A phone suspends a web app in the background, so its connection is often gone by the time it is opened again.
+ */
+function retryNow(): void {
+  if (!retry || document.visibilityState !== "visible") return;
+  const { run } = retry;
+  cancelRetry();
+  backoff = 1000;
+  run();
+}
+
+let watchingResume = false;
+
+function watchResume(): void {
+  if (watchingResume) return;
+  watchingResume = true;
+  document.addEventListener("visibilitychange", retryNow);
+  window.addEventListener("pageshow", retryNow);
+  window.addEventListener("online", retryNow);
+}
 
 /** Checks the registration of this browser and connects when it is registered. */
 export async function start(): Promise<void> {
+  watchResume();
   update({ auth: "checking" });
   try {
     const me = await fetchMe();
@@ -94,12 +176,13 @@ export async function start(): Promise<void> {
     if (!socket) connect();
   } catch {
     update({ auth: "unreachable" });
-    setTimeout(() => void start(), 5000);
+    retryLater(() => void start(), 5000);
   }
 }
 
 /** Forgets everything after this browser's registration ended. */
 export function becomeUnregistered(): void {
+  cancelRetry();
   const ws = socket;
   socket = undefined;
   ws?.close();
@@ -108,6 +191,7 @@ export function becomeUnregistered(): void {
 }
 
 function connect(): void {
+  if (socket) return; // already connecting or connected
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/client`);
   socket = ws;
@@ -125,6 +209,14 @@ function connect(): void {
       const [machine, sessionId, repo] = key.split("\u0000");
       if (g.loading && machine && sessionId) send({ type: "git.graph.get", machine, sessionId, repo: repo || undefined });
     }
+    for (const [key, d] of Object.entries(state.dirs)) {
+      const [machine, sessionId, path] = key.split("\u0000");
+      if (d.loading && machine && sessionId && path !== undefined) send({ type: "dir.get", machine, sessionId, path });
+    }
+    for (const [key, f] of Object.entries(state.files)) {
+      const [machine, sessionId, path] = key.split("\u0000");
+      if (f.loading && machine && sessionId && path) send({ type: "file.get", machine, sessionId, path });
+    }
   };
   ws.onmessage = (ev) => {
     try {
@@ -141,7 +233,7 @@ function connect(): void {
       return;
     }
     update({ connected: false });
-    setTimeout(connect, backoff);
+    retryLater(connect, backoff);
     backoff = Math.min(backoff * 2, 15_000);
   };
 }
@@ -249,7 +341,9 @@ function handle(m: HubToClient): void {
       const prefix = transcriptKey(m.id, "");
       const transcripts = Object.fromEntries(Object.entries(state.transcripts).filter(([k]) => !k.startsWith(prefix)));
       const graphs = Object.fromEntries(Object.entries(state.graphs).filter(([k]) => !k.startsWith(prefix)));
-      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs });
+      const dirs = Object.fromEntries(Object.entries(state.dirs).filter(([k]) => !k.startsWith(prefix)));
+      const files = Object.fromEntries(Object.entries(state.files).filter(([k]) => !k.startsWith(prefix)));
+      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs, dirs, files });
       break;
     }
     case "transcript.page": {
@@ -303,6 +397,19 @@ function handle(m: HubToClient): void {
       setGraph(key, m.graph ? { loading: false, graph: m.graph, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
       break;
     }
+    case "dir": {
+      const key = fileKey(m.machine, m.sessionId, m.path);
+      const cur = state.dirs[key];
+      // On an error, keep showing what was read before, with the error.
+      setDir(key, m.dir ? { loading: false, dir: m.dir, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
+      break;
+    }
+    case "file": {
+      const key = fileKey(m.machine, m.sessionId, m.path);
+      const cur = state.files[key];
+      setFile(key, m.file ? { loading: false, file: m.file, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
+      break;
+    }
   }
 }
 
@@ -317,6 +424,58 @@ export function loadGraph(machine: string, sessionId: string, repo?: string): vo
   }
   setGraph(key, { ...cur, loading: true, error: undefined });
   send({ type: "git.graph.get", machine, sessionId, repo });
+}
+
+/** Reads a folder inside the session's folder again ("" for the folder itself). */
+export function loadDir(machine: string, sessionId: string, path: string): void {
+  const key = fileKey(machine, sessionId, path);
+  const cur = state.dirs[key];
+  if (cur?.loading) return;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    setDir(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
+    return;
+  }
+  setDir(key, { ...cur, loading: true, error: undefined });
+  send({ type: "dir.get", machine, sessionId, path });
+}
+
+/** Reads a file inside the session's folder again. */
+export function loadFile(machine: string, sessionId: string, path: string): void {
+  const key = fileKey(machine, sessionId, path);
+  const cur = state.files[key];
+  if (cur?.loading) return;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    setFile(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
+    return;
+  }
+  setFile(key, { ...cur, loading: true, error: undefined });
+  send({ type: "file.get", machine, sessionId, path });
+}
+
+/**
+ * Writes a text file inside the session's folder (see the file.write command), or makes it with `create`. Once
+ * written, the file is known as it was written, so that it can be saved again over this version.
+ */
+export async function saveFile(
+  machine: string,
+  sessionId: string,
+  path: string,
+  content: string,
+  opts: { baseHash?: string; create?: boolean } = {},
+): Promise<CommandResult> {
+  // A little longer than the Gasho server waits for the working server.
+  const r = await sendCommand(machine, { type: "file.write", sessionId, path, content, ...opts }, 20_000);
+  if (r.ok && r.written) {
+    const key = fileKey(machine, sessionId, path);
+    const was = state.files[key]?.file;
+    // Written just now, so it can be written.
+    const file: FileContent = { ...was, path, ...r.written, text: content, writable: true };
+    delete file.binary;
+    delete file.tooLarge;
+    delete file.image;
+    setFile(key, { loading: false, file, at: Date.now() });
+  }
+  return r;
 }
 
 function requestPage(machine: string, sessionId: string, before: number | undefined): void {

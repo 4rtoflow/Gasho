@@ -378,12 +378,13 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language = "text", code, f
   return (
     <figure className={cx("my-4 overflow-hidden rounded-xl", wash, hair, className)}>
       <figcaption className="flex h-9 items-center justify-between pl-3.5 pr-1.5">
-        <span className={`truncate font-mono text-[11px] ${muted}`}>{filename || language}</span>
+        {/* Sizes follow the conversation's text size where it is in one (see .chat-text in index.css). */}
+        <span className={`truncate font-mono text-[length:calc(11px*var(--chat-scale,1))] ${muted}`}>{filename || language}</span>
         <button
           type="button"
           onClick={() => copy(code)}
           aria-label={copied ? "コードをコピーしました" : "コードをコピー"}
-          className={`inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-neutral-500 transition-colors duration-150 [@media(hover:hover)]:hover:text-neutral-900 dark:[@media(hover:hover)]:hover:text-neutral-100 ${focus}`}
+          className={`inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[length:calc(11.5px*var(--chat-scale,1))] text-neutral-500 transition-colors duration-150 [@media(hover:hover)]:hover:text-neutral-900 dark:[@media(hover:hover)]:hover:text-neutral-100 ${focus}`}
         >
           <Ico d={copied ? PATHS.check : PATHS.copy} className={cx("h-3 w-3", copied && "text-emerald-500")} sw={copied ? 2.2 : 1.7} />
           <span className={copied ? "text-emerald-500" : ""}>{copied ? "コピーしました" : "コピー"}</span>
@@ -392,7 +393,7 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language = "text", code, f
       <pre
         tabIndex={0}
         aria-label={`${filename || language} code`}
-        className="overflow-x-auto px-3.5 pb-3.5 pt-0.5 font-mono text-[12.5px] leading-[1.7] text-neutral-800 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-neutral-400/60 dark:text-neutral-200"
+        className="overflow-x-auto px-3.5 pb-3.5 pt-0.5 font-mono text-[length:calc(12.5px*var(--chat-scale,1))] leading-[1.7] text-neutral-800 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-neutral-400/60 dark:text-neutral-200"
       >
         <code>{code}</code>
       </pre>

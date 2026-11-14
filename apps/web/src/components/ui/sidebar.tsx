@@ -1,10 +1,12 @@
 "use client";
 // From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item's button can be wrapped
-// (`wrap`), for a session's context menu, and a section's title can have a button (`action`), for "＋".
+// (`wrap`), for a session's context menu, a section's title can have buttons (`action`, for "＋", and
+// `secondaryAction`), and the items of a section can be put in another order by dragging them (`sort`).
 
 import * as React from "react";
-import { AnimatePresence, motion, type PanInfo } from "framer-motion";
-import { ChevronRight, PanelLeft } from "lucide-react";
+import { AnimatePresence, motion, useDragControls, type PanInfo } from "framer-motion";
+import { ChevronRight, GripVertical, PanelLeft } from "lucide-react";
+import { useSortable, type Sortable } from "../../lib/sortable";
 import { cn } from "../../lib/utils";
 
 function useControllableState<T>(
@@ -48,7 +50,19 @@ export type SidebarItem = {
 };
 /** Gasho: a button at the right of a section's title, such as "＋" to add an item. */
 export type SidebarAction = { label: string; icon: React.ReactNode; onClick: () => void };
-export type SidebarSection = { title?: string; items: SidebarItem[]; action?: SidebarAction };
+/**
+ * Gasho: the items of a section can be put in another order: dragged with a mouse (a click still opens them), dragged
+ * by the handle at their right on a touch screen, or moved with Alt+↑/↓. `onReorder` gets the new order.
+ */
+export type SidebarSort = { onReorder: (ids: string[]) => void };
+export type SidebarSection = {
+  title?: string;
+  items: SidebarItem[];
+  action?: SidebarAction;
+  /** Gasho: a button before `action`, only in the full sidebar (not in the icon-only one). */
+  secondaryAction?: SidebarAction;
+  sort?: SidebarSort;
+};
 
 const SidebarContext = React.createContext({ collapsed: false });
 /** Use inside `header` / `footer` to adapt to the icon-only state. */
@@ -79,6 +93,8 @@ export function Sidebar({
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useControllableState(collapsedProp, defaultCollapsed, onCollapsedChange);
   const [mobileOpen, setMobileOpen] = useControllableState(mobileProp, false, onMobileOpenChange);
+  // Gasho: the drawer is swiped closed from anywhere but what drags an item to another place.
+  const drawerDrag = useDragControls();
 
   // ⌘B / Ctrl+B
   React.useEffect(() => {
@@ -141,6 +157,16 @@ export function Sidebar({
               exit={{ x: "-100%" }}
               transition={spring}
               drag="x"
+              dragListener={false}
+              dragControls={drawerDrag}
+              onPointerDown={(e) => {
+                const target = e.target as Element;
+                if (target.closest("[data-sort-handle]") || (e.pointerType === "mouse" && target.closest("[data-sort-row]"))) return;
+                drawerDrag.start(e);
+              }}
+              // What framer-motion sets on a drag="x" element that starts its own drags.
+              draggable={false}
+              style={{ touchAction: "pan-y", userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none" }}
               dragConstraints={{ left: 0, right: 0 }}
               dragElastic={{ left: 0.5, right: 0 }}
               dragMomentum={false}
@@ -194,6 +220,38 @@ function SectionAction({ action, onNavigate }: { action: SidebarAction; onNaviga
   );
 }
 
+/**
+ * Gasho: the items of a section that can be put in another order (`sort`), drawn by `children` with what makes one
+ * draggable. Tells the panel while one is dragged (`onSorting`), to keep the hover highlight and the tooltip away.
+ */
+function SortableItems({
+  items,
+  sort,
+  onSorting,
+  children,
+}: {
+  items: SidebarItem[];
+  sort: SidebarSort;
+  onSorting: (dragging: boolean) => void;
+  children: (item: SidebarItem, sortable: Sortable) => React.ReactNode;
+}) {
+  const ids = React.useMemo(() => items.map((i) => i.id), [items]);
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const sortable = useSortable({ ids, mode: "list", onCommit: sort.onReorder, label: (id) => byId.get(id)?.label ?? id });
+  React.useEffect(() => onSorting(sortable.dragging), [onSorting, sortable.dragging]);
+  return (
+    <>
+      {sortable.order.map((id) => {
+        const item = byId.get(id);
+        return item ? children(item, sortable) : null;
+      })}
+      <p className="sr-only" aria-live="polite">
+        {sortable.announcement}
+      </p>
+    </>
+  );
+}
+
 type PanelProps = Pick<SidebarProps, "sections" | "activeId" | "onActiveChange" | "header" | "footer"> & {
   collapsed: boolean;
   onToggle?: () => void;
@@ -224,9 +282,24 @@ function Panel({
       )
   );
 
+  // Gasho: while an item is dragged to another place, the hover highlight and the tooltip stay away.
+  const sorting = React.useRef(false);
+  const onSorting = React.useCallback((dragging: boolean) => {
+    sorting.current = dragging;
+    if (dragging) {
+      setHovering(false);
+      setTip(null);
+    }
+  }, []);
+  const nav = React.useRef<HTMLElement>(null);
+
   const enter = (e: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, label: string) => {
+    if (sorting.current) return;
     const el = e.currentTarget;
-    setHoverBox({ y: el.offsetTop, h: el.offsetHeight });
+    // Gasho: measured from the list, not from offsetTop, as a draggable item is positioned itself.
+    const list = nav.current;
+    const y = list ? el.getBoundingClientRect().top - list.getBoundingClientRect().top - list.clientTop + list.scrollTop : el.offsetTop;
+    setHoverBox({ y, h: el.offsetHeight });
     setHovering(true);
     if (collapsed) {
       const r = el.getBoundingClientRect();
@@ -234,7 +307,7 @@ function Panel({
     } else setTip(null);
   };
 
-  const renderItem = (item: SidebarItem) => {
+  const renderItem = (item: SidebarItem, sort?: Sortable) => {
     const hasChildren = !!item.children?.length;
     const isOpen = hasChildren && open.has(item.id) && !collapsed;
     const childActive = !!item.children?.some((c) => c.id === activeId);
@@ -309,61 +382,109 @@ function Panel({
       </button>
     );
 
-    return (
-      <div key={item.id}>
-        {item.wrap ? item.wrap(button) : button}
+    const children = (
+      <AnimatePresence initial={false}>
+        {isOpen && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="ml-[19px] mt-0.5 space-y-0.5 border-l border-neutral-200 py-0.5 pl-3 dark:border-neutral-800">
+              {item.children!.map((c) => {
+                const active = c.id === activeId;
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => {
+                      onActiveChange(c.id);
+                      onNavigate?.();
+                    }}
+                    onMouseEnter={() => {
+                      setHovering(false);
+                      setTip(null);
+                    }}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "relative flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:focus-visible:ring-neutral-600/60",
+                      active
+                        ? "text-neutral-900 dark:text-white"
+                        : "text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white"
+                    )}
+                  >
+                    {active && (
+                      <motion.span
+                        layoutId={`${uid}-dot`}
+                        transition={spring}
+                        className="absolute -left-[15.5px] top-[13px] size-1.5 rounded-full bg-neutral-900 dark:bg-white"
+                      />
+                    )}
+                    <span className="flex-1 truncate text-left">{c.label}</span>
+                    {c.badge !== undefined && (
+                      <span className="text-[11px] tabular-nums text-neutral-400">{c.badge}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
 
-        <AnimatePresence initial={false}>
-          {isOpen && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
-              className="overflow-hidden"
+    if (!sort) {
+      return (
+        <div key={item.id}>
+          {item.wrap ? item.wrap(button) : button}
+          {children}
+        </div>
+      );
+    }
+
+    // Gasho: an item that can be put in another order. With a mouse, the item itself is dragged (a click still opens
+    // it); on a touch screen, the handle at its right is (touching the item still scrolls the list, and a long press
+    // still opens its menu). Alt+↑/↓ moves it too.
+    const p = sort.item(item.id);
+    const lifted = sort.dragging && sort.active === item.id;
+    return (
+      <motion.div
+        key={item.id}
+        ref={p.ref}
+        layout={p.layout}
+        transition={p.transition}
+        style={p.style}
+        data-sort-row
+        onPointerDown={(e) => {
+          if (e.pointerType === "mouse") sort.start(item.id, e);
+        }}
+        onKeyDown={(e) => {
+          if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+          e.preventDefault();
+          sort.moveTo(item.id, sort.order.indexOf(item.id) + (e.key === "ArrowUp" ? -1 : 1));
+        }}
+        className={cn(
+          "relative rounded-lg",
+          lifted && "bg-white shadow-lg ring-1 ring-black/[0.06] dark:bg-neutral-900 dark:ring-white/10"
+        )}
+      >
+        <div className="flex items-center">
+          <div className="min-w-0 flex-1">{item.wrap ? item.wrap(button) : button}</div>
+          {!collapsed && (
+            <span
+              data-sort-handle
+              aria-hidden
+              onPointerDown={(e) => sort.start(item.id, e)}
+              className="hidden h-9 w-7 shrink-0 cursor-grab touch-none select-none place-items-center text-neutral-400 [-webkit-touch-callout:none] pointer-coarse:grid dark:text-neutral-500"
             >
-              <div className="ml-[19px] mt-0.5 space-y-0.5 border-l border-neutral-200 py-0.5 pl-3 dark:border-neutral-800">
-                {item.children!.map((c) => {
-                  const active = c.id === activeId;
-                  return (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => {
-                        onActiveChange(c.id);
-                        onNavigate?.();
-                      }}
-                      onMouseEnter={() => {
-                        setHovering(false);
-                        setTip(null);
-                      }}
-                      aria-current={active ? "page" : undefined}
-                      className={cn(
-                        "relative flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:focus-visible:ring-neutral-600/60",
-                        active
-                          ? "text-neutral-900 dark:text-white"
-                          : "text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-white"
-                      )}
-                    >
-                      {active && (
-                        <motion.span
-                          layoutId={`${uid}-dot`}
-                          transition={spring}
-                          className="absolute -left-[15.5px] top-[13px] size-1.5 rounded-full bg-neutral-900 dark:bg-white"
-                        />
-                      )}
-                      <span className="flex-1 truncate text-left">{c.label}</span>
-                      {c.badge !== undefined && (
-                        <span className="text-[11px] tabular-nums text-neutral-400">{c.badge}</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </motion.div>
+              <GripVertical className="size-4" />
+            </span>
           )}
-        </AnimatePresence>
-      </div>
+        </div>
+        {children}
+      </motion.div>
     );
   };
 
@@ -381,7 +502,10 @@ function Panel({
           </div>
         )}
 
-        <nav
+        {/* Gasho: layoutScroll, for the items that slide to new places inside it, also while it scrolls. */}
+        <motion.nav
+          ref={nav}
+          layoutScroll
           aria-label="Main"
           onMouseLeave={() => {
             setHovering(false);
@@ -407,6 +531,8 @@ function Panel({
                 ) : (
                   <div className="flex items-center gap-1 pb-1 pl-2.5 pr-1 pt-4">
                     <p className="min-w-0 flex-1 truncate text-xs text-neutral-400 dark:text-neutral-500">{section.title}</p>
+                    {/* Changes the list in place: the drawer stays open to show it. */}
+                    {section.secondaryAction && <SectionAction action={section.secondaryAction} />}
                     {section.action && <SectionAction action={section.action} onNavigate={onNavigate} />}
                   </div>
                 ))}
@@ -423,10 +549,16 @@ function Panel({
                   <span className="relative grid size-5 shrink-0 place-items-center [&>svg]:size-[18px]">{section.action.icon}</span>
                 </button>
               )}
-              {section.items.map(renderItem)}
+              {section.sort ? (
+                <SortableItems items={section.items} sort={section.sort} onSorting={onSorting}>
+                  {renderItem}
+                </SortableItems>
+              ) : (
+                section.items.map((item) => renderItem(item))
+              )}
             </div>
           ))}
-        </nav>
+        </motion.nav>
 
         {(footer || onToggle) && (
           <div className="shrink-0 space-y-1 border-t border-neutral-200 p-2 dark:border-neutral-800">

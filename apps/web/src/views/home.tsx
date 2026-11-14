@@ -2,10 +2,17 @@
 // the sessions and the instructions sent lately as number tiles, the sessions as the largest tile, the notifications,
 // the tokens used, then the latest operations and the working servers, with the plugins' tiles among them. On a
 // phone, the number tiles two by two and the rest one under the other. Only sessions started from Gasho are shown.
+// A tile can be put elsewhere by dragging the handle at the middle of its top edge, or with the arrow keys once the
+// handle has the focus; this browser keeps the order.
+import { motion, useTransform } from "framer-motion";
 import {
   CircleDot,
   Cpu,
+  FilePen,
+  FolderDown,
+  FolderPlus,
   GitFork,
+  GripHorizontal,
   Hand,
   Layers,
   Moon,
@@ -13,14 +20,16 @@ import {
   Plus,
   Puzzle,
   Rocket,
+  RotateCcw,
   Send,
   Server,
   Square,
+  ShieldCheck,
   Trash2,
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import type {
   GashoNotification,
   MachineHookEvent,
@@ -33,9 +42,11 @@ import { EFFORTS } from "@/components/session-controls";
 import { StatusBadge } from "@/components/status-badge";
 import { NotificationStack, type NotificationItem } from "@/components/ui/notification-stack";
 import { CHART_BLUE, StatCard, TILE, TILE_SHADOW } from "@/components/ui/stat-card";
-import { branchLabel, formatCost, relativeTime, repoLabel, sessionLabel, waitingLabel } from "@/lib/format";
+import { branchLabel, formatCost, relativeTime, repoLabel, sessionLabel, waitingText } from "@/lib/format";
+import { arrangeTiles, sameOrder, useSavedOrder } from "@/lib/order";
 import { go } from "@/lib/route";
 import { notificationShown, shownSessions } from "@/lib/sessions";
+import { useSortable, type Sortable } from "@/lib/sortable";
 import { markRead, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
@@ -46,6 +57,47 @@ interface Row {
   machine: MachineInfo;
   s: SessionInfo;
 }
+
+/** The tiles, in their default order, with the names their handles are read out with. */
+const TILE_NAMES = {
+  busy: "作業中",
+  waiting: "確認待ち",
+  idle: "待機中",
+  sent: "送った指示",
+  sessions: "セッション",
+  notifications: "通知",
+  tokens: "トークン",
+  tokenBreakdown: "トークンの内訳",
+  operations: "最近の操作",
+  machines: "working server",
+} as const;
+type TileId = keyof typeof TILE_NAMES;
+const TILE_IDS = Object.keys(TILE_NAMES) as TileId[];
+const isTile = (id: string): id is TileId => Object.hasOwn(TILE_NAMES, id);
+
+/**
+ * The default order with the plugins' tiles (docs/plugins.md, P6): each after the tile it names in `after` (after the
+ * plugin tiles already put there), or at the end.
+ */
+function withPluginTiles(ids: readonly string[], tiles: readonly PluginTile[]): string[] {
+  const out = [...ids];
+  const placed = new Map<string, number>();
+  for (const t of tiles) {
+    const at = t.after ? out.indexOf(t.after) : -1;
+    if (at < 0) {
+      out.push(t.id);
+      continue;
+    }
+    const n = placed.get(t.after ?? "") ?? 0;
+    out.splice(at + 1 + n, 0, t.id);
+    placed.set(t.after ?? "", n + 1);
+  }
+  return out;
+}
+/** Where this browser keeps the order the tiles were dragged into. */
+const TILE_ORDER_KEY = "gasho.homeTiles";
+/** Gasho's own tiles that moved into a plugin, by their new ids, so a saved order keeps them where they were. */
+const MOVED_TILES: Record<string, string> = { github: "github.repos" };
 
 const NOTIFICATION_TYPE: Record<GashoNotification["kind"], NotificationItem["type"]> = {
   done: "success",
@@ -63,30 +115,6 @@ const SNAPSHOT_EVENTS = 200;
 const SESSIONS_SHOWN = 9;
 /** Operations shown in their tile. */
 const OPERATIONS_SHOWN = 6;
-
-/** Gasho's own tiles in their order, by the ids that plugins' tiles name in `after` (docs/plugins.md, P6). */
-const TILE_IDS = ["busy", "waiting", "idle", "sent", "sessions", "notifications", "tokens", "tokenBreakdown", "operations", "machines"];
-const isTile = (id: string): boolean => TILE_IDS.includes(id);
-
-/**
- * The order with the plugins' tiles: each after the tile it names in `after` (after the plugin tiles already put
- * there), or at the end.
- */
-function withPluginTiles(ids: readonly string[], tiles: readonly PluginTile[]): string[] {
-  const out = [...ids];
-  const placed = new Map<string, number>();
-  for (const t of tiles) {
-    const at = t.after ? out.indexOf(t.after) : -1;
-    if (at < 0) {
-      out.push(t.id);
-      continue;
-    }
-    const n = placed.get(t.after ?? "") ?? 0;
-    out.splice(at + 1 + n, 0, t.id);
-    placed.set(t.after ?? "", n + 1);
-  }
-  return out;
-}
 
 function openSession(machine: string, sessionId: string): void {
   go({ name: "session", machine, sessionId });
@@ -119,59 +147,42 @@ export function HomeView() {
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines));
   const sent = useMemo(() => sentTrend(events, now), [events, now]);
   const tokens = useMemo(() => tokenTrend(rows, now), [rows, now]);
-  // The plugins' tiles, each after the tile it names (see withPluginTiles).
+
+  const [stored, saveOrder] = useSavedOrder(TILE_ORDER_KEY);
+  const savedOrder = useMemo(() => stored?.map((id) => MOVED_TILES[id] ?? id), [stored]);
+  // The plugins' tiles join Gasho's: in the default order after the tile they name, and in a saved order as tiles
+  // added later do (arrangeTiles).
   const pluginTiles = usePluginTiles();
-  const order = withPluginTiles(TILE_IDS, pluginTiles);
+  const pluginKey = pluginTiles.map((t) => `${t.id}>${t.after ?? ""}`).join("|");
+  // Computed again only when the tiles' ids or places change (pluginKey), not at every drawing.
+  const defaultIds = useMemo(() => withPluginTiles(TILE_IDS, pluginTiles), [pluginKey]);
   const pluginById = new Map(pluginTiles.map((t) => [t.id, t]));
-  /** The plugins' tiles between Gasho's tile `id` and the next of Gasho's own. */
-  const after = (id: string) => {
-    const out: ReactNode[] = [];
-    for (let i = order.indexOf(id) + 1; i < order.length && !isTile(order[i] ?? ""); i++) {
-      const t = pluginById.get(order[i] ?? "");
-      if (t) {
-        out.push(
-          <div key={t.id} className={t.className}>
-            {t.content}
-          </div>,
-        );
-      }
-    }
-    return out;
-  };
+  const tileIds = useMemo(() => arrangeTiles(defaultIds, savedOrder), [defaultIds, savedOrder]);
+  const sort = useSortable({
+    ids: tileIds,
+    mode: "grid",
+    // Back in the default order, nothing is kept: a tile Gasho adds later then goes where it belongs.
+    onCommit: (ids) => saveOrder(sameOrder(ids, defaultIds) ? undefined : ids),
+    label: (id) => (isTile(id) ? TILE_NAMES[id] : (pluginById.get(id)?.name ?? id)),
+  });
 
-  return (
-    <div className="mx-auto flex max-w-7xl flex-col gap-4 p-4 md:p-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">ホーム</h1>
-          <p className="text-sm text-muted-foreground">
-            {machines.length} 台の working server・{rows.length} セッション
-          </p>
-        </div>
-        {!launching && (
-          <button
-            type="button"
-            onClick={() => setLaunching(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
-          >
-            <Plus className="size-4" />
-            新しいセッション
-          </button>
-        )}
-      </div>
-
-      {launching && <LaunchPanel onClose={() => setLaunching(false)} />}
-
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-        {/* The meters: each state's share of the sessions, in the colors of the state dots elsewhere in Gasho. */}
+  // The tiles by id, with their sizes; the grid shows them in the order they were put in.
+  const tiles: Record<TileId, { className?: string; content: ReactNode }> = {
+    // The meters: each state's share of the sessions, in the colors of the state dots elsewhere in Gasho.
+    busy: {
+      content: (
         <StatCard
           label="作業中"
           icon={<Zap className="size-3.5" />}
           value={count("busy")}
           period={names("busy")}
           meter={{ total: online.length, color: "#10b981" }}
+          className="h-full"
         />
-        {after("busy")}
+      ),
+    },
+    waiting: {
+      content: (
         <StatCard
           label="確認待ち"
           icon={<Hand className="size-3.5" />}
@@ -179,16 +190,24 @@ export function HomeView() {
           period={names("waiting")}
           valueClassName={count("waiting") > 0 ? "text-amber-400 dark:text-amber-400" : undefined}
           meter={{ total: online.length, color: "#f59e0b" }}
+          className="h-full"
         />
-        {after("waiting")}
+      ),
+    },
+    idle: {
+      content: (
         <StatCard
           label="待機中"
           icon={<Moon className="size-3.5" />}
           value={count("idle")}
           period={names("idle")}
           meter={{ total: online.length, color: "#737373" }}
+          className="h-full"
         />
-        {after("idle")}
+      ),
+    },
+    sent: {
+      content: (
         <StatCard
           label="送った指示"
           icon={<Send className="size-3.5" />}
@@ -199,15 +218,22 @@ export function HomeView() {
           goodWhen="neither"
           period="過去24時間"
           color={CHART_BLUE}
+          className="h-full"
         />
-        {after("sent")}
-
-        <Tile title="セッション" icon={<Layers className="size-4" />} className="col-span-2 lg:col-span-3">
+      ),
+    },
+    sessions: {
+      className: "col-span-2 lg:col-span-3",
+      content: (
+        <Tile title="セッション" icon={<Layers className="size-4" />}>
           <Sessions rows={rows} now={now} onLaunch={() => setLaunching(true)} />
         </Tile>
-        {after("sessions")}
-
-        <Tile className="col-span-2 lg:col-span-1 lg:row-span-2">
+      ),
+    },
+    notifications: {
+      className: "col-span-2 lg:col-span-1 lg:row-span-2",
+      content: (
+        <Tile>
           <NotificationStack
             notifications={unread.map((n) => ({
               id: n.id,
@@ -225,8 +251,11 @@ export function HomeView() {
             }}
           />
         </Tile>
-        {after("notifications")}
-
+      ),
+    },
+    tokens: {
+      className: "col-span-2 lg:col-span-1",
+      content: (
         <StatCard
           label="トークン"
           icon={<Cpu className="size-3.5" />}
@@ -238,31 +267,164 @@ export function HomeView() {
           period="過去24時間（サブエージェントを含む）"
           format={compact}
           color={CHART_BLUE}
-          className="col-span-2 lg:col-span-1"
+          className="h-full"
         />
-        {after("tokens")}
-        <Tile title="トークンの内訳（過去24時間）" icon={<Cpu className="size-4" />} className="col-span-2">
+      ),
+    },
+    tokenBreakdown: {
+      className: "col-span-2",
+      content: (
+        <Tile title="トークンの内訳（過去24時間）" icon={<Cpu className="size-4" />}>
           <TokenBreakdown tokens={tokens} />
         </Tile>
-        {after("tokenBreakdown")}
-
-        <Tile title="最近の操作" icon={<CircleDot className="size-4" />} className="col-span-2">
+      ),
+    },
+    operations: {
+      className: "col-span-2",
+      content: (
+        <Tile title="最近の操作" icon={<CircleDot className="size-4" />}>
           <Operations events={events} machines={machines} now={now} />
         </Tile>
-        {after("operations")}
-        <Tile title="working server" icon={<Server className="size-4" />} className="col-span-2 lg:col-span-1">
+      ),
+    },
+    machines: {
+      className: "col-span-2 lg:col-span-1",
+      content: (
+        <Tile title="working server" icon={<Server className="size-4" />}>
           <Machines machines={machines} now={now} />
         </Tile>
-        {after("machines")}
+      ),
+    },
+  };
+
+  return (
+    <div className="mx-auto flex max-w-7xl flex-col gap-4 p-4 md:p-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">ホーム</h1>
+          <p className="text-sm text-muted-foreground">
+            {machines.length} 台の working server・{rows.length} セッション
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {savedOrder && (
+            <button
+              type="button"
+              onClick={() => saveOrder(undefined)}
+              title="タイルを最初の並びに戻します"
+              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <RotateCcw className="size-4" />
+              並びを元に戻す
+            </button>
+          )}
+          {!launching && (
+            <button
+              type="button"
+              onClick={() => setLaunching(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+            >
+              <Plus className="size-4" />
+              新しいセッション
+            </button>
+          )}
+        </div>
       </div>
+
+      {launching && <LaunchPanel onClose={() => setLaunching(false)} />}
+
+      {/* Positioned: the tiles' places are measured from it while one is dragged. */}
+      <div className="relative grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+        {sort.order.map((id) => {
+          if (isTile(id)) {
+            return (
+              <BentoItem key={id} id={id} name={TILE_NAMES[id]} sort={sort} className={tiles[id].className}>
+                {tiles[id].content}
+              </BentoItem>
+            );
+          }
+          const t = pluginById.get(id);
+          return t ? (
+            <BentoItem key={id} id={id} name={t.name} sort={sort} className={t.className}>
+              {t.content}
+            </BentoItem>
+          ) : null;
+        })}
+      </div>
+      <p className="sr-only" aria-live="polite">
+        {sort.announcement}
+      </p>
     </div>
   );
 }
 
-/** A tile of the grid, with the same surface as the number tiles. */
+/** Where an arrow key (or Home, End) on a tile's handle moves the tile at `index` of `count`. */
+function keyMove(key: string, index: number, count: number): number | undefined {
+  if (key === "ArrowLeft" || key === "ArrowUp") return index - 1;
+  if (key === "ArrowRight" || key === "ArrowDown") return index + 1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  return undefined;
+}
+
+/**
+ * A place in the grid, holding a tile. The tile is dragged by the handle at the middle of its top edge (shown while
+ * the pointer is over the tile, and always on a touch screen), or moved with the arrow keys once the handle has the
+ * focus. The others make room while it is dragged.
+ */
+function BentoItem({ id, name, sort, className, children }: { id: string; name: string; sort: Sortable; className?: string; children: ReactNode }) {
+  const p = sort.item(id);
+  const lifted = sort.dragging && sort.active === id;
+  // The place the tile will be dropped into stays where it is while the tile moves.
+  const place = { x: useTransform(p.style.x, (v) => -v), y: useTransform(p.style.y, (v) => -v) };
+  const onKeyDown = (e: KeyboardEvent) => {
+    const to = keyMove(e.key, sort.order.indexOf(id), sort.order.length);
+    if (to === undefined) return;
+    e.preventDefault();
+    sort.moveTo(id, to);
+  };
+  return (
+    <motion.div
+      ref={p.ref}
+      layout={p.layout}
+      transition={p.transition}
+      style={p.style}
+      className={cn(
+        "group/tile relative min-w-0 rounded-2xl",
+        lifted && "shadow-2xl ring-1 shadow-black/50 ring-black/10 dark:ring-white/20",
+        className,
+      )}
+    >
+      {lifted && (
+        <motion.div
+          aria-hidden
+          style={place}
+          className="pointer-events-none absolute inset-0 rounded-2xl border border-dashed border-neutral-400/60 dark:border-white/20"
+        />
+      )}
+      {children}
+      <button
+        type="button"
+        aria-label={`「${name}」を移動`}
+        title="ドラッグして移動（矢印キーでも動かせます）"
+        onPointerDown={(e) => sort.start(id, e)}
+        onKeyDown={onKeyDown}
+        className={cn(
+          "absolute top-0 left-1/2 z-10 flex h-5 w-10 -translate-x-1/2 cursor-grab touch-none items-start justify-center rounded-b-lg pt-0.5 text-neutral-400 outline-none select-none [-webkit-touch-callout:none] transition-[opacity,color,background-color] hover:bg-black/[0.04] hover:text-neutral-700 focus-visible:ring-2 focus-visible:ring-neutral-400/70 pointer-coarse:h-6 pointer-coarse:w-12 dark:text-neutral-500 dark:hover:bg-white/[0.06] dark:hover:text-neutral-200 dark:focus-visible:ring-white/40",
+          // Without a pointer that can hover (a touch screen), always shown.
+          lifted ? "opacity-100" : "opacity-0 group-hover/tile:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100 [@media(hover:none)]:opacity-100",
+        )}
+      >
+        <GripHorizontal className="size-4" />
+      </button>
+    </motion.div>
+  );
+}
+
+/** A tile of the grid, with the same surface as the number tiles; it fills its place. */
 function Tile({ title, icon, className, children }: { title?: string; icon?: ReactNode; className?: string; children: ReactNode }) {
   return (
-    <section className={cn(TILE, "flex flex-col p-4", className)} style={{ boxShadow: TILE_SHADOW }}>
+    <section className={cn(TILE, "flex h-full flex-col p-4", className)} style={{ boxShadow: TILE_SHADOW }}>
       {title && (
         <h2 className="mb-3 flex items-center gap-2 text-[13px] font-medium text-neutral-900 dark:text-neutral-100">
           <span className="text-neutral-500">{icon}</span>
@@ -474,7 +636,7 @@ function SessionCard({ row: { machine, s }, now }: { row: Row; now: number }) {
           {` · ${machine.name}`}
         </p>
       </div>
-      {waiting && <p className="text-xs text-amber-400">{waitingLabel(s.waitingFor) ?? "確認を待っています"}</p>}
+      {waiting && <p className="text-xs text-amber-400">{waitingText(s)}</p>}
       <div className="mt-auto flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
         {s.model && <Chip>{s.model.replace(/\s*\(default\)\s*$/i, "")}</Chip>}
         {effort && <Chip>{effort}</Chip>}
@@ -503,6 +665,10 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:session.rename": Pencil,
   "Gasho:session.fork": GitFork,
   "Gasho:session.remove": Trash2,
+  "Gasho:permission.answer": ShieldCheck,
+  "Gasho:folder.create": FolderPlus,
+  "Gasho:repo.clone": FolderDown,
+  "Gasho:file.write": FilePen,
   "Gasho:plugin.call": Puzzle,
   "Gasho:plugin.enable": Puzzle,
   "Gasho:plugin.machines": Puzzle,
@@ -510,7 +676,8 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
 };
 
 /**
- * What Gasho was asked to do lately: starting, forking, renaming and removing sessions, instructions and stops (the
+ * What Gasho was asked to do lately: starting, forking, renaming and removing sessions, instructions and stops, the
+ * folders made and repositories cloned to start sessions in, and the files saved or made in sessions' folders (the
  * Gasho server's records).
  */
 function Operations({ events, machines, now }: { events: MachineHookEvent[]; machines: MachineInfo[]; now: number }) {
@@ -526,11 +693,11 @@ function Operations({ events, machines, now }: { events: MachineHookEvent[]; mac
         const s = m?.sessions.find((x) => x.sessionId === e.sessionId);
         const Icon = OPERATION_ICONS[e.event] ?? Send;
         const what = operationText(e);
-        // A launch's session is not known yet, a removed one is gone, and a plugin's record may have none: these show
-        // the working server instead (or "プラグイン").
+        // A launch's session is not known yet, a removed one is gone, and a folder or a clone has none: these show the
+        // working server instead.
         const where = s
           ? sessionLabel(s)
-          : !e.sessionId || e.event === "Gasho:session.launch" || e.event === "Gasho:session.remove"
+          : !e.sessionId || e.event === "Gasho:session.remove"
             ? (m?.name ?? (e.event.startsWith("Gasho:plugin.") ? "プラグイン" : ""))
             : "終了したセッション";
         const body = (
@@ -575,12 +742,38 @@ function operationText(e: MachineHookEvent): string {
   if (e.event === "Gasho:plugin.machines") return `プラグインを動かす working server を変更：${summary}`;
   if (e.event === "Gasho:plugin.setting") return `プラグインの設定を変更：${summary.replace(/ = .*$/, "")}`;
   if (e.event === "Gasho:plugin.call") return summary;
-  if (e.event === "Gasho:session.launch") return `起動：${summary.split("/").filter(Boolean).pop() ?? summary}`;
+  // The folder's last name; "[trust]" when Claude Code was told to trust it.
+  if (e.event === "Gasho:session.launch" || e.event === "Gasho:folder.create") {
+    const dir = summary.replace(/\s*\[trust\]$/, "");
+    const what = e.event === "Gasho:folder.create" ? "フォルダーを作成" : dir === summary ? "起動" : "信頼して起動";
+    return `${what}：${dir.split("/").filter(Boolean).pop() ?? dir}`;
+  }
+  // "owner/name → where it went".
+  if (e.event === "Gasho:repo.clone") return `clone：${summary.split(" → ")[0]}`;
+  // "notes/a.md [new] [1KB]": the file's path in the session's folder, whether it was made, its size.
+  if (e.event === "Gasho:file.write") {
+    const file = summary.replace(/(\s*\[(new|\d+KB)\])+$/, "");
+    return `${/\[new\]/.test(summary.slice(file.length)) ? "ファイルを作成" : "ファイルを保存"}：${file.split("/").pop() ?? file}`;
+  }
   if (e.event === "Gasho:session.interrupt") return "作業を止めた";
   // The new name, the fork's name, the removed session's name.
   if (e.event === "Gasho:session.rename") return summary ? `名前を変更：${summary}` : "名前を変えた";
   if (e.event === "Gasho:session.fork") return summary ? `フォーク：${summary}` : "フォークした";
   if (e.event === "Gasho:session.remove") return summary ? `削除：${summary}` : "セッションを削除した";
+  // "[allow] Bash npm test": the answer, then the tool and what it was asked for. "[answer] Color → Blue": Claude's
+  // questions answered; "[approve] title", "[revise] what to change": a plan approved, or sent back.
+  if (e.event === "Gasho:permission.answer") {
+    const m = /^\[(allow|always|deny|answer|approve|revise)\]\s*(.*)$/.exec(summary);
+    let rest = m?.[2] ?? "";
+    let what = { allow: "許可", always: "今後も許可", deny: "拒否", answer: "質問に回答", approve: "計画を承認", revise: "計画の修正を依頼" }[m?.[1] as "allow"] ?? "権限の確認に回答";
+    // A question or a plan turned down without an answer: Claude stopped.
+    const stopped = m?.[1] === "deny" ? /^(AskUserQuestion|ExitPlanMode)\b\s*(.*)$/.exec(rest) : null;
+    if (stopped) {
+      what = stopped[1] === "AskUserQuestion" ? "質問に答えずに止めた" : "計画を承認せずに止めた";
+      rest = stopped[2] ?? "";
+    }
+    return rest ? `${what}：${rest}` : what;
+  }
   const text = summary.replace(/\s*\[(model|effort|ultracode|file|via): [^\]]*\]/g, "").trim();
   const files = (summary.match(/\[file: /g) ?? []).length;
   return text || (files > 0 ? `ファイルを ${files} 件送った` : "指示を送った");

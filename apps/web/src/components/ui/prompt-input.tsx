@@ -1,7 +1,8 @@
 "use client";
 // From easyui.site (PromptInput). Changed for Gasho: user-visible strings are in Japanese, the line under the box
 // can be laid out like EasyUI's preview (`showCount`: keyboard hint on the left, character count on the right), and
-// what is typed can be kept outside the component (`draft`), so it is still there when the box is shown again.
+// what is typed can be kept outside the component (`draft`), so it is still there when the box is shown again. With
+// `shell`, a text that starts with "!" is shown as a shell command (Claude Code's shell mode).
 
 import {
   forwardRef,
@@ -20,6 +21,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion } from "framer-motion";
+import { emptyShellInput, isShellInput } from "@/lib/shell";
 
 /* -------------------------------------------------------------------------- */
 /*  PromptInput — the chat composer. Pairs with <AIResponse /> to finish the   */
@@ -151,6 +153,11 @@ export interface PromptInputProps {
    * back after a failed send also goes there, even when the box has gone. Without one, the box keeps its own.
    */
   draft?: PromptDraftStore;
+  /**
+   * Claude Code's shell mode: a text that starts with "!" is a shell command, run where the session runs. The box shows
+   * it as one (a "シェル" mark, a fixed-width font, an amber frame), the send button runs it, and it cannot carry files.
+   */
+  shell?: boolean;
   className?: string;
 }
 
@@ -459,6 +466,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
     safeArea = false,
     showCount = false,
     draft,
+    shell = false,
     className = "",
   },
   ref,
@@ -499,6 +507,8 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const [modelId, setModelId] = useState(defaultModel ?? models[0]?.id ?? "");
   const activeModelId = model ?? modelId;
   const currentModel = models.find((m) => m.id === activeModelId) ?? models[0] ?? null;
+  // What is sent is trimmed: " !ls" is a shell command too.
+  const shellMode = shell && isShellInput(text.trimStart());
 
   // Whether tools are hidden past the right end of the toolbar (it scrolls sideways on a phone).
   const toolsRef = useRef<HTMLDivElement>(null);
@@ -628,10 +638,16 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   const unsent = useRef("");
 
   /* -------------------------------- sending -------------------------------- */
-  const canSend = !disabled && (text.trim().length > 0 || attachments.length > 0) && text.length <= maxLength;
+  // A shell command needs something after its "!".
+  const canSend =
+    !disabled && (shellMode ? !emptyShellInput(text.trim()) : text.trim().length > 0 || attachments.length > 0) && text.length <= maxLength;
 
   const submit = useCallback(async () => {
     if (streaming || !canSend) return;
+    if (shellMode && attachments.length > 0) {
+      flashError("シェルのコマンドには、ファイルを添付できません。添付を外してください。");
+      return;
+    }
     const payload: PromptSubmit = { text: text.trim(), files: attachments.map((a) => a.file), model: currentModel };
     const snapshot = { text, attachments };
     histIdx.current = -1;
@@ -650,7 +666,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
       setAttachments((a) => (a.length ? a : snapshot.attachments));
       flashError("送れませんでした。入力は欄に戻しました。");
     }
-  }, [attachments, canSend, change, currentModel, flashError, onSend, setAttachments, setText, streaming, text]);
+  }, [attachments, canSend, change, currentModel, flashError, onSend, setAttachments, setText, shellMode, streaming, text]);
 
   useImperativeHandle(
     ref,
@@ -740,21 +756,22 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
   /* --------------------------------- render -------------------------------- */
   const nearLimit = text.length > maxLength * 0.85;
   const over = text.length > maxLength;
+  const sendWord = shellMode ? "でシェルのコマンドを実行" : "で送信";
   const hintNode =
     hint === false ? null : hint !== undefined ? hint : modKey === null ? null : enter ? (
       <>
-        <Kbd>↵</Kbd> で送信
+        <Kbd>↵</Kbd> {sendWord}
         <span className="ml-2" />
         <Kbd>⇧</Kbd>
         <Kbd>↵</Kbd> で改行
       </>
     ) : (
       <>
-        <Kbd>{modKey}</Kbd> <Kbd>↵</Kbd> で送信
+        <Kbd>{modKey}</Kbd> <Kbd>↵</Kbd> {sendWord}
       </>
     );
 
-  const sendLabel = streaming ? "停止" : "送信";
+  const sendLabel = streaming ? "停止" : shellMode ? "実行" : "送信";
   const sendReady = streaming || canSend;
 
   return (
@@ -773,8 +790,10 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
         ref={cardRef}
         {...dragProps}
         className={cx(
-          "relative rounded-[24px] bg-white p-2 ring-1 ring-black/[0.08] transition-[box-shadow] duration-200 dark:bg-[#0f0f10] dark:ring-white/[0.09]",
-          "focus-within:ring-black/25 dark:focus-within:ring-white/25",
+          "relative rounded-[24px] bg-white p-2 ring-1 transition-[box-shadow] duration-200 dark:bg-[#0f0f10]",
+          shellMode
+            ? "ring-amber-500/50 focus-within:ring-amber-500/70 dark:ring-amber-400/40 dark:focus-within:ring-amber-400/60"
+            : "ring-black/[0.08] focus-within:ring-black/25 dark:ring-white/[0.09] dark:focus-within:ring-white/25",
           disabled && "opacity-60",
         )}
         style={{ boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 18px 40px -24px rgba(0,0,0,0.25)" }}
@@ -837,7 +856,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
           <div
             ref={mirrorRef}
             aria-hidden
-            className={cx("pointer-events-none invisible absolute inset-x-0 top-0 whitespace-pre-wrap break-words", PAD_X, PAD_Y, TEXT)}
+            className={cx("pointer-events-none invisible absolute inset-x-0 top-0 whitespace-pre-wrap break-words", PAD_X, PAD_Y, TEXT, shellMode && "font-mono")}
             style={{ overflowWrap: "anywhere" }}
           >
             {text + "\u200b"}
@@ -849,7 +868,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
             disabled={disabled}
             maxLength={maxLength + 400}
             placeholder={placeholder}
-            aria-label="メッセージ"
+            aria-label={shellMode ? "シェルのコマンド" : "メッセージ"}
             aria-describedby={`${uid}-hint`}
             enterKeyHint={enter ? "send" : "enter"}
             onChange={(e) => {
@@ -864,6 +883,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
               PAD_X,
               PAD_Y,
               TEXT,
+              shellMode && "font-mono",
             )}
           />
         </div>
@@ -877,6 +897,15 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
             className="scrollbar-none -my-0.5 flex min-w-0 items-center gap-0.5 overflow-x-auto py-0.5"
             style={toolsMore ? { maskImage: TOOLS_FADE, WebkitMaskImage: TOOLS_FADE } : undefined}
           >
+            {shellMode && (
+              <span
+                title="「!」で始まる入力は、Claude Code のシェルモードで、そのままシェルのコマンドとして実行します"
+                className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-amber-500/15 px-2.5 text-[12.5px] font-medium text-amber-700 dark:text-amber-300"
+              >
+                <span className="font-mono font-semibold">!</span>
+                シェル
+              </span>
+            )}
             {allowAttachments && (
               <>
                 <input
@@ -892,9 +921,9 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
                 />
                 <button
                   type="button"
-                  disabled={disabled || attachments.length >= maxFiles}
+                  disabled={disabled || shellMode || attachments.length >= maxFiles}
                   aria-label="ファイルを添付"
-                  title="ファイルを添付"
+                  title={shellMode ? "シェルのコマンドには添付できません" : "ファイルを添付"}
                   onClick={() => fileInput.current?.click()}
                   className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl sm:h-9 sm:w-9 ${softBtn} ${focusRing} disabled:pointer-events-none disabled:opacity-40`}
                 >
@@ -951,7 +980,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
               <motion.button
                 type="button"
                 aria-label={sendLabel}
-                title={streaming ? "停止（Esc）" : "送信"}
+                title={streaming ? "停止（Esc）" : sendLabel}
                 disabled={!sendReady}
                 onClick={() => (streaming ? onStop?.() : void submit())}
                 initial={false}

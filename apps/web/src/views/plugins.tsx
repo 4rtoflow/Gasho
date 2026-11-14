@@ -2,9 +2,10 @@
 // server, whether each is enabled, where its daemon part runs and how it stands on each working server, and why it
 // cannot be used when it cannot. Changes go live at once (hot reload). Adding plugins from GashoPlugins (the catalog)
 // comes in a later stage; until then they are installed with the Gasho server's command (npm run hub:plugin).
-import { Puzzle } from "lucide-react";
+import { Puzzle, Settings2 } from "lucide-react";
 import { useState } from "react";
 import type { MachineInfo, PluginDaemonState, PluginInfo, PluginMachines } from "@gasho/protocol";
+import { go } from "@/lib/route";
 import { sendPluginCommand, useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { usePluginRegistry } from "@/plugins/registry";
@@ -63,6 +64,7 @@ function PluginCard({ info, machines, loadError, loading }: { info: PluginInfo; 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const m = info.manifest;
+  const hasSettings = Object.keys(m.settings ?? {}).length > 0;
   const run = async (cmd: Parameters<typeof sendPluginCommand>[0]) => {
     setBusy(true);
     setError(undefined);
@@ -87,6 +89,19 @@ function PluginCard({ info, machines, loadError, loading }: { info: PluginInfo; 
           <p className="mt-1 font-mono text-[11px] text-muted-foreground">{info.id}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {hasSettings && info.enabled && (
+            <button
+              type="button"
+              className={BUTTON}
+              onClick={() => {
+                go({ name: "settings" });
+                requestAnimationFrame(() => document.getElementById(`plugin-settings-${info.id}`)?.scrollIntoView({ block: "start" }));
+              }}
+            >
+              <Settings2 className="size-3.5" />
+              設定
+            </button>
+          )}
           <label className={cn(BUTTON, "cursor-pointer")}>
             <input
               type="checkbox"
