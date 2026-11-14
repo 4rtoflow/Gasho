@@ -51,6 +51,13 @@ test("a worktree is named by its branch, else its folder, and its repository by 
       ["notes", undefined],
     ],
   );
+  // What plugins get of a worktree (docs/plugins.md, P15), also once its sessions are gone and the sidebar keeps it.
+  const [gasho, , notes] = list;
+  assert.ok(gasho && notes);
+  assert.deepEqual([gasho.branch, gasho.repoFolder, gasho.github], ["main", "/w/gasho", github]);
+  assert.deepEqual([notes.branch, notes.repoFolder, notes.github], [undefined, undefined, undefined]);
+  const [kept] = worktreesByLastUse([machine("mac", [])], [rememberedOf(gasho)]);
+  assert.deepEqual([kept?.branch, kept?.repoFolder, kept?.github], ["main", "/w/gasho", github]);
 });
 
 test("remembered worktrees without sessions come last, once each; the tab after a removed one is the next, else the one before", () => {

@@ -1,23 +1,27 @@
-// A worktree with no session open: one whose sessions are all gone, kept in the sidebar by this browser. Its tabs row
-// still starts a new session ("＋") and opens a past conversation again.
+// A worktree with no session open: a plugin's screen that one of its tabs opened (docs/plugins.md, P15), or a worktree
+// whose sessions are all gone, kept in the sidebar by this browser. Its tabs row still starts a new session ("＋") and
+// opens a past conversation again.
 import { ArrowLeft } from "lucide-react";
 import { useEffect } from "react";
 import { BUTTON_SECONDARY } from "@/components/dialog-styles";
 import type { SessionActionRequest } from "@/components/session-menu";
 import { SessionTabs } from "@/components/session-tabs";
 import { forgetWorktree } from "@/lib/remembered-worktrees";
-import { go } from "@/lib/route";
+import { go, type WorktreeView as PluginView } from "@/lib/route";
 import { sessionToOpen, type WorktreeSessions } from "@/lib/sessions";
+import { PluginWorktreeView } from "@/plugins/parts";
 
 export function WorktreeView({
   worktree,
+  view,
   onSessionAction,
 }: {
   worktree: WorktreeSessions | undefined;
+  view?: PluginView;
   onSessionAction: (request: SessionActionRequest) => void;
 }) {
-  // Once it has a session (started here, or elsewhere), that session opens instead.
-  const open = worktree && sessionToOpen(worktree);
+  // Without a plugin's screen, once it has a session (started here, or elsewhere), that session opens instead.
+  const open = worktree && !view ? sessionToOpen(worktree) : undefined;
   useEffect(() => {
     if (worktree && open) go({ name: "session", machine: worktree.machine.id, sessionId: open.sessionId }, { replace: true });
   }, [worktree, open]);
@@ -27,6 +31,16 @@ export function WorktreeView({
       <div className="mx-auto max-w-3xl p-6 text-sm text-muted-foreground">
         <HomeLink />
         <p className="mt-4">この worktree はサイドバーにありません。</p>
+      </div>
+    );
+  }
+  if (view) {
+    return (
+      <div className="flex h-full flex-col">
+        <SessionTabs worktree={worktree} view={view} onAction={onSessionAction} />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <PluginWorktreeView worktree={worktree} view={view} />
+        </div>
       </div>
     );
   }

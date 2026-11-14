@@ -1,8 +1,9 @@
 // Where the plugins' parts go on Gasho's screen (docs/plugins.md): sidebar items and their badges (P1), pages (P2),
 // session header items (P3), session panels (P4), settings (P5), home tiles (P6), the end of a session's
-// conversation (P13) and the line under its chat box (P14). Every part is drawn in the scope of its plugin (the SDK's hooks find it there) and inside an error
-// boundary of its own, so that a plugin that throws shows an error in its place while the rest of Gasho goes on.
-import { Component, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+// conversation (P13), the line under its chat box (P14) and a worktree's tabs and their screens (P15). Every part is
+// drawn in the scope of its plugin (the SDK's hooks find it there) and inside an error boundary of its own, so that a
+// plugin that throws shows an error in its place while the rest of Gasho goes on.
+import { Component, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type {
   ComposerFooterItem,
   ConversationEndItem,
@@ -12,10 +13,15 @@ import type {
   SessionContext,
   SessionHeaderItem,
   TileSize,
+  WorktreeContext,
+  WorktreeInfo,
+  WorktreeTab,
+  WorktreeTabItem,
 } from "@gasho/plugin-sdk";
 import type { MachineInfo, PluginInfo, PluginSettingSpec, SessionInfo } from "@gasho/protocol";
 import { SidePanel } from "@/components/side-panel";
-import { go, hrefOf, type SessionPanel } from "@/lib/route";
+import { go, hrefOf, type Route, type SessionPanel, type WorktreeView } from "@/lib/route";
+import type { WorktreeSessions } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { reportPluginError, usePluginRegistry, type PluginPart } from "./registry";
@@ -338,6 +344,102 @@ function ComposerFooterPart({ part, item, machine, session }: { part: PluginPart
         <Shown machine={machine} session={session} />
       </Part>
     </SessionScopeContext.Provider>
+  );
+}
+
+// ---- a worktree's tabs and their screens (P15) ----
+
+/** What a plugin gets of a worktree. */
+function worktreeInfo(w: WorktreeSessions): WorktreeInfo {
+  return {
+    path: w.path,
+    ...(w.branch ? { branch: w.branch } : {}),
+    ...(w.repoFolder ? { repo: w.repoFolder } : {}),
+    ...(w.github ? { github: w.github } : {}),
+    sessions: w.sessions,
+  };
+}
+
+/** The plugins' tabs of a worktree, after its sessions' tabs. `open`: the plugin's screen open below, if any. */
+export function PluginWorktreeTabs({ worktree, open }: { worktree: WorktreeSessions; open?: WorktreeView }) {
+  const { parts } = usePluginRegistry();
+  const items = ordered(parts, (def) => def.worktreeTabs);
+  return (
+    // Without any tab (none of the hooks gave one), nothing shows, the line before them neither.
+    <div className="flex shrink-0 gap-1 empty:hidden before:my-2 before:mr-1 before:w-px before:bg-border">
+      {items.map(({ part, item }) => (
+        // A hook that throws leaves its tabs out, as a header item's `when` does.
+        <Part key={`${part.info.id}.${item.id}`} part={part} fallback={null} bare>
+          <WorktreeTabs part={part} item={item} worktree={worktree} open={open} />
+        </Part>
+      ))}
+    </div>
+  );
+}
+
+function WorktreeTabs({ part, item, worktree, open }: { part: PluginPart; item: WorktreeTabItem; worktree: WorktreeSessions; open?: WorktreeView }) {
+  const ctx: WorktreeContext = { machine: worktree.machine, worktree: worktreeInfo(worktree), daemon: readiness(part.info, worktree.machine.id) };
+  const tabs = item.useTabs(ctx) ?? [];
+  return (
+    <>
+      {tabs.map((tab, i) => (
+        <WorktreeTabButton key={i} plugin={part.info.id} tab={tab} worktree={worktree} open={open} />
+      ))}
+    </>
+  );
+}
+
+function WorktreeTabButton({ plugin, tab, worktree, open }: { plugin: string; tab: WorktreeTab; worktree: WorktreeSessions; open?: WorktreeView }) {
+  const params = tab.params ?? {};
+  // As a header item's panel: the same screen, with every param the tab has.
+  const pressed = open?.plugin === plugin && open.id === tab.view && Object.entries(params).every(([k, v]) => open.params[k] === v);
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (pressed) ref.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [pressed]);
+  const to: Route = { name: "worktree", machine: worktree.machine.id, path: worktree.path, view: { plugin, id: tab.view, params } };
+  const Icon = tab.icon;
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={() => {
+        if (location.hash !== hrefOf(to)) go(to);
+      }}
+      aria-current={pressed ? "page" : undefined}
+      title={tab.title ?? tab.label}
+      className={cn(
+        "relative flex h-9 max-w-56 shrink-0 items-center gap-1.5 px-2.5 text-xs transition-colors",
+        "after:absolute after:inset-x-1.5 after:bottom-0 after:h-0.5 after:rounded-full",
+        pressed ? "text-foreground after:bg-foreground" : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {Icon && <Icon className="size-3.5 shrink-0" />}
+      <span className="truncate">{tab.label}</span>
+      {tab.badge !== undefined && <span className="rounded bg-surface-raised px-1 text-[10px] tabular-nums">{tab.badge}</span>}
+    </button>
+  );
+}
+
+/** The plugin's screen a worktree's tab opened, below the tabs. */
+export function PluginWorktreeView({ worktree, view }: { worktree: WorktreeSessions; view: WorktreeView }) {
+  const { infos, parts, errors, loading } = usePluginRegistry();
+  const info = infos.find((p) => p.id === view.plugin);
+  const part = parts.find((p) => p.info.id === view.plugin);
+  const why = unavailable(info, part, errors, loading);
+  const View = part && Object.hasOwn(part.def.worktreeViews ?? {}, view.id) ? part.def.worktreeViews?.[view.id] : undefined;
+  if (why || !part || !View) {
+    return (
+      <Notice title={info?.manifest.name ?? view.plugin}>
+        <p>{why ?? "この画面はありません。"}</p>
+        {why && <p className="mt-2">{toPlugins}で、入っているプラグインと、その状態を見られます。</p>}
+      </Notice>
+    );
+  }
+  return (
+    <Part part={part}>
+      <View machine={worktree.machine} worktree={worktreeInfo(worktree)} params={view.params} />
+    </Part>
   );
 }
 

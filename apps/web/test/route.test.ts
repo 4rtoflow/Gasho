@@ -18,13 +18,15 @@ test("routes survive a round trip through the URL, including a session's panel a
   assert.deepEqual(parseHash("#/s/m/s/wiki"), { name: "home" });
 });
 
-test("plugins' pages and panels keep their params in the query, sorted, and a bad plugin id goes home", () => {
+test("plugins' pages, panels and worktree screens keep their params in the query, sorted, and a bad plugin id goes home", () => {
   const routes: Route[] = [
     { name: "plugins" },
     { name: "plugin", plugin: "kanban", page: "board", params: {} },
     { name: "plugin", plugin: "kanban", page: "board", params: { view: "すべて", q: "a&b=c" } },
     { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "plugin", plugin: "github", id: "list", params: { kind: "pulls" } } },
     { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "plugin", plugin: "github", id: "item", params: { kind: "issues", number: "42", repo: "org/web app" } } },
+    { name: "worktree", machine: "m1", path: "/Users/me/Gasho issue/a?b", view: { plugin: "github-allmighty", id: "issue", params: { number: "17" } } },
+    { name: "worktree", machine: "m1", path: "/src/app", view: { plugin: "kanban", id: "board", params: {} } },
   ];
   for (const r of routes) assert.deepEqual(parseHash(hrefOf(r)), r);
   assert.equal(hrefOf({ name: "plugin", plugin: "kanban", page: "board", params: { b: "2", a: "1" } }), "#/p/kanban/board?a=1&b=2");
@@ -32,7 +34,11 @@ test("plugins' pages and panels keep their params in the query, sorted, and a ba
     hrefOf({ name: "session", machine: "m", sessionId: "s", panel: { kind: "plugin", plugin: "github", id: "list", params: { kind: "issues" } } }),
     "#/s/m/s/p/github/list?kind=issues",
   );
-  for (const bad of ["#/p/GitHub/list", "#/p/x/list", "#/p/a_b/list", "#/s/m/s/p/Kanban/board", "#/s/m/s/p/x/board"]) {
+  assert.equal(
+    hrefOf({ name: "worktree", machine: "m", path: "/src/app", view: { plugin: "gh", id: "issue", params: { number: "17" } } }),
+    "#/w/m/%2Fsrc%2Fapp/p/gh/issue?number=17",
+  );
+  for (const bad of ["#/p/GitHub/list", "#/p/x/list", "#/p/a_b/list", "#/s/m/s/p/Kanban/board", "#/s/m/s/p/x/board", "#/w/m/%2Fa/p/Gh/issue", "#/w/m/%2Fa/p/gh"]) {
     assert.deepEqual(parseHash(bad), { name: "home" }, bad);
   }
 });

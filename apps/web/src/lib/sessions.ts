@@ -1,5 +1,5 @@
 // Gasho shows only the sessions it started (from its own launcher); others running on a working server are not shown.
-import type { GashoNotification, MachineInfo, SessionInfo } from "@gasho/protocol";
+import type { GashoNotification, GitHubRepo, MachineInfo, SessionInfo } from "@gasho/protocol";
 import { basename } from "./format.ts";
 
 export function shownSessions(m: MachineInfo): SessionInfo[] {
@@ -24,6 +24,10 @@ export interface WorktreeSessions {
   path: string;
   /** Whether it is a git worktree, whose sessions may run in the folders inside `path` too. */
   subfolders: boolean;
+  /** What plugins get of it (docs/plugins.md): the branch checked out, the repository's folder, its GitHub repository. */
+  branch?: string;
+  repoFolder?: string;
+  github?: GitHubRepo;
   /** In the order they started, which is the order of the tabs. Empty for a worktree this browser remembers. */
   sessions: SessionInfo[];
 }
@@ -35,7 +39,18 @@ export interface RememberedWorktree {
   label: string;
   repo?: string;
   subfolders: boolean;
+  branch?: string;
+  repoFolder?: string;
+  github?: GitHubRepo;
 }
+
+/** The fields of a worktree that are absent when unknown. */
+const known = (w: Pick<WorktreeSessions, "repo" | "branch" | "repoFolder" | "github">) => ({
+  ...(w.repo ? { repo: w.repo } : {}),
+  ...(w.branch ? { branch: w.branch } : {}),
+  ...(w.repoFolder ? { repoFolder: w.repoFolder } : {}),
+  ...(w.github ? { github: w.github } : {}),
+});
 
 /**
  * The worktree a session is in. A session in a folder that is not in a repository, or one whose gasho-daemon is too old
@@ -66,7 +81,8 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
       const w = s.worktree;
       const repo = s.github?.name ?? (w ? basename(w.repo).replace(/\.git$/, "") : undefined);
       const path = w?.path ?? s.cwd;
-      byId.set(id, { id, machine, label: w?.branch ?? basename(path), ...(repo ? { repo } : {}), path, subfolders: Boolean(w), sessions: [s] });
+      const facts = known({ repo, branch: w?.branch, repoFolder: w?.repo, github: s.github });
+      byId.set(id, { id, machine, label: w?.branch ?? basename(path), path, subfolders: Boolean(w), ...facts, sessions: [s] });
     }
   }
   const worktrees = [...byId.values()];
@@ -77,7 +93,7 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
     const machine = machines.find((m) => m.id === r.machine);
     const id = worktreeKey(r.machine, r.path);
     if (!machine || byId.has(id)) continue;
-    byId.set(id, { id, machine, label: r.label, ...(r.repo ? { repo: r.repo } : {}), path: r.path, subfolders: r.subfolders, sessions: [] });
+    byId.set(id, { id, machine, label: r.label, path: r.path, subfolders: r.subfolders, ...known(r), sessions: [] });
     worktrees.push(byId.get(id)!);
   }
   return worktrees;
@@ -85,7 +101,7 @@ export function worktreesByLastUse(machines: MachineInfo[], remembered: Remember
 
 /** What the sidebar keeps of a worktree once its sessions are gone. */
 export function rememberedOf(w: WorktreeSessions): RememberedWorktree {
-  return { machine: w.machine.id, path: w.path, label: w.label, ...(w.repo ? { repo: w.repo } : {}), subfolders: w.subfolders };
+  return { machine: w.machine.id, path: w.path, label: w.label, subfolders: w.subfolders, ...known(w) };
 }
 
 /** The tab to open once the open session's tab is gone: the one after it, else the one before. */
