@@ -27,7 +27,7 @@ import { daemonAtLeast, rememberOpened, worktreeId, worktreesByLastUse } from "@
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
-import { PluginConversationEnd, PluginHeaderItems } from "@/plugins/parts";
+import { PluginComposerFooter, PluginConversationEnd, PluginHeaderItems } from "@/plugins/parts";
 
 /**
  * `panel`: the panel open beside the session (a computer), if any; its link in the header shows as open.
@@ -372,6 +372,7 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
           model={current ?? "default"}
           placeholder="Gasho からは入力できません"
           hint={false}
+          footer={<PluginComposerFooter machine={machine} session={s} />}
         />
         <p className="mt-1.5 px-3 text-xs text-muted-foreground">
           claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。
@@ -484,6 +485,7 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
         placeholder="Agent への指示を入力…"
         showCount
         shell
+        footer={<PluginComposerFooter machine={machine} session={s} />}
       />
       {(status || error || warning) && (
         <p className={cn("mt-1.5 px-3 text-xs", error ? "text-red-400" : warning ? "text-amber-400" : "text-muted-foreground")}>

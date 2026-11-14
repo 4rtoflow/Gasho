@@ -188,6 +188,15 @@ Gasho が起動するセッションは、gasho-daemon がセッションごと�
 
 hook の `onFailure` は既定のままにする。こうすると、gasho-daemon が止まっていても hook の失敗は判断なしとして扱われ、公式アプリの動きは変わらない。
 
+### ステータスライン
+
+Claude Code は、Context Window の使用量と、Claude.ai のプランで決まっている使用量の上限を、ステータスラインのコマンドにだけ渡す。標準入力で渡す JSON の `context_window` と `rate_limits` で、hook には渡さない。そこで gasho-daemon は、Gasho が起動するセッション（フォークを含む）に `--settings` を付ける。これで、ステータスラインのコマンドが gasho-daemon の中継のコマンド（`statusline-relay`）になる。ユーザー設定は書き換えない。
+
+- 中継のコマンドは、`session_id`、`context_window`、`rate_limits` だけを、hooks と同じ 127.0.0.1 のポート（`/statusline`）に、同じ共有シークレットを付けて送る。gasho-daemon は、それを `SessionInfo` の `context` と `limits` に入れる（[plugins.md](plugins.md) の P14）
+- `--settings` はユーザーとプロジェクトの設定より優先されるので、そのままでは利用者のステータスラインが消える。gasho-daemon は起動の前に、フォルダーのローカルの設定、プロジェクトの設定、ユーザー設定の順に `statusLine` を探し、そのコマンドを中継のコマンドに渡す。中継のコマンドは、同じ JSON でそれを bash で実行し、出力をそのまま返す。`padding` と `refreshInterval` も引き継ぐ
+- 中継のコマンドは、gasho-daemon に送れなくても、利用者のステータスラインの出力は返す
+- Gasho が起動していないセッションには付けないので、その `context` と `limits` はない
+
 ### 操作の規則
 
 検証で分かったことから、次の規則を守る。
