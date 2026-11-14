@@ -2,7 +2,15 @@
 // The format is internal to Claude Code, so unknown records are ignored rather than rejected.
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { EffortLevel, PastConversation, PrLink, TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
+import type {
+  BackgroundTask,
+  BackgroundTaskKind,
+  EffortLevel,
+  PastConversation,
+  PrLink,
+  TranscriptBlock,
+  TranscriptEntry,
+} from "@gasho/protocol";
 import { clip, inputSummary, str } from "./util.ts";
 
 /**
@@ -102,10 +110,156 @@ export interface TranscriptMeta {
    * Claude wrote it (not clipped), and when. Cleared by the call's result or by a new message from the person.
    */
   question?: { toolUseId: string; input: Record<string, unknown>; at?: number };
+  /** Work Claude started in the background (see BackgroundTasks). */
+  background?: BackgroundTasks;
 }
 
 export function emptyMeta(): TranscriptMeta {
-  return { prLinks: [] };
+  return { prLinks: [], background: new BackgroundTasks() };
+}
+
+function tasksOf(meta: TranscriptMeta): BackgroundTasks {
+  return (meta.background ??= new BackgroundTasks());
+}
+
+/** The text of a message record, without its tools' results. */
+function messageText(rec: Record<string, unknown>): string {
+  const content = (rec.message as { content?: unknown } | undefined)?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) => (b && typeof b === "object" && (b as { type?: unknown }).type === "text" ? String((b as { text?: unknown }).text ?? "") : ""))
+    .join("\n");
+}
+
+/** The tools whose calls can start work that runs in the background, and what that work is. */
+const BACKGROUND_TOOLS: Record<string, BackgroundTaskKind> = {
+  Bash: "shell",
+  PowerShell: "shell",
+  Monitor: "monitor",
+  Agent: "agent",
+  Task: "agent",
+  Workflow: "workflow",
+};
+/** Tools that stop background work by its id: TaskStop, and KillShell and KillBash before it. */
+const STOP_TOOLS = new Set(["TaskStop", "KillShell", "KillBash"]);
+/** The results that name the work they started, for a record whose result Claude Code did not keep apart. */
+const STARTED_RES: Partial<Record<BackgroundTaskKind, RegExp>> = {
+  shell: /^Command (?:running in background with ID: |was manually backgrounded by user with ID: |was moved to the background \(ID: )([\w-]+)/,
+  monitor: /^Monitor started \(task ([\w-]+)/,
+  agent: /^Async agent launched[\s\S]*?\bagentId: ([\w-]+)/,
+  workflow: /^Workflow launched in background\. Task ID: ([\w-]+)/,
+};
+/** Claude Code's notice about background work; it says how the work ended once it has (a monitor's events do not). */
+const TASK_NOTICE_RE = /<task-notification>[\s\S]*?<\/task-notification>/g;
+const TASK_ID_RE = /<task-id>\s*([^<\s]+)\s*<\/task-id>/;
+const TASK_ENDED_RE = /<status>\s*(?:completed|failed|killed|stopped)\s*<\/status>/;
+/** The ids of ended work that are remembered: a notice can be recorded before the result that started the work. */
+const MAX_ENDED = 1000;
+const MAX_TASK_TITLE = 200;
+const MAX_TASK_COMMAND = 1000;
+
+/** The first line of a text, clipped; undefined when it has none. */
+function firstLine(v: unknown, max: number): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const line = v.trim().split("\n", 1)[0]?.trim();
+  return line ? clip(line, max) : undefined;
+}
+
+/**
+ * Work that Claude started in the background, followed through the transcript: the tool call that can start some
+ * (Bash or PowerShell with `run_in_background`, or moved there later; Monitor; Agent; Workflow), its result that names
+ * the work it started, and Claude Code's notice when that work has ended (or the result of a TaskStop for it). Work
+ * whose end is not recorded may still run; whether it does is Claude Code's to say (see the Daemon).
+ */
+export class BackgroundTasks {
+  private started = new Map<string, BackgroundTask>();
+  private calls = new Map<string, { name: string; input: Record<string, unknown>; at?: number }>();
+  private ended = new Set<string>();
+
+  /** What was started and has no end recorded, in the order it started. */
+  list(): BackgroundTask[] {
+    return [...this.started.values()];
+  }
+
+  /** A call of Claude's tools (main conversation only). */
+  call(id: string | undefined, name: string, input: unknown, at: number | undefined): void {
+    if (!id || !(name in BACKGROUND_TOOLS || STOP_TOOLS.has(name))) return;
+    const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+    this.calls.set(id, { name, input: args, ...(at === undefined ? {} : { at }) });
+  }
+
+  /**
+   * The result of a call: `meta` is what Claude Code kept about it (the record's `toolUseResult`, when the record holds
+   * only this result), `text` what Claude read.
+   */
+  result(toolUseId: string | undefined, meta: unknown, text: string, isError: boolean, at: number | undefined): void {
+    const call = toolUseId ? this.calls.get(toolUseId) : undefined;
+    if (!call || !toolUseId) return;
+    this.calls.delete(toolUseId);
+    if (isError) return;
+    const r = meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {};
+    if (STOP_TOOLS.has(call.name)) {
+      const id = str(call.input.task_id) ?? str(call.input.shell_id) ?? str(r.task_id);
+      if (id) this.end(id);
+      return;
+    }
+    const kind = BACKGROUND_TOOLS[call.name];
+    if (!kind) return;
+    let id: string | undefined;
+    if (kind === "shell") id = str(r.backgroundTaskId);
+    else if (kind === "agent") id = r.status === "async_launched" ? str(r.agentId) : undefined;
+    else id = str(r.taskId);
+    if (!id && Object.keys(r).length === 0) {
+      id = STARTED_RES[kind]?.exec(text.trim())?.[1];
+    }
+    if (!id || this.ended.has(id)) return;
+    const input = call.input;
+    const command = kind === "shell" || kind === "monitor" ? firstCommand(input) : undefined;
+    const title =
+      firstLine(input.description, MAX_TASK_TITLE) ??
+      (kind === "workflow" ? workflowName(input) : undefined) ??
+      firstLine(command, MAX_TASK_TITLE) ??
+      firstLine(input.subagent_type, MAX_TASK_TITLE) ??
+      call.name;
+    const startedAt = call.at ?? at;
+    this.started.set(id, { id, kind, title, ...(command ? { command } : {}), ...(startedAt === undefined ? {} : { startedAt }) });
+  }
+
+  /** Takes as ended the work that `running` says no longer runs (see mayRun in sessions.ts). */
+  settle(running: (task: BackgroundTask) => boolean): void {
+    for (const t of [...this.started.values()]) if (!running(t)) this.end(t.id);
+  }
+
+  /** A text that may hold Claude Code's notices about background work (a queued or delivered message). */
+  notices(text: string): void {
+    if (!text.includes("<task-notification>")) return;
+    for (const [notice] of text.matchAll(TASK_NOTICE_RE)) {
+      const id = TASK_ID_RE.exec(notice)?.[1];
+      if (id && TASK_ENDED_RE.test(notice)) this.end(id);
+    }
+  }
+
+  private end(id: string): void {
+    this.started.delete(id);
+    this.ended.add(id);
+    if (this.ended.size > MAX_ENDED) this.ended.delete(this.ended.values().next().value as string);
+  }
+}
+
+/** The command a shell or a monitor runs (a monitor can watch a WebSocket instead). */
+function firstCommand(input: Record<string, unknown>): string | undefined {
+  if (typeof input.command === "string" && input.command.trim()) return clip(input.command.trim(), MAX_TASK_COMMAND);
+  const ws = input.ws && typeof input.ws === "object" ? str((input.ws as Record<string, unknown>).url) : undefined;
+  return ws ? clip(ws, MAX_TASK_COMMAND) : undefined;
+}
+
+/** A workflow's name: the saved workflow it runs, or the name in its script's `meta`. */
+function workflowName(input: Record<string, unknown>): string | undefined {
+  const named = firstLine(input.name, MAX_TASK_TITLE);
+  if (named) return named;
+  const script = typeof input.script === "string" ? input.script : "";
+  return firstLine(/\bname\s*:\s*["'`]([^"'`\n]+)["'`]/.exec(script)?.[1], MAX_TASK_TITLE);
 }
 
 /** Transcripts record `cse_…`; the registry and the claude.ai URL use `session_…` with the same suffix. */
@@ -159,13 +313,19 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
       return null;
     case "attachment": {
       // Claude Code tells the model which model it is at the start of a turn.
-      const a = rec.attachment as { type?: unknown; identity?: { marketingName?: unknown; modelId?: unknown } } | undefined;
+      const a = rec.attachment as { type?: unknown; identity?: { marketingName?: unknown; modelId?: unknown }; prompt?: unknown } | undefined;
       if (a?.type === "model" && rec.isSidechain !== true) {
         const name = str(a.identity?.marketingName) ?? (typeof a.identity?.modelId === "string" ? modelLabel(a.identity.modelId) : undefined);
         if (name) meta.model = name;
       }
+      // A notice queued for Claude, such as one that background work has ended.
+      if (typeof a?.prompt === "string" && rec.isSidechain !== true) tasksOf(meta).notices(a.prompt);
       return null;
     }
+    case "queue-operation":
+      // What Claude Code queued for Claude: Claude Code's notices about background work are recorded here first.
+      if (typeof rec.content === "string") tasksOf(meta).notices(rec.content);
+      return null;
     case "user":
     case "assistant":
     case "system":
@@ -173,6 +333,9 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
     default:
       return null;
   }
+  // Claude Code's notices come as messages to Claude (not in a tool's result, which could quote one). The subagents'
+  // own work is not followed.
+  if (rec.type === "user" && rec.isSidechain !== true) tasksOf(meta).notices(messageText(rec));
   const role = rec.type as TranscriptEntry["role"];
   if (rec.isMeta === true) return null;
 
@@ -224,6 +387,10 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
     if (INTERRUPT_RE.test(t)) interrupted = true;
     blocks.push({ type: "text", text: clip(t, MAX_TEXT) });
   };
+  const parsedAt = ts ? Date.parse(ts) : Number.NaN;
+  const at = Number.isNaN(parsedAt) ? undefined : parsedAt;
+  // What Claude Code kept about a tool's result goes with the record: it says which one only when it holds one result.
+  const results = Array.isArray(content) ? content.filter((b) => (b as { type?: unknown } | null)?.type === "tool_result").length : 0;
   if (typeof content === "string") {
     pushText(content);
   } else if (Array.isArray(content)) {
@@ -235,9 +402,9 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
       } else if (b.type === "tool_use") {
         const id = str(b.id);
         if (role === "assistant" && !isSidechain && b.name === "AskUserQuestion" && id && b.input && typeof b.input === "object") {
-          const at = ts ? Date.parse(ts) : Number.NaN;
-          meta.question = { toolUseId: id, input: b.input as Record<string, unknown>, ...(Number.isNaN(at) ? {} : { at }) };
+          meta.question = { toolUseId: id, input: b.input as Record<string, unknown>, ...(at === undefined ? {} : { at }) };
         }
+        if (role === "assistant" && !isSidechain) tasksOf(meta).call(id, str(b.name) ?? "", b.input, at);
         blocks.push({
           type: "tool_use",
           id,
@@ -247,6 +414,10 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
         });
       } else if (b.type === "tool_result") {
         if (meta.question && str(b.tool_use_id) === meta.question.toolUseId) delete meta.question;
+        if (role === "user" && !isSidechain) {
+          const kept = results === 1 ? rec.toolUseResult : undefined;
+          tasksOf(meta).result(str(b.tool_use_id), kept, contentToString(b.content), b.is_error === true, at);
+        }
         blocks.push({
           type: "tool_result",
           toolUseId: str(b.tool_use_id),

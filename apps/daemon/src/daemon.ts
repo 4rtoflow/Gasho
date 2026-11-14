@@ -3,6 +3,8 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
+  BackgroundTask,
+  BackgroundTaskKind,
   CommandResult,
   EffortLevel,
   GitHubRepo,
@@ -63,14 +65,34 @@ import {
   surveyOpen,
   switchedForSession,
   switchQuestion,
+  type TaskRow,
+  taskRowActive,
+  taskRowKind,
+  taskRowShows,
+  type TasksDialog,
+  tasksDialog,
+  tasksItemFocused,
   titleName,
   TRUST_PROMPT_RE,
   trustQuestion,
   typedInBox,
+  waitingForBackground,
+  agentRowFocused,
   Zellij,
   terminalName,
 } from "./managed.ts";
-import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
+import {
+  type AgentRow,
+  type ClaudeState,
+  findTranscript,
+  listAgents,
+  mapStatus,
+  mayRun,
+  rcModeOf,
+  readRegistry,
+  runningTasks,
+  sessionStatus,
+} from "./sessions.ts";
 import { SessionTerminals, Terminals } from "./terminal.ts";
 import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
@@ -90,6 +112,15 @@ const FORK_TRANSCRIPT_MS = 5000;
 const REMOVE_WAIT_MS = 8000;
 const MAX_INPUT = 20_000;
 const INTERRUPT_SETTLE_MS = 1500;
+/**
+ * At least this long between two stops (Esc) of a session: Claude Code takes a second Esc soon after one as a double
+ * Esc, which opens its rewind dialog, and the session then waits on that. A stop asked again meanwhile is the same stop.
+ */
+const INTERRUPT_REPEAT_MS = 3000;
+/** How many background tasks one stop goes through at most, and how many keys move the cursor of their list at most. */
+const MAX_TASK_STOPS = 20;
+const MAX_TASK_MOVES = 30;
+const STOP_BUSY_TYPING = "いま端末に入力しているため、止められませんでした。少し待ってから、もう一度押してください。";
 /** Claude Code's question dialog (AskUserQuestion, 2.1.325), at the bottom of the screen: its last choice. */
 const QUESTION_DIALOG_RE = /Chat about this/;
 /** Said when this machine cannot make a terminal for a session (see terminalWorks). */
@@ -138,6 +169,8 @@ interface Tracked {
   /** Sessions started from Gasho: the tokens they used, and when they were last counted. */
   tokens?: TokenCounter;
   tokensAt?: number;
+  /** Claude Code's own state of the session, as its registry has it (see RegistryInfo.status), else as its list does. */
+  claude?: ClaudeState;
 }
 
 /** What happened to the switches asked for with an input (`id`: the request of the input that was handled). */
@@ -187,6 +220,8 @@ export class Daemon {
   private titleSent = new Set<string>();
   /** Until when input must wait after an interrupt, so Claude Code has put the stopped prompt back first. */
   private settleUntil = new Map<string, number>();
+  /** When each session was last asked to stop (see INTERRUPT_REPEAT_MS). */
+  private lastStop = new Map<string, number>();
   /** The models as Claude Code's /model picker names them on this machine, and when they were read. */
   private models: { at: number; options: ModelOption[] } | undefined;
   /** No look at the /model picker just for the model names before this time. */
@@ -397,7 +432,7 @@ export class Daemon {
     for (const m of this.managed.all()) {
       if (seen.has(m.sessionId) || isAlive(m.pid)) continue;
       this.managed.remove(m.sessionId);
-      for (const map of [this.settleUntil, this.latePicker, this.prompts, this.titleSent]) map.delete(m.sessionId);
+      for (const map of [this.settleUntil, this.lastStop, this.latePicker, this.prompts, this.titleSent]) map.delete(m.sessionId);
       await this.terminals.kill(m.terminal);
       await fsp.rm(this.attachmentsOf(m.sessionId), { recursive: true, force: true });
       log(`session ${m.name} ended; closed its terminal ${m.terminal}`);
@@ -419,11 +454,11 @@ export class Daemon {
     info.kind = row.kind;
     info.name = row.name;
     info.startedAt = row.startedAt;
-    info.status = mapStatus(row);
+    const reg = row.pid ? await readRegistry(this.cfg.claudeDir, row.pid) : undefined;
+    info.status = sessionStatus(row, reg);
+    t.claude = reg?.status ? { status: reg.status, ...(reg.statusAt ? { at: reg.statusAt } : {}) } : { status: mapStatus(row) };
     this.permissions.status(info.sessionId, info.status);
     info.waitingFor = row.waitingFor;
-
-    const reg = row.pid ? await readRegistry(this.cfg.claudeDir, row.pid) : undefined;
     info.rcMode = rcModeOf(reg);
 
     if (!t.transcript) {
@@ -449,9 +484,22 @@ export class Daemon {
     }
     info.bridgeSessionId = reg?.bridgeSessionId ?? t.meta.bridgeSessionId;
     this.applyMeta(t);
+    // What Claude Code's state, as just read, says has ended is forgotten for good (only with the time it was written:
+    // work recorded since is not for that state to judge).
+    const claude = t.claude;
+    if (claude.at !== undefined) t.meta.background?.settle((x) => mayRun(x, claude, info.startedAt));
+    this.applyTasks(t);
     info.github = await this.githubOf(info.cwd);
     info.repos = await this.reposOf(info.cwd);
     info.worktree = await this.worktreeAt(info.cwd);
+  }
+
+  /** The background work still running (see runningTasks); returns whether that changed. */
+  private applyTasks(t: Tracked): boolean {
+    const before = JSON.stringify(t.info.background ?? []);
+    const running = runningTasks(t.meta.background?.list() ?? [], t.claude ?? {}, t.info.startedAt);
+    t.info.background = running.length > 0 ? running : undefined;
+    return JSON.stringify(running) !== before;
   }
 
   private applyMeta(t: Tracked): void {
@@ -713,6 +761,8 @@ export class Daemon {
         const entries = await t.tail.poll(t.meta);
         if (t.meta.customTitle !== named && (await this.followName(t))) changed = true;
         if (await this.nameAfterTitle(t)) changed = true;
+        // Background work can start or end without an entry to show (Claude Code queues its notice first).
+        if (this.applyTasks(t)) changed = true;
         if (entries.length === 0) continue;
         this.notePrompts(t.info.sessionId, entries);
         this.hub.send({ type: "transcript.append", sessionId: t.info.sessionId, entries });
@@ -816,6 +866,7 @@ export class Daemon {
       case "session.launch":
       case "session.input":
       case "session.interrupt":
+      case "session.stopTask":
       case "session.rename":
       case "session.fork":
       case "session.remove":
@@ -836,6 +887,9 @@ export class Daemon {
               break;
             case "session.interrupt":
               result = await this.interrupt(m.sessionId);
+              break;
+            case "session.stopTask":
+              result = await this.stopTasks(m.sessionId, m.taskId);
               break;
             case "session.rename":
               result = await this.rename(m.sessionId, m.name, m.requestId);
@@ -1317,7 +1371,7 @@ export class Daemon {
     if (!m) return { ok: false, error: "このセッションは削除できません。削除できるのは、Gasho が起動したセッションだけです。" };
     // From here on nothing is typed into it, and Gasho no longer shows it.
     this.managed.remove(sessionId);
-    for (const map of [this.settleUntil, this.latePicker, this.prompts, this.titleSent]) map.delete(sessionId);
+    for (const map of [this.settleUntil, this.lastStop, this.latePicker, this.prompts, this.titleSent]) map.delete(sessionId);
     await this.managed.save();
     this.emitSessions();
     const row = (await listAgents(this.cfg.claudeBin).catch(() => [] as AgentRow[])).find((r) => r.pid === m.pid);
@@ -1412,10 +1466,13 @@ export class Daemon {
     }
   }
 
-  /** The session's status right now (not the last poll), so input is never typed into a busy session. */
+  /**
+   * The session's status right now (not the last poll), so input is never typed into a busy session. Idle while only
+   * shells and monitors run on in the background (see sessionStatus).
+   */
   private async currentStatus(pid: number): Promise<string | undefined> {
     const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid);
-    return row ? mapStatus(row) : undefined;
+    return row ? sessionStatus(row, await readRegistry(this.cfg.claudeDir, pid)) : undefined;
   }
 
   /**
@@ -1791,18 +1848,216 @@ export class Daemon {
     return read ? "read" : "not-read";
   }
 
+  /**
+   * Stops Claude (session.interrupt): its turn with Esc, as in the terminal. Once the turn has ended, Claude Code still
+   * reports the session as busy while subagents or workflows that Claude started run on in the background (Claude
+   * goes on when they report); Esc would stop nothing then, so those are stopped instead (see stopTasks). Shells and
+   * monitors are not: the session is idle while only they run, and they are stopped from the list of its background
+   * work. One stop at a time (see INTERRUPT_REPEAT_MS).
+   */
   private async interrupt(sessionId: string): Promise<CommandResult> {
     const m = this.managed.get(sessionId);
     if (!m) return { ok: false, error: "このセッションは Gasho から止められません。公式アプリで止めてください。" };
-    if ((await this.currentStatus(m.pid)) !== "busy") return { ok: false, error: "作業中ではありません。" };
+    if (Date.now() - (this.lastStop.get(sessionId) ?? 0) < INTERRUPT_REPEAT_MS) return { ok: true };
+    if ((await this.currentStatus(m.pid)) !== "busy") {
+      const running = this.tracked.get(sessionId)?.info.background?.length;
+      return {
+        ok: false,
+        error: running ? "Claude の作業は終わっています。バックグラウンドで動いているものは、その一覧の「止める」で止めてください。" : "作業中ではありません。",
+      };
+    }
+    this.lastStop.set(sessionId, Date.now());
+    const screen = await this.terminals.screen(m.terminal).catch(() => undefined);
+    if (screen && waitingForBackground(screen.plain)) {
+      log(`${m.name}: Claude waits for work in the background; stopping its subagents and workflows`);
+      return this.stopTasks(sessionId, undefined, (kind) => kind === "agent" || kind === "workflow");
+    }
     // An input whose Enter came back "unsure" has been taken if the session is busy: it must not be sent again when
     // Claude Code puts the stopped text back into the box.
     const head = this.managed.peek(sessionId);
     if (head?.entered) head.seenBusy = true;
     await this.terminals.keys(m.terminal, "Esc");
+    this.lastStop.set(sessionId, Date.now());
     this.settleUntil.set(sessionId, Date.now() + INTERRUPT_SETTLE_MS);
     this.scheduleRefresh(500);
     return { ok: true };
+  }
+
+  /**
+   * Stops work running in the background (session.stopTask): the task `taskId` of the session's `background`, or else
+   * all the work that `which` takes (all of it without). Done as by hand in Claude Code's list of background tasks
+   * (see openTasks): the cursor is moved to the task's row, x stops it, and Esc closes the list. Claude Code then
+   * tells Claude that the person stopped it. A key is pressed only when the screen shows what it is for; nothing else
+   * is typed into the session meanwhile.
+   */
+  private async stopTasks(sessionId: string, taskId?: string, which?: (kind: BackgroundTaskKind) => boolean): Promise<CommandResult> {
+    const m = this.managed.get(sessionId);
+    if (!m) return { ok: false, error: "このセッションは Gasho から起動したものではないため、止められません。" };
+    const known = this.tracked.get(sessionId)?.info.background ?? [];
+    const target = taskId === undefined ? undefined : known.find((x) => x.id === taskId);
+    if (taskId !== undefined && !target) return { ok: false, error: "このタスクは、もう終わっています。" };
+    if (this.flushing.has(sessionId)) return { ok: false, error: STOP_BUSY_TYPING };
+    this.flushing.add(sessionId);
+    try {
+      const opened = await this.openTasks(m);
+      if (typeof opened === "string") return { ok: false, error: opened };
+      let stopped = 0;
+      let error: string | undefined;
+      for (let i = 0; i < MAX_TASK_STOPS && !error; i++) {
+        const d = await this.readTasks(m.terminal);
+        // The view of one task closes once it is stopped.
+        if (!d) break;
+        if (d.view === "details") {
+          await this.terminals.keys(m.terminal, "Left");
+          if (!(await this.waitTasks(m.terminal, (x) => x?.view === "list"))) error = "Claude Code のタスクの一覧を開けませんでした。";
+          continue;
+        }
+        const active = d.rows.filter(taskRowActive);
+        const wanted = (r: TaskRow) => {
+          if (!which) return true;
+          const kind = this.kindOfRow(r, known);
+          return kind !== undefined && which(kind);
+        };
+        const row = target ? this.rowOfTask(active, target, known) : active.find(wanted);
+        if (typeof row === "string") error = row;
+        if (!row || typeof row === "string") break;
+        if (!(await this.selectTaskRow(m.terminal, row, stopped > 0))) {
+          error = "Claude Code のタスクの一覧で、止めるタスクを選べませんでした。";
+          break;
+        }
+        await this.terminals.keys(m.terminal, "x");
+        const left = (x: TasksDialog | undefined) => x?.view !== "list" || x.rows.filter(taskRowActive).length < active.length;
+        if (!(await this.waitTasks(m.terminal, left))) {
+          error = "タスクが止まったかどうか、確かめられませんでした。";
+          break;
+        }
+        stopped++;
+        if (target) break;
+      }
+      await this.closeTasks(m.terminal);
+      log(`${m.name}: stopped ${stopped} background task(s)${error ? ` (${error})` : ""}`);
+      if (error && stopped === 0) return { ok: false, error };
+      if (error) return { ok: true, warning: `${stopped} 件は止めましたが、${error}` };
+      if (stopped === 0) return { ok: true, warning: "止めるものは動いていませんでした。" };
+      return { ok: true };
+    } catch (e) {
+      log(`${m.name}: could not stop background work`, e);
+      return { ok: false, error: "端末を操作できなかったため、止められませんでした。" };
+    } finally {
+      this.flushing.delete(sessionId);
+      this.scheduleRefresh(500);
+    }
+  }
+
+  /**
+   * Opens Claude Code's list of background tasks in a session's terminal, from its prompt box: with /tasks once
+   * Claude's turn has ended; while it runs (/tasks would only wait in Claude Code's queue), with ↓, which gives the keys
+   * to the item for the background tasks under the prompt box, and Enter. Enter only once that item shows it has the
+   * keys: on the prompt box, Enter could send Claude Code's suggestion for the next message. Returns the list (or the
+   * view of its only task), or why it was not opened.
+   */
+  private async openTasks(m: ManagedSession): Promise<TasksDialog | string> {
+    const status = await this.currentStatus(m.pid);
+    if (status === "waiting") return "Claude Code が確認を待っているため、止められませんでした。確認に答えてから、もう一度押してください。";
+    const screen = await this.terminals.screen(m.terminal);
+    const open = tasksDialog(screen.plain);
+    if (open) return open;
+    const typed = typedInBox(screen);
+    if (typed === undefined) return "端末にほかの画面が開いているため、止められませんでした。";
+    if (typed !== "") return "端末の入力欄に書きかけの文があるため、止められませんでした。";
+    if (status === "busy" && !waitingForBackground(screen.plain)) {
+      await this.terminals.keys(m.terminal, "Down");
+      const focused = await this.waitScreenOf(m.terminal, (s) => tasksItemFocused(s) || agentRowFocused(s.plain), 1500);
+      if (!focused || !tasksItemFocused(focused)) {
+        // ↓ went to the row of subagents under the footer (when only they run): ↑ gives the keys back to the box.
+        if (focused) await this.terminals.keys(m.terminal, "Up");
+        return "Claude の作業中は、これを止められませんでした。作業が終わってから、もう一度押してください。";
+      }
+      await this.terminals.keys(m.terminal, "Enter");
+    } else if ((await this.typeInput(m.terminal, "/tasks", false, true)) === "not-typed") {
+      return "端末に /tasks を入力できなかったため、止められませんでした。";
+    }
+    const list = await this.waitTasks(m.terminal, (d) => d !== undefined, 3000);
+    return typeof list === "object" ? list : "Claude Code のタスクの一覧が開かなかったため、止められませんでした。";
+  }
+
+  /** The row of the list of background tasks that shows `task`, or why none can be told. */
+  private rowOfTask(active: TaskRow[], task: BackgroundTask, known: BackgroundTask[]): TaskRow | string | undefined {
+    let rows = active.filter((r) => taskRowShows(r, [task.command, task.title]));
+    // A label that is not the task's own text: the only task of its kind on both sides is the same task.
+    if (rows.length === 0) {
+      const ofKind = active.filter((r) => taskRowKind(r) === task.kind);
+      if (ofKind.length === 1 && known.filter((x) => x.kind === task.kind).length === 1) rows = ofKind;
+    }
+    if (rows.length === 0) return "Claude Code のタスクの一覧に、このタスクが見つかりませんでした。もう終わっているかもしれません。";
+    if (rows.length > 1) return "Claude Code のタスクの一覧で、このタスクをほかと見分けられませんでした。端末で /tasks から止めてください。";
+    return rows[0];
+  }
+
+  /** What kind of task a row is: by the list's heading, else by the task it shows. */
+  private kindOfRow(row: TaskRow, known: BackgroundTask[]): BackgroundTaskKind | undefined {
+    return taskRowKind(row) ?? known.find((x) => taskRowShows(row, [x.command, x.title]))?.kind;
+  }
+
+  /**
+   * Moves the cursor of the list of background tasks to `row`, one key at a time, looking after each. `moved`: x has
+   * stopped a task in this list already. The list then shows the cursor on the next row, but x goes to the stopped
+   * task until the cursor moves (Claude Code 2.1.325), so a cursor already on the row is moved off it and back (the
+   * last row is "Earlier in this session", never a task).
+   */
+  private async selectTaskRow(terminal: string, row: TaskRow, moved: boolean): Promise<boolean> {
+    const same = (r: TaskRow) => r.label === row.label && r.group === row.group && r.state === row.state;
+    let keyed = false;
+    for (let i = 0; i < MAX_TASK_MOVES; i++) {
+      const d = await this.readTasks(terminal);
+      if (d?.view !== "list") return false;
+      const to = d.rows.findIndex(same);
+      if (to < 0) return false;
+      if (d.rows[to]!.selected && (keyed || !moved)) return true;
+      const at = d.rows.findIndex((r) => r.selected);
+      // No row has the cursor: it is on "Earlier in this session", under the tasks.
+      await this.terminals.keys(terminal, at === to ? "Down" : at < 0 || at > to ? "Up" : "Down");
+      keyed = true;
+      await sleep(150);
+    }
+    return false;
+  }
+
+  /** Closes the list of background tasks (or the view of one) with Esc, while it is open: Esc goes nowhere else. */
+  private async closeTasks(terminal: string): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      if (!(await this.readTasks(terminal))) return;
+      await this.terminals.keys(terminal, "Esc");
+      if (await this.waitTasks(terminal, (d) => d === undefined, 1500)) return;
+    }
+    log(`could not close the list of background tasks in ${terminal}`);
+  }
+
+  private async readTasks(terminal: string): Promise<TasksDialog | undefined> {
+    const s = await this.terminals.screen(terminal).catch(() => undefined);
+    return s ? tasksDialog(s.plain) : undefined;
+  }
+
+  /** Waits until the list of background tasks (undefined: none open) is as `done` says; returns it, or false. */
+  private async waitTasks(terminal: string, done: (d: TasksDialog | undefined) => boolean, ms = 2000): Promise<TasksDialog | true | false> {
+    for (let waited = 0; waited < ms; waited += 150) {
+      await sleep(150);
+      const s = await this.terminals.screen(terminal).catch(() => undefined);
+      if (!s) continue;
+      const d = tasksDialog(s.plain);
+      if (done(d)) return d ?? true;
+    }
+    return false;
+  }
+
+  /** Waits until the screen of a terminal satisfies `done` (polling every 150 ms, up to `ms`). */
+  private async waitScreenOf(terminal: string, done: (s: Screen) => boolean, ms: number): Promise<Screen | undefined> {
+    for (let waited = 0; waited < ms; waited += 150) {
+      await sleep(150);
+      const s = await this.terminals.screen(terminal).catch(() => undefined);
+      if (s && done(s)) return s;
+    }
+    return undefined;
   }
 
   /**

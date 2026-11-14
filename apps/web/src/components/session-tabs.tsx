@@ -84,6 +84,16 @@ export function SessionTabs({
             >
               <StatusDot status={machine.connected ? s.status : "unknown"} />
               <span className="truncate">{sessionLabel(s)}</span>
+              {/* Work Claude started that runs on in the background (listed above the chat box, where it can be stopped). */}
+              {machine.connected && s.background?.length ? (
+                <LoaderCircle
+                  role="img"
+                  aria-label={`バックグラウンドで ${s.background.length} 件実行中`}
+                  className="size-3 shrink-0 animate-spin text-sky-400 motion-reduce:animate-none"
+                >
+                  <title>{`バックグラウンドで ${s.background.length} 件実行中`}</title>
+                </LoaderCircle>
+              ) : null}
             </button>
           </SessionContextMenu>
         );
