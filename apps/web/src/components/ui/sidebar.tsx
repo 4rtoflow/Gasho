@@ -263,6 +263,8 @@ function ResizeHandle({
     if (save && d.to !== d.from) onChange(d.to);
     onDrag(null);
   };
+  // Folding the sidebar (⌘B) while dragging removes the edge before the pointer is let go.
+  React.useEffect(() => () => end(false), []);
 
   return (
     <div
