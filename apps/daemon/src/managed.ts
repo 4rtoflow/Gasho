@@ -158,6 +158,53 @@ export function resumeQuestionOpen(screen: string): boolean {
   return atBottom(screen, /This session is .+? old and .+? tokens\..*Resume full ?session/, 20);
 }
 
+/**
+ * Claude Code's question whether to trust a folder it does not trust yet: "Quick safety check: Is this a project you
+ * created or one you trust? …", then "No, exit" and "Yes, I trust this folder" (2.1.323 puts "No, exit" first, with the
+ * cursor on it). Found by its two choices at the bottom of the screen, with at most the key help below them (the top of
+ * a tall question can be cut off). `onYes`: the cursor is on "Yes, I trust this folder"; `yesBelow`: it is the lower
+ * choice. `warnings`: what Claude Code points out about the folder's own settings, one paragraph each ("⚠ This folder
+ * pre-approves 1 tool permission in .claude/settings.json: Bash(ls:*) These will apply without asking. …").
+ */
+export function trustQuestion(screen: string): { onYes: boolean; yesBelow: boolean; warnings: string[] } | undefined {
+  const lines = screenLines(screen);
+  if (promptBoxAtBottom(lines)) return undefined;
+  const yes = lines.findLastIndex((l) => /^\s*(?:❯\s*)?(?:\d+\.\s+)?Yes, I trust this folder\s*$/.test(l));
+  const no = lines.findLastIndex((l) => /^\s*(?:❯\s*)?(?:\d+\.\s+)?No, exit\s*$/.test(l));
+  if (yes < 0 || no < 0 || Math.abs(yes - no) > 2) return undefined;
+  if (lines.slice(Math.max(yes, no) + 1).filter(Boolean).length > 3) return undefined;
+  return { onYes: /^\s*❯/.test(lines[yes] ?? ""), yesBelow: yes > no, warnings: trustWarnings(lines.slice(0, Math.min(yes, no))) };
+}
+
+/** The paragraphs between "… execute files here." and "Security guide" of the trust question: its warnings. */
+function trustWarnings(lines: string[]): string[] {
+  const start = lines.findLastIndex((l) => /execute files here\.?\s*$/.test(l));
+  const end = lines.findLastIndex((l) => /^\s*Security guide\s*$/.test(l));
+  if (start < 0 || end <= start) return [];
+  const paragraphs: string[] = [];
+  let current: string[] = [];
+  for (const l of [...lines.slice(start + 1, end), ""]) {
+    if (l.trim()) current.push(l.trim());
+    else if (current.length > 0) {
+      paragraphs.push(current.join(" ").slice(0, 600));
+      current = [];
+    }
+  }
+  return paragraphs.slice(0, 12);
+}
+
+/**
+ * Claude Code's question about the MCP servers in a folder's .mcp.json that it has not been told about yet, asked
+ * once the folder is trusted: "New MCP server found in this project: demo" (or "2 new MCP servers found in this
+ * project", with check boxes). Esc answers it like "Continue without using this MCP server": the session starts
+ * without them, and Claude Code saves that in the folder's .claude/settings.local.json (`disabledMcpjsonServers`), so
+ * it does not ask again; /mcp turns them on.
+ */
+export function mcpQuestionOpen(screen: string): boolean {
+  if (promptBoxAtBottom(screenLines(screen))) return false;
+  return atBottom(screen, /\bnew MCP servers? found in this project\b/i, 20);
+}
+
 /** Whether the output of the latest /model on the screen says the model was switched for this session only. */
 export function switchedForSession(screen: string): boolean {
   const flat = screen.replace(/\s+/g, " ");
@@ -166,13 +213,19 @@ export function switchedForSession(screen: string): boolean {
 }
 
 /**
- * The prompt box: the last two horizontal rules on the screen, the first one followed by a line that starts with "❯"
- * (or "!" when a text starting with "!" has put the box in shell mode).
+ * The prompt box: the last horizontal rule on the screen (the one under the box); above it, the box's first line,
+ * which starts with "❯" (or "!" when a text starting with "!" has put the box in shell mode), with only the indented
+ * lines a long text folds into in between; and the rule right above that line. Claude Code writes the session's name
+ * (given with /rename) and "ultracode" (while it is on) into that rule, at its right: "──── name ─". In Gasho's
+ * 50-column terminals, a long name leaves only a few "─" before it, or none.
  */
 function promptBox(lines: string[]): { top: number; bottom: number } | undefined {
-  const rules = lines.flatMap((l, i) => (/^─{8,}/.test(l) ? [i] : []));
-  const [top, bottom] = rules.slice(-2);
-  if (top === undefined || bottom === undefined || !/^[❯!]/.test(lines[top + 1] ?? "")) return undefined;
+  let bottom = lines.length - 1;
+  while (bottom >= 0 && !/^─{8,}/.test(lines[bottom]!)) bottom--;
+  let first = bottom - 1;
+  while (first > 0 && /^(?:\s|$)/.test(lines[first]!)) first--;
+  const top = first - 1;
+  if (top < 0 || !/^[❯!]/.test(lines[first]!) || !/^─|─$/.test(lines[top]!)) return undefined;
   return { top, bottom };
 }
 
@@ -210,7 +263,8 @@ export function promptBoxLines(screen: string): string[] | undefined {
 
 /**
  * Whether something at the bottom of the screen has the keys instead of the prompt box: the /model picker, the
- * question before a switch, a permission dialog, the trust dialog or the question when resuming an old session.
+ * question before a switch, a permission dialog, the trust dialog, the question about a folder's MCP servers or the
+ * question when resuming an old session.
  */
 export function dialogOpen(screen: string): boolean {
   if (promptBoxAtBottom(screenLines(screen))) return false;
@@ -219,6 +273,7 @@ export function dialogOpen(screen: string): boolean {
     switchQuestion(screen) !== undefined ||
     atBottom(screen, PERMISSION_PROMPT_RE) ||
     atBottom(screen, TRUST_PROMPT_RE) ||
+    mcpQuestionOpen(screen) ||
     resumeQuestionOpen(screen)
   );
 }
@@ -279,6 +334,12 @@ export interface QueuedInput {
   enteredAt?: number;
   /** The session was seen busy since Enter was pressed: Claude Code took it (used when its transcript is not read). */
   seenBusy?: boolean;
+  /**
+   * Sent by gasho-daemon on its own, not asked for by anyone (the name from the first message; see
+   * ManagedSession.autoName). It never empties a prompt box that holds text, which someone may be typing in the
+   * session's terminal: it waits until the box is empty. It does not count as an input waiting (`pendingInputs`).
+   */
+  auto?: boolean;
 }
 
 /**
@@ -293,6 +354,18 @@ export function refusedCommand(text: string): string | undefined {
   if (/^\s*\/effort(?=\s|$)/i.test(text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(text)) {
     return "Effort は、入力欄の Effort のボタンで切り替えてください。/effort で切り替えると、これから始めるすべてのセッションの既定の Effort も変わります（/effort ultracode on と off は、このセッションだけなので送れます）。";
   }
+  return undefined;
+}
+
+/**
+ * Why an input in Claude Code's shell mode ("!" and a command, `body` trimmed) cannot be typed, or undefined: one with
+ * nothing after the "!", or one with files, which would be mentioned on lines of their own after the command (@path)
+ * and run by the shell too.
+ */
+export function shellInputProblem(body: string, files: number): string | undefined {
+  if (!body.startsWith("!")) return undefined;
+  if (!body.slice(1).trim()) return "「!」のあとに、実行するコマンドを入れてください。";
+  if (files > 0) return "シェルのコマンド（「!」で始まる入力）には、ファイルを添付できません。";
   return undefined;
 }
 
@@ -417,10 +490,32 @@ export interface ManagedSession {
   /** A fork: the session it was forked from, and when (its transcript starts with a copy of that conversation). */
   forkOf?: string;
   forkedAt?: number;
+  /**
+   * Started without a name (so named "<folder>-gasho" for now): it is named after its first message, with the title
+   * Claude Code gives the conversation from it (`ai-title`). Cleared once Claude Code records a name for it (the
+   * /rename sent for that title, or one given in its terminal) or it is renamed from Gasho, so it happens once, and
+   * a /rename lost with a restart of gasho-daemon (waiting inputs are not saved) is sent again.
+   */
+  autoName?: boolean;
 }
 
 /** Names of sessions started from Gasho: at most this many characters. */
 export const MAX_SESSION_NAME = 60;
+
+/**
+ * The name a session takes from Claude Code's title of its conversation (see ManagedSession.autoName): one line,
+ * clipped to the length a name may have. Undefined when nothing is left.
+ */
+export function titleName(title: string): string | undefined {
+  const line = title.replace(/[\p{Cc}\s]+/gu, " ").trim();
+  let name = "";
+  // By characters, not UTF-16 units, so no emoji is cut in half.
+  for (const ch of line) {
+    if (name.length + ch.length > MAX_SESSION_NAME) break;
+    name += ch;
+  }
+  return name.trimEnd() || undefined;
+}
 
 /**
  * Checks a session's name for Gasho and for Claude Code's /rename, which takes the rest of its line. Returns the name
@@ -617,6 +712,14 @@ export class ManagedSessions {
     const m = this.sessions.get(sessionId);
     if (!m || m.name === name) return false;
     m.name = name;
+    return true;
+  }
+
+  /** The session is named now, so it no longer takes a name from its first message. Whether it was still to. */
+  named(sessionId: string): boolean {
+    const m = this.sessions.get(sessionId);
+    if (!m?.autoName) return false;
+    delete m.autoName;
     return true;
   }
 

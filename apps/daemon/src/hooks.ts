@@ -2,11 +2,13 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import type { HookEvent } from "@gasho/protocol";
+import type { HookReply } from "./permissions.ts";
 import { clip, inputSummary, log, str } from "./util.ts";
 
 /**
  * Events Gasho registers. SessionStart is left out because the docs say it does not support http hooks;
- * new sessions are found through `claude agents --json`. PermissionRequest comes with the approval feature.
+ * new sessions are found through `claude agents --json`. PermissionRequest is held until it is answered (see
+ * permissions.ts), with a timeout of its own.
  */
 export const HOOK_EVENTS = [
   "SessionEnd",
@@ -17,7 +19,14 @@ export const HOOK_EVENTS = [
   "Notification",
   "Stop",
   "StopFailure",
+  "PermissionRequest",
 ] as const;
+
+/**
+ * How long Claude Code waits for an answer from Gasho to a permission request (seconds). Its dialog is shown meanwhile
+ * and can be answered there; past this, the hook gives no decision and only the dialog is left.
+ */
+export const PERMISSION_TIMEOUT_S = 3600;
 
 export const SECRET_HEADER = "x-gasho-secret";
 export const SECRET_ENV = "GASHO_HOOK_SECRET";
@@ -34,7 +43,9 @@ export function hookUrl(port: number): string {
 export function hooksConfig(port: number, secret?: string): Record<string, unknown> {
   const handler: Record<string, unknown> = { type: "http", url: hookUrl(port), timeout: 5 };
   if (secret) handler.headers = { [SECRET_HEADER]: secret };
-  return Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [handler] }]]));
+  return Object.fromEntries(
+    HOOK_EVENTS.map((e) => [e, [{ hooks: [e === "PermissionRequest" ? { ...handler, timeout: PERMISSION_TIMEOUT_S } : handler] }]]),
+  );
 }
 
 /** Reduces a hook payload to what the dashboard needs. Tool inputs and outputs are not forwarded in full. */
@@ -80,9 +91,17 @@ export interface HookServerOptions {
   port: number;
   secret: string | undefined;
   onEvent: (payload: Record<string, unknown>) => void;
+  /**
+   * A PermissionRequest: its response waits for `reply` (a decision, or none). Returns what to do when the connection
+   * closes before that (Claude Code gave up). Without it, PermissionRequest is answered at once like other hooks.
+   */
+  onPermissionRequest?: (payload: Record<string, unknown>, reply: HookReply) => (() => void) | undefined;
 }
 
-/** Answers every request at once with an empty 200, so a hook never delays Claude Code. */
+/**
+ * Answers every request at once with an empty 200, so a hook never delays Claude Code; a PermissionRequest is passed
+ * to `onPermissionRequest` (and to `onEvent`) and answered when it says.
+ */
 export function startHookServer(opts: HookServerOptions): http.Server {
   let lastRejectLog = 0;
   const server = http.createServer((req, res) => {
@@ -106,17 +125,44 @@ export function startHookServer(opts: HookServerOptions): http.Server {
       else chunks.push(c);
     });
     req.on("end", () => {
-      res.writeHead(200, { "content-length": "0" }).end();
+      let payload: Record<string, unknown> | undefined;
       try {
-        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-        if (payload && typeof payload === "object") opts.onEvent(payload as Record<string, unknown>);
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+        if (parsed && typeof parsed === "object") payload = parsed as Record<string, unknown>;
       } catch (e) {
         log("ignored a hook body that is not JSON", e);
       }
+      const reply: HookReply = (body) => {
+        if (res.writableEnded || res.destroyed) return;
+        const text = body ? JSON.stringify(body) : "";
+        res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) }).end(text);
+      };
+      if (payload && payload.hook_event_name === "PermissionRequest" && opts.onPermissionRequest) {
+        const dropped = opts.onPermissionRequest(payload, reply);
+        res.on("close", () => {
+          if (!res.writableEnded) dropped?.();
+        });
+      } else {
+        reply(undefined);
+      }
+      if (payload) opts.onEvent(payload);
     });
   });
   server.listen(opts.port, opts.host, () => log(`hooks: listening on ${hookUrl(opts.port)}`));
   return server;
+}
+
+/** The events a Claude Code settings file (its text) sends to Gasho's hook URL. */
+export function installedHookEvents(settingsText: string, port: number): string[] {
+  try {
+    const hooks = (JSON.parse(settingsText) as { hooks?: Record<string, unknown> }).hooks ?? {};
+    const url = hookUrl(port);
+    return Object.entries(hooks)
+      .filter(([, groups]) => Array.isArray(groups) && groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some((h: { url?: unknown }) => h?.url === url)))
+      .map(([event]) => event);
+  } catch {
+    return [];
+  }
 }
 
 /**

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { credentialsPath, loadCredentials } from "./credentials.ts";
-import { hookUrl } from "./hooks.ts";
+import { hookUrl, installedHookEvents } from "./hooks.ts";
 
 const execFileP = promisify(execFile);
 
@@ -61,16 +61,24 @@ function listening(port: number): Promise<boolean> {
   });
 }
 
-const DAEMON = "node apps/daemon/src/cli.ts";
-
-/** What gasho-daemon needs on this machine, and what each missing thing costs. */
-export async function doctor(o: { claudeBin: string; ghBin: string; hookPort: number; settingsFile: string }): Promise<Check[]> {
+/**
+ * What gasho-daemon needs on this machine, and what each missing thing costs. `command`: how to type gasho-daemon
+ * here, for the hints (see install.ts).
+ */
+export async function doctor(o: {
+  claudeBin: string;
+  ghBin: string;
+  hookPort: number;
+  settingsFile: string;
+  command?: string;
+}): Promise<Check[]> {
+  const DAEMON = o.command ?? "node apps/daemon/src/cli.ts";
   const checks: Check[] = [];
   const node = versionOf(process.versions.node) ?? [0];
   checks.push(
     atLeast(node, [24])
       ? { level: "ok", name: "Node.js", detail: process.versions.node }
-      : { level: "fail", name: "Node.js", detail: process.versions.node, hint: "Node.js 24 以上を入れてください（TypeScript をそのまま実行するため）" },
+      : { level: "fail", name: "Node.js", detail: process.versions.node, hint: "Node.js 24 以上を入れてください" },
   );
 
   const file = credentialsPath();
@@ -125,22 +133,25 @@ export async function doctor(o: { claudeBin: string; ghBin: string; hookPort: nu
 
   const gh = await run(o.ghBin, ["--version"]);
   if (!gh || gh === "error") {
-    checks.push({ level: "warn", name: "GitHub CLI", detail: "ありません", hint: "Issues と Pull requests のパネルに使います。gh を入れて gh auth login でログインしてください" });
+    checks.push({ level: "warn", name: "GitHub CLI", detail: "ありません", hint: "Issues と Pull requests のパネルと、新しいセッションの「GitHub から clone」に使います。gh を入れて gh auth login でログインしてください" });
   } else {
     const auth = await run(o.ghBin, ["auth", "status"]);
     const loggedIn = auth !== undefined && /Logged in to/i.test(auth);
     checks.push(
       loggedIn
         ? { level: "ok", name: "GitHub CLI", detail: `${(versionOf(gh) ?? []).join(".")}、ログイン済み` }
-        : { level: "warn", name: "GitHub CLI", detail: "ログインしていません", hint: "Issues と Pull requests のパネルに使います。gh auth login でログインしてください" },
+        : { level: "warn", name: "GitHub CLI", detail: "ログインしていません", hint: "Issues と Pull requests のパネルと、新しいセッションの「GitHub から clone」に使います。gh auth login でログインしてください" },
     );
   }
 
   const settings = await fs.readFile(o.settingsFile, "utf8").catch(() => "");
+  const hookEvents = installedHookEvents(settings, o.hookPort);
   checks.push(
-    settings.includes(hookUrl(o.hookPort))
-      ? { level: "ok", name: "hooks", detail: `${o.settingsFile} に入っています` }
-      : { level: "warn", name: "hooks", detail: "入っていません", hint: "通知（応答の完了、確認待ち）に使います。docs/daemon-setup.md の「通知を使う」を見てください" },
+    !settings.includes(hookUrl(o.hookPort))
+      ? { level: "warn", name: "hooks", detail: "入っていません", hint: "通知（応答の完了、確認待ち）と、Gasho からの権限の確認への回答に使います。docs/daemon-setup.md の「通知を使う」を見てください" }
+      : !hookEvents.includes("PermissionRequest")
+        ? { level: "warn", name: "hooks", detail: "PermissionRequest が入っていません", hint: "Gasho から権限の確認に答えるのに使います。hooks install をもう一度実行してください" }
+        : { level: "ok", name: "hooks", detail: `${o.settingsFile} に入っています` },
   );
 
   checks.push(
@@ -179,10 +190,12 @@ export function formatChecks(checks: Check[], version: string): string {
 export const ENV_FILE = "~/.config/gasho/daemon.env";
 
 export interface ServiceInput {
-  /** The Node.js that runs the daemon. */
+  /** The Node.js that runs the daemon (its folder goes first on PATH). */
   node: string;
-  /** The repository's folder. */
-  repo: string;
+  /** The command that runs gasho-daemon, before "run" (see serviceCommand in install.ts). */
+  argv: string[];
+  /** The folder it runs in: the repository's, or the home folder. */
+  cwd: string;
   /** PATH for the daemon: Claude Code, zellij, gh and git must be found in it. */
   path: string;
   home: string;
@@ -205,8 +218,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${o.repo.replace(/%/g, "%%")}
-ExecStart=${systemdQuote(o.node)} ${systemdQuote(path.join(o.repo, "apps/daemon/src/cli.ts"))} run
+WorkingDirectory=${o.cwd.replace(/%/g, "%%")}
+ExecStart=${o.argv.map(systemdQuote).join(" ")} run
 Environment=${systemdQuote(`PATH=${o.path}`)}
 # GASHO_HOOK_SECRET などは、ここではなく ${ENV_FILE} に書く（gasho-daemon が起動するときに読む）
 Restart=on-failure
@@ -233,12 +246,10 @@ export function launchdPlist(o: ServiceInput): string {
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${xml(o.node)}</string>
-    <string>${xml(path.join(o.repo, "apps/daemon/src/cli.ts"))}</string>
-    <string>run</string>
+${[...o.argv, "run"].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
   </array>
   <key>WorkingDirectory</key>
-  <string>${xml(o.repo)}</string>
+  <string>${xml(o.cwd)}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>

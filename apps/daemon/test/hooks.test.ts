@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { hooksConfig, installHooks, startHookServer, summarizeHook } from "../src/hooks.ts";
+import { hooksConfig, installedHookEvents, installHooks, startHookServer, summarizeHook } from "../src/hooks.ts";
 
 type Group = { hooks: Array<Record<string, unknown>> };
 
@@ -38,7 +38,9 @@ test("summarizeHook keeps the command, the notification type and the last messag
 test("hooksConfig registers http hooks with a literal secret header and leaves out SessionStart", () => {
   const cfg = hooksConfig(7741, "s3cret");
   assert.ok(!("SessionStart" in cfg));
-  assert.ok(!("PermissionRequest" in cfg));
+  // A permission request waits for an answer from Gasho, so it gets a long timeout of its own.
+  assert.equal((cfg.PermissionRequest as Group[])[0]?.hooks[0]?.timeout, 3600);
+  assert.equal((cfg.Stop as Group[])[0]?.hooks[0]?.timeout, 5);
   const handler = (cfg.Stop as Group[])[0]?.hooks[0];
   assert.equal(handler?.type, "http");
   assert.equal(handler?.url, "http://127.0.0.1:7741/hooks");
@@ -87,4 +89,14 @@ test("hook server answers 200 at once and rejects a wrong secret", async () => {
   } finally {
     server.close();
   }
+});
+
+test("installedHookEvents lists the events sent to Gasho, so an install without PermissionRequest can be told apart", () => {
+  const ours = { type: "http", url: "http://127.0.0.1:7741/hooks" };
+  const text = JSON.stringify({
+    hooks: { Stop: [{ hooks: [ours] }], PreToolUse: [{ hooks: [{ type: "command", command: "x" }] }], Notification: [{ hooks: [ours] }] },
+  });
+  assert.deepEqual(installedHookEvents(text, 7741), ["Stop", "Notification"]);
+  assert.deepEqual(installedHookEvents(JSON.stringify({ hooks: hooksConfig(7741) }), 7741).includes("PermissionRequest"), true);
+  assert.deepEqual(installedHookEvents("not json", 7741), []);
 });

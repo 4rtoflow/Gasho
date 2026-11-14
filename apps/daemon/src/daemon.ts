@@ -17,11 +17,13 @@ import type {
   TranscriptEntry,
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
+import { cloneRepo, createFolder } from "./folders.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
 import { ghError, listGitHub, viewGitHub } from "./github.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
+import { PermissionRequests } from "./permissions.ts";
 import {
   atBottom,
   bannerModel,
@@ -36,6 +38,7 @@ import {
   launchableFolders,
   launchArgs,
   ManagedSessions,
+  mcpQuestionOpen,
   type ManagedSession,
   modelPickerOptions,
   PERMISSION_PROMPT_RE,
@@ -52,11 +55,14 @@ import {
   safeFileName,
   type Screen,
   sessionName,
+  shellInputProblem,
   statusLine,
   surveyOpen,
   switchedForSession,
   switchQuestion,
+  titleName,
   TRUST_PROMPT_RE,
+  trustQuestion,
   typedInBox,
   Zellij,
   zellijSessionName,
@@ -65,7 +71,7 @@ import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type Age
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.9.0";
+export const DAEMON_VERSION = "0.10.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -78,6 +84,9 @@ const FORK_TRANSCRIPT_MS = 5000;
 const REMOVE_WAIT_MS = 8000;
 const MAX_INPUT = 20_000;
 const INTERRUPT_SETTLE_MS = 1500;
+/** Said when Claude Code asked about a folder's new MCP servers while starting, and was answered "not now". */
+const MCP_DECLINED =
+  "このフォルダーの .mcp.json にある MCP サーバーは、使わない設定にして起動しました（Claude Code の確認に「使わない」と答えました）。使うときは、端末で claude を起動して /mcp から有効にしてください。";
 const MODEL_NAMES: Record<SessionModel, string> = { default: "既定のモデル", opus: "Opus", fable: "Fable", sonnet: "Sonnet", haiku: "Haiku" };
 const EFFORT_NAMES: Record<EffortLevel, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "xHigh", max: "Max" };
 /** What this gasho-daemon can switch or carry with an input (MachineInfo.features). */
@@ -88,6 +97,8 @@ const ENTER_WAIT_MS = 8000;
 const UNSURE_RETRY_MS = 20_000;
 /** When nothing could be typed, how long to wait before trying again. */
 const RETRY_MS = 5000;
+/** …for what gasho-daemon sends on its own, which waits while the prompt box holds text (someone may be typing). */
+const AUTO_RETRY_MS = 30_000;
 /** How long to watch for a /model picker that Claude Code may still open (see closeLatePicker). */
 const LATE_PICKER_WAIT_MS = 10_000;
 /** A session is used to read the model names only once it has run this long (Claude Code has finished starting). */
@@ -151,9 +162,13 @@ export class Daemon {
   private repos = new Map<string, { at: number; repos?: SessionRepo[] }>();
   private zellij: Zellij;
   private managed: ManagedSessions;
+  /** Permission requests held until they are answered (in Gasho, or elsewhere). */
+  private permissions = new PermissionRequests(() => this.emitSessions());
   private canLaunch = false;
   private folders: string[] = [];
   private flushing = new Set<string>();
+  /** Sessions whose /rename to the name from the first message was sent, until Claude Code records it (nameAfterTitle). */
+  private titleSent = new Set<string>();
   /** Until when input must wait after an interrupt, so Claude Code has put the stopped prompt back first. */
   private settleUntil = new Map<string, number>();
   /** The models as Claude Code's /model picker names them on this machine, and when they were read. */
@@ -210,7 +225,12 @@ export class Daemon {
       host: "127.0.0.1",
       port: this.cfg.hookPort,
       secret: this.cfg.hookSecret,
+      onPermissionRequest: (payload, reply) => {
+        const id = this.permissions.add(payload, reply);
+        return id ? () => this.permissions.dropped(id) : undefined;
+      },
       onEvent: (payload) => {
+        this.permissions.observe(payload);
         const ev = summarizeHook(payload);
         if (!ev) return;
         this.hub.send({ type: "hook", event: ev });
@@ -253,7 +273,9 @@ export class Daemon {
         await this.update(t, row);
       }
       for (const id of [...this.tracked.keys()]) {
-        if (!seen.has(id)) this.tracked.delete(id);
+        if (seen.has(id)) continue;
+        this.tracked.delete(id);
+        this.permissions.settleSession(id);
       }
       await this.forgetEndedSessions(seen);
       await this.readManagedScreens();
@@ -281,7 +303,7 @@ export class Daemon {
     for (const m of this.managed.all()) {
       if (seen.has(m.sessionId) || isAlive(m.pid)) continue;
       this.managed.remove(m.sessionId);
-      for (const map of [this.settleUntil, this.latePicker, this.prompts]) map.delete(m.sessionId);
+      for (const map of [this.settleUntil, this.latePicker, this.prompts, this.titleSent]) map.delete(m.sessionId);
       await this.zellij.kill(m.zellijSession);
       await fsp.rm(this.attachmentsOf(m.sessionId), { recursive: true, force: true });
       log(`session ${m.name} ended; closed zellij session ${m.zellijSession}`);
@@ -304,6 +326,7 @@ export class Daemon {
     info.name = row.name;
     info.startedAt = row.startedAt;
     info.status = mapStatus(row);
+    this.permissions.status(info.sessionId, info.status);
     info.waitingFor = row.waitingFor;
 
     const reg = row.pid ? await readRegistry(this.cfg.claudeDir, row.pid) : undefined;
@@ -369,9 +392,16 @@ export class Daemon {
     const sessions = [...this.tracked.values()]
       .map((t) => {
         const m = this.managed.get(t.info.sessionId);
-        const pending = this.managed.pending(t.info.sessionId);
+        // What gasho-daemon sends on its own (a name from the first message) is nobody's input waiting.
+        const pending = this.managed.waiting(t.info.sessionId).filter((input) => !input.auto).length;
         // A session started from Gasho keeps the name it was given (also its Remote Control name).
-        return { ...t.info, name: m?.name ?? t.info.name, managed: m ? true : undefined, pendingInputs: pending || undefined };
+        return {
+          ...t.info,
+          name: m?.name ?? t.info.name,
+          managed: m ? true : undefined,
+          pendingInputs: pending || undefined,
+          permissionRequests: this.permissions.of(t.info.sessionId),
+        };
       })
       .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
     const json = JSON.stringify(sessions);
@@ -557,6 +587,7 @@ export class Daemon {
         const named = t.meta.customTitle;
         const entries = await t.tail.poll(t.meta);
         if (t.meta.customTitle !== named && (await this.followName(t))) changed = true;
+        if (await this.nameAfterTitle(t)) changed = true;
         if (entries.length === 0) continue;
         this.notePrompts(t.info.sessionId, entries);
         this.hub.send({ type: "transcript.append", sessionId: t.info.sessionId, entries });
@@ -572,18 +603,54 @@ export class Daemon {
   /**
    * A session started from Gasho takes the name Claude Code has just recorded for it (`custom-title`): the one asked
    * for with /rename, or another when a live session on this machine holds that name already, or one given in the
-   * session's own terminal. Not while a /rename from Gasho still waits: the newer name would be undone until it is sent.
+   * session's own terminal. Not while a /rename asked for from Gasho still waits: the newer name would be undone until
+   * it is sent. A name from the first message still waiting gives way instead: it is not sent.
    * Only names recorded while the transcript is followed count, never older ones (a fork's copy may hold its source's).
    */
   private async followName(t: Tracked): Promise<boolean> {
     const id = t.info.sessionId;
     const recorded = t.meta.customTitle;
-    if (!recorded || !this.managed.has(id) || this.managed.waiting(id).some((input) => isRename(input.text))) return false;
+    if (!recorded || !this.managed.has(id)) return false;
+    if (this.managed.waiting(id).some((input) => isRename(input.text) && !input.auto)) return false;
     const checked = sessionName(recorded);
-    if ("error" in checked || !this.managed.setName(id, checked.name)) return false;
-    log(`${id} is now named "${checked.name}" (recorded by Claude Code)`);
+    if ("error" in checked) return false;
+    const dropped = this.managed.drop(id, (input) => Boolean(input.auto) && isRename(input.text));
+    const named = this.managed.named(id);
+    const renamed = this.managed.setName(id, checked.name);
+    if (!dropped && !named && !renamed) return false;
+    if (renamed) log(`${id} is now named "${checked.name}" (recorded by Claude Code)`);
     await this.managed.save().catch((e) => log("could not save the managed sessions", e));
     return true;
+  }
+
+  /**
+   * A session started from Gasho without a name is named after its first message, with the title Claude Code gives the
+   * conversation from it (`ai-title`, recorded once, soon after the first message): in Gasho at once, and in Claude
+   * Code with /rename (also its Remote Control name, so the name in the official apps), sent like an input once the
+   * session is idle, but never over text in the prompt box. Done once Claude Code records a name (followName), so only
+   * once, and not when it was named otherwise first; a /rename lost with a restart of gasho-daemon is sent again.
+   */
+  private async nameAfterTitle(t: Tracked): Promise<boolean> {
+    const id = t.info.sessionId;
+    if (!this.managed.get(id)?.autoName || !t.meta.title) return false;
+    if (t.meta.customTitle) {
+      // Named in Claude Code already (seen when the transcript is read anew, as after a restart of gasho-daemon).
+      if (this.managed.named(id)) await this.managed.save().catch((e) => log("could not save the managed sessions", e));
+      return false;
+    }
+    // Sent, or waiting to be.
+    if (this.titleSent.has(id) || this.managed.waiting(id).some((input) => input.auto)) return false;
+    const name = titleName(t.meta.title);
+    if (!name) return false;
+    const renamed = this.managed.setName(id, name);
+    this.managed.enqueue(id, { text: renameCommand(name), auto: true });
+    if (renamed) {
+      log(`${id} is named "${name}" after its first message`);
+      await this.managed.save().catch((e) => log("could not save the managed sessions", e));
+    }
+    // Usually still busy with the first message: then a refresh once it is done sends the /rename.
+    void this.flushInput(id).catch((e) => log(`could not send /rename to ${id} yet`, e));
+    return renamed;
   }
 
   /** Keeps the last user messages of a session (see `prompts`). */
@@ -618,12 +685,15 @@ export class Daemon {
       case "session.interrupt":
       case "session.rename":
       case "session.fork":
-      case "session.remove": {
+      case "session.remove":
+      case "permission.answer":
+      case "folder.create":
+      case "repo.clone": {
         let result: CommandResult;
         try {
           switch (m.type) {
             case "session.launch":
-              result = await this.launch(m.cwd, m.name);
+              result = await this.launch(m.cwd, m.name, m.trust === true);
               break;
             case "session.input":
               result = await this.input(m);
@@ -639,6 +709,17 @@ export class Daemon {
               break;
             case "session.remove":
               result = await this.remove(m.sessionId);
+              break;
+            case "permission.answer": {
+              const error = this.permissions.answer(m.sessionId, m.permissionId, m.decision);
+              result = error ? { ok: false, error } : { ok: true };
+              break;
+            }
+            case "folder.create":
+              result = await this.createFolder(m.parent, m.name);
+              break;
+            case "repo.clone":
+              result = await this.cloneRepo(m.parent, m.repo, m.name);
               break;
           }
         } catch (e) {
@@ -751,33 +832,74 @@ export class Daemon {
 
   // ---- sessions started by Gasho ----
 
-  /** Starts `claude --remote-control` in `cwd` inside a new zellij session and waits for its session id. */
-  private async launch(cwd: string, name: string | undefined): Promise<CommandResult> {
+  /**
+   * Starts `claude --remote-control` in `cwd` inside a new zellij session and waits for its session id. With `trust`,
+   * Claude Code's question whether to trust the folder is answered with yes; without it, the launch stops there.
+   */
+  private async launch(cwd: string, name: string | undefined, trust = false): Promise<CommandResult> {
     if (!this.canLaunch) return { ok: false, error: "この working server には zellij がないので、セッションを起動できません。" };
     const dir = path.resolve(cwd);
     const stat = await fsp.stat(dir).catch(() => undefined);
     if (!stat?.isDirectory()) return { ok: false, error: `フォルダーがありません：${dir}` };
+    // Without a name, "<folder>-gasho" until the first message names it (see nameAfterTitle).
+    const autoName = !name?.trim();
     const rcName = name?.trim() || `${path.basename(dir)}-gasho`;
-    const started = await this.startClaude(dir, rcName);
-    if ("error" in started) return { ok: false, error: started.error };
+    const started = await this.startClaude(dir, rcName, { trust });
+    if ("error" in started) {
+      const { error, needsTrust, trustWarnings } = started;
+      return needsTrust ? { ok: false, error, needsTrust, trustWarnings } : { ok: false, error };
+    }
     const { sessionId, zellijSession, pid } = started;
-    this.managed.add({ sessionId, zellijSession, pid, cwd: dir, name: rcName, launchedAt: Date.now() });
+    this.managed.add({ sessionId, zellijSession, pid, cwd: dir, name: rcName, launchedAt: Date.now(), ...(autoName ? { autoName } : {}) });
     await this.managed.save();
     await this.refresh();
-    return { ok: true, sessionId };
+    // A folder trusted just now is one to offer from now on.
+    void this.refreshFolders();
+    return started.mcpDeclined ? { ok: true, sessionId, warning: MCP_DECLINED } : { ok: true, sessionId };
+  }
+
+  /** Makes a folder for a session to start in (see folders.ts). */
+  private async createFolder(parent: string, name: string): Promise<CommandResult> {
+    const made = await createFolder(parent, name);
+    if ("error" in made) return { ok: false, error: made.error };
+    log(`made the folder ${made.path}`);
+    return { ok: true, path: made.path };
+  }
+
+  /** Clones a GitHub repository for a session to start in, with this machine's GitHub CLI (see folders.ts). */
+  private async cloneRepo(parent: string, repo: string, name: string | undefined): Promise<CommandResult> {
+    log(`cloning ${repo} into ${parent}`);
+    const made = await cloneRepo(this.cfg.ghBin, parent, repo, name);
+    if ("error" in made) {
+      log(`could not clone ${repo}: ${made.error}`);
+      return { ok: false, error: made.error };
+    }
+    log(`cloned ${repo} into ${made.path}`);
+    return { ok: true, path: made.path };
   }
 
   /**
    * Starts `claude --remote-control <rcName> [claudeArgs…]` in `dir` inside a new zellij session, and waits until
    * `claude agents` lists it with a session id (one that `accept` takes). With `resuming`, Claude Code's question about
    * resuming an old, long session is answered with Esc (the full session, as it is; see resumeQuestionOpen), and
-   * `resumeAsked` says so. On failure, the zellij session is closed.
+   * `resumeAsked` says so. Claude Code's question whether to trust the folder is answered with yes only when `trust`
+   * is given; otherwise nothing is started, and `needsTrust` says why. Its question about the folder's new MCP servers
+   * is answered with Esc: Gasho starts no MCP server that nobody has looked at (`mcpDeclined`; see mcpQuestionOpen).
+   * On failure, the zellij session is closed.
    */
   private async startClaude(
     dir: string,
     rcName: string,
-    { claudeArgs = [], accept = () => true, resuming = false }: { claudeArgs?: string[]; accept?: (row: AgentRow) => boolean; resuming?: boolean } = {},
-  ): Promise<{ sessionId: string; zellijSession: string; pid: number; resumeAsked: boolean } | { error: string }> {
+    {
+      claudeArgs = [],
+      accept = () => true,
+      resuming = false,
+      trust = false,
+    }: { claudeArgs?: string[]; accept?: (row: AgentRow) => boolean; resuming?: boolean; trust?: boolean } = {},
+  ): Promise<
+    | { sessionId: string; zellijSession: string; pid: number; resumeAsked: boolean; mcpDeclined: boolean }
+    | { error: string; needsTrust?: true; trustWarnings?: string[] }
+  > {
     const zellijSession = zellijSessionName(rcName);
     const pidFile = path.join(this.cfg.stateDir, `${zellijSession}.pid`);
     await fsp.mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
@@ -789,6 +911,7 @@ export class Daemon {
     const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
     let pid: number | undefined;
     let resumeAsked = false;
+    let mcpDeclined = false;
     try {
       while (Date.now() < deadline) {
         await sleep(500);
@@ -797,9 +920,30 @@ export class Daemon {
         // The dialogs are drawn at the bottom, in place of the prompt box. A conversation being resumed can quote their
         // words above it, so only a dialog that has the keys counts.
         const screen = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain ?? "";
-        if (dialogOpen(screen) && atBottom(screen, TRUST_PROMPT_RE)) {
-          await this.zellij.kill(zellijSession);
-          return { error: "このフォルダーは、まだ Claude Code に信頼されていません。端末で一度 claude を起動して信頼してから、もう一度試してください。" };
+        const question = trustQuestion(screen);
+        if (question || (dialogOpen(screen) && atBottom(screen, TRUST_PROMPT_RE))) {
+          if (!trust) {
+            await this.zellij.kill(zellijSession);
+            return { error: "このフォルダーは、まだ Claude Code に信頼されていません。", needsTrust: true, trustWarnings: question?.warnings ?? [] };
+          }
+          if (!question || !(await this.answerTrust(zellijSession).then(() => true, () => false))) {
+            await this.zellij.kill(zellijSession);
+            return {
+              error:
+                "Claude Code の「このフォルダーを信頼するか」の確認に答えられませんでした。端末で一度 claude を起動して信頼してから、もう一度試してください。",
+            };
+          }
+          log(`"${rcName}": trusted ${dir} in Claude Code, as asked from Gasho`);
+          continue;
+        }
+        if (mcpQuestionOpen(screen)) {
+          if (!(await this.answerMcpQuestion(zellijSession).then(() => true, () => false))) {
+            await this.zellij.kill(zellijSession);
+            return { error: "Claude Code が、このフォルダーの MCP サーバーを使うかを尋ねたまま、答えを受け付けませんでした。" };
+          }
+          mcpDeclined = true;
+          log(`"${rcName}": started without the new MCP servers of ${dir}`);
+          continue;
         }
         if (resuming && resumeQuestionOpen(screen)) {
           resumeAsked = true;
@@ -810,7 +954,7 @@ export class Daemon {
           continue;
         }
         const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid && r.sessionId);
-        if (row?.sessionId && accept(row)) return { sessionId: row.sessionId, zellijSession, pid, resumeAsked };
+        if (row?.sessionId && accept(row)) return { sessionId: row.sessionId, zellijSession, pid, resumeAsked, mcpDeclined };
         if (!isAlive(pid)) break;
       }
       const last = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain;
@@ -820,6 +964,35 @@ export class Daemon {
     } finally {
       await fsp.rm(pidFile, { force: true });
     }
+  }
+
+  /**
+   * Answers Claude Code's question whether to trust the folder with "Yes, I trust this folder": the cursor is moved
+   * there one key at a time, reading the screen after each, and Enter is pressed only once it is there, and only once.
+   * Throws when the question does not take the answer.
+   */
+  private async answerTrust(session: string): Promise<void> {
+    for (let step = 0; step < 6; step++) {
+      const q = trustQuestion((await this.zellij.screen(session)).plain);
+      if (!q) throw new Error("the trust question is not on the screen");
+      if (q.onYes) {
+        await this.zellij.keys(session, "Enter");
+        if (await this.waitForScreen(session, (r) => trustQuestion(r.screen) === undefined, 5000)) return;
+        throw new Error("the trust question did not close");
+      }
+      await this.zellij.keys(session, q.yesBelow ? "Down" : "Up");
+      await this.waitForScreen(session, (r) => trustQuestion(r.screen)?.onYes === true, 1500);
+    }
+    throw new Error('the cursor did not reach "Yes, I trust this folder"');
+  }
+
+  /** Esc to the question about a folder's new MCP servers (see mcpQuestionOpen); throws if it stays open. */
+  private async answerMcpQuestion(session: string): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      await this.zellij.keys(session, "Esc");
+      if (await this.waitForScreen(session, (r) => !mcpQuestionOpen(r.screen))) return;
+    }
+    throw new Error("the question about MCP servers did not close");
   }
 
   /** Esc to the question about resuming an old, long session (see resumeQuestionOpen); throws if it stays open. */
@@ -853,9 +1026,15 @@ export class Daemon {
       accept: (row) => row.sessionId !== sessionId,
       resuming: true,
     });
-    if ("error" in started) return { ok: false, error: started.error };
+    if ("error" in started) {
+      // Only the launcher asks whether to trust a folder; a fork does not.
+      const error = started.needsTrust
+        ? "このフォルダーは、もう Claude Code に信頼されていません。「新しいセッション」でこのフォルダーを選んで信頼してから、もう一度フォークしてください。"
+        : started.error;
+      return { ok: false, error };
+    }
     const { sessionId: forkId, zellijSession, pid } = started;
-    const warnings: string[] = [];
+    const warnings: string[] = started.mcpDeclined ? [MCP_DECLINED] : [];
     let resumeAsked = started.resumeAsked;
     try {
       // Claude Code shows the prompt box once it has loaded the conversation (the question about an old session may
@@ -918,8 +1097,10 @@ export class Daemon {
     }
     const checked = sessionName(name);
     if ("error" in checked) return { ok: false, error: checked.error };
+    // Also a name from the first message still waiting: the one asked for now wins, and the first message names it no more.
     this.managed.drop(sessionId, (input) => isRename(input.text));
-    if (this.managed.setName(sessionId, checked.name)) await this.managed.save();
+    const named = this.managed.named(sessionId);
+    if (this.managed.setName(sessionId, checked.name) || named) await this.managed.save();
     // Other inputs waiting go first, and typing them can take long (a model switch): the answer does not wait for them.
     const ahead = this.managed.pending(sessionId) > 0;
     this.managed.enqueue(sessionId, { id: requestId, text: renameCommand(checked.name) });
@@ -950,7 +1131,7 @@ export class Daemon {
     if (!m) return { ok: false, error: "このセッションは削除できません。削除できるのは、Gasho が起動したセッションだけです。" };
     // From here on nothing is typed into it, and Gasho no longer shows it.
     this.managed.remove(sessionId);
-    for (const map of [this.settleUntil, this.latePicker, this.prompts]) map.delete(sessionId);
+    for (const map of [this.settleUntil, this.latePicker, this.prompts, this.titleSent]) map.delete(sessionId);
     await this.managed.save();
     this.emitSessions();
     const row = (await listAgents(this.cfg.claudeBin).catch(() => [] as AgentRow[])).find((r) => r.pid === m.pid);
@@ -986,7 +1167,7 @@ export class Daemon {
     const body = text.trim();
     if (!body && !files?.length) return { ok: false, error: "入力が空です。" };
     if (body.length > MAX_INPUT) return { ok: false, error: `入力が長すぎます（${MAX_INPUT} 文字まで）。` };
-    const refused = refusedCommand(body);
+    const refused = refusedCommand(body) ?? shellInputProblem(body, files?.length ?? 0);
     if (refused) return { ok: false, error: refused };
     let message = body;
     if (files?.length) {
@@ -1094,6 +1275,7 @@ export class Daemon {
         if (t?.tail) await this.pollTails();
         if (t?.tail ? this.promptTaken(sessionId, item.text, item.enteredAt ?? 0) : item.seenBusy) {
           log(`${m.name}: the input whose Enter was late has been taken`);
+          if (item.auto) this.titleSent.add(sessionId);
           this.emitSessions();
           return out;
         }
@@ -1110,7 +1292,7 @@ export class Daemon {
             await this.setUltracode(m.zellijSession, item.ultracode, out);
           }
         }
-        typed = await this.typeInput(m.zellijSession, item.text, item.entered);
+        typed = await this.typeInput(m.zellijSession, item.text, item.entered, item.auto);
       } catch (e) {
         this.managed.unshift(sessionId, item);
         if (!(e instanceof EnterNotTaken)) throw e;
@@ -1120,13 +1302,13 @@ export class Daemon {
         return out;
       }
       // Kept on a retry: the item and its Enter stay as they were.
-      const base = { ...(item.id ? { id: item.id } : {}), text: item.text };
+      const base = { ...(item.id ? { id: item.id } : {}), text: item.text, ...(item.auto ? { auto: true } : {}) };
       const entered = item.entered ? { entered: true, enteredAt: item.enteredAt ?? enteredAt, ...(item.seenBusy ? { seenBusy: true } : {}) } : {};
       if (typed === "not-typed") {
         // Model, effort and ultracode are switched already; only the text waits for the next try. A text whose Enter
         // was pressed before stays marked so: it must never be pasted again.
         this.managed.unshift(sessionId, { ...base, ...entered });
-        later(RETRY_MS, "could not type the input; trying again later");
+        later(item.auto ? AUTO_RETRY_MS : RETRY_MS, "could not type the input; trying again later");
         out.warnings.push("入力欄に入れられませんでした。少ししてから送り直します。");
       } else if (typed === "unsure") {
         // Enter was pressed, but the box still held the text: Claude Code may take it late. It is never typed again;
@@ -1135,6 +1317,7 @@ export class Daemon {
         later(UNSURE_RETRY_MS, `the input was not taken yet; looking again in ${UNSURE_RETRY_MS / 1000}s`);
         out.warnings.push(`送ったことを画面で確かめられませんでした。${UNSURE_RETRY_MS / 1000} 秒後に入力欄を見て、まだ残っていれば送ります。`);
       } else {
+        if (item.auto) this.titleSent.add(sessionId);
         this.scheduleRefresh(500);
       }
       this.emitSessions();
@@ -1153,10 +1336,11 @@ export class Daemon {
    * Enter is never pressed twice for one paste: if Claude Code takes an Enter late, a second one could land in what
    * the first one opened (Enter in the /model picker saves the default model for every session). With `entered`
    * (an earlier call returned "unsure"), nothing is typed: Enter is pressed again only if the box still holds the text.
+   * With `keepTyped`, a box that holds text is left as it is (someone may be typing in the terminal), and nothing is typed.
    * Returns "sent", "not-typed" (nothing was sent; try again later), or "unsure" (Enter may have been pressed, but the
    * box still holds the text).
    */
-  private async typeInput(session: string, text: string, entered = false): Promise<TypeResult> {
+  private async typeInput(session: string, text: string, entered = false, keepTyped = false): Promise<TypeResult> {
     const look = () => this.zellij.screen(session).catch(() => undefined);
     const waitFor = async (done: (s: Screen) => boolean, ms: number): Promise<Screen | undefined> => {
       for (let waited = 0; waited < ms; waited += 150) {
@@ -1193,6 +1377,7 @@ export class Daemon {
       if (!ready) return "not-typed";
     }
     if (typedInBox(ready)) {
+      if (keepTyped) return "not-typed";
       await clear(ready);
       if (!(await waitFor((s) => typedInBox(s) === "", 1500))) return "not-typed";
     }

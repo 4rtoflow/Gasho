@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { commandOf, installOf, serviceCommand } from "../src/install.ts";
 import { atLeast, formatChecks, launchdPlist, servicePath, systemdUnit, versionOf } from "../src/setup.ts";
 
 test("versions are read from what the tools print, and compared", () => {
@@ -17,7 +18,14 @@ test("the service gets Node.js's folder first, then the shell's PATH, each once"
   assert.equal(servicePath("/usr/bin/node", undefined), "/usr/bin");
 });
 
-const input = { node: "/opt/node 24/bin/node", repo: "/home/u/repos/Gasho 100%", path: "/opt/node 24/bin:/usr/bin", home: "/home/u" };
+const repo = "/home/u/repos/Gasho 100%";
+const input = {
+  node: "/opt/node 24/bin/node",
+  argv: ["/opt/node 24/bin/node", `${repo}/apps/daemon/src/cli.ts`],
+  cwd: repo,
+  path: "/opt/node 24/bin:/usr/bin",
+  home: "/home/u",
+};
 
 test("the systemd unit quotes its command and escapes % (WorkingDirectory takes no quotes)", () => {
   const unit = systemdUnit(input);
@@ -28,7 +36,8 @@ test("the systemd unit quotes its command and escapes % (WorkingDirectory takes 
 });
 
 test("the launchd agent runs Node.js on the daemon directly, with its paths escaped for XML", () => {
-  const plist = launchdPlist({ ...input, repo: "/Users/u/Gasho & <co>'s", home: "/Users/u" });
+  const mac = "/Users/u/Gasho & <co>'s";
+  const plist = launchdPlist({ ...input, argv: [input.node, `${mac}/apps/daemon/src/cli.ts`], cwd: mac, home: "/Users/u" });
   assert.match(plist, /<string>local\.gasho\.daemon<\/string>/);
   assert.ok(plist.includes("<string>/opt/node 24/bin/node</string>"));
   assert.ok(plist.includes("<string>/Users/u/Gasho &amp; &lt;co&gt;'s/apps/daemon/src/cli.ts</string>"));
@@ -53,4 +62,27 @@ test("the checks are listed with their marks, the names lined up, and a summary"
   assert.equal(lines[4], "    → gh auth login");
   assert.equal(lines[5], "✗ 登録        ありません");
   assert.match(text, /✗ が 1 件あります/);
+});
+
+test("how gasho-daemon was installed decides the command to suggest and what its service runs", () => {
+  const node = "/opt/node/bin/node";
+  const repo = installOf("/home/u/repos/Gasho/apps/daemon/src/cli.ts");
+  assert.deepEqual(repo, { kind: "repo", repo: "/home/u/repos/Gasho" });
+  assert.equal(commandOf(repo), "node apps/daemon/src/cli.ts");
+  assert.deepEqual(serviceCommand(repo, node, "1.2.3", "/home/u"), {
+    argv: [node, "/home/u/repos/Gasho/apps/daemon/src/cli.ts"],
+    cwd: "/home/u/repos/Gasho",
+  });
+
+  // npx keeps the package in a cache npm may clear: the service runs npx again, for the same version.
+  const npx = installOf("/home/u/.npm/_npx/0123abcd/node_modules/@4rtoflow/gasho-daemon/lib/cli.js");
+  assert.equal(commandOf(npx), "npx @4rtoflow/gasho-daemon");
+  assert.deepEqual(serviceCommand(npx, node, "1.2.3", "/home/u"), {
+    argv: ["/opt/node/bin/npx", "--yes", "--prefer-offline", "@4rtoflow/gasho-daemon@1.2.3"],
+    cwd: "/home/u",
+  });
+
+  const global = installOf("/opt/node/lib/node_modules/@4rtoflow/gasho-daemon/lib/cli.js");
+  assert.equal(commandOf(global), "gasho-daemon");
+  assert.deepEqual(serviceCommand(global, node, "1.2.3", "/home/u").argv, [node, "/opt/node/lib/node_modules/@4rtoflow/gasho-daemon/lib/cli.js"]);
 });
