@@ -15,6 +15,7 @@ import type {
   SessionCommand,
 } from "@gasho/protocol";
 import { notificationFor } from "./notify.ts";
+import type { PluginCatalogSource } from "./catalog.ts";
 import { PluginHub } from "./plugin-hub.ts";
 import type { PluginRegistry } from "./plugins.ts";
 import type { Store } from "./store.ts";
@@ -295,7 +296,7 @@ export class Hub {
   /** The plugins (docs/plugins.md); absent when the Gasho server was started without a plugins folder (tests). */
   private plugins: PluginHub | undefined;
 
-  constructor(store: Store, opts: { plugins?: PluginRegistry } = {}) {
+  constructor(store: Store, opts: { plugins?: PluginRegistry; catalog?: PluginCatalogSource } = {}) {
     this.store = store;
     for (const m of store.loadMachines()) this.machines.set(m.id, m);
     if (opts.plugins) {
@@ -310,6 +311,7 @@ export class Hub {
           this.store.addEvent(event);
           this.broadcast({ type: "event", event });
         },
+        ...(opts.catalog ? { catalog: opts.catalog } : {}),
       });
     }
   }
@@ -456,6 +458,7 @@ export class Hub {
       notifications: this.store.recentNotifications(),
       events: this.store.recentEvents(),
       ...(this.plugins ? { plugins: this.plugins.infos() } : {}),
+      ...(this.plugins?.catalog() ? { catalog: this.plugins.catalog() } : {}),
     });
   }
 
@@ -521,10 +524,16 @@ export class Hub {
         this.store.markRead(msg.ids);
         this.broadcast({ type: "notification.read", ids: msg.ids });
         break;
+      case "plugin.catalog.get":
+        this.plugins?.onClientMessage(peer, msg);
+        break;
       case "plugin.request":
       case "plugin.enable":
       case "plugin.machines":
       case "plugin.setting":
+      case "plugin.install":
+      case "plugin.update":
+      case "plugin.remove":
         if (this.plugins) this.plugins.onClientMessage(peer, msg);
         else if (msg.type === "plugin.request") peer.send({ type: "plugin.response", requestId: msg.requestId, error: "この Gasho サーバーではプラグインを使えません。" });
         else peer.send({ type: "plugin.result", requestId: msg.requestId, result: { ok: false, error: "この Gasho サーバーではプラグインを使えません。" } });

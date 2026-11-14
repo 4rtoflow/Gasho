@@ -498,11 +498,53 @@ export interface PluginInfo {
   daemon?: Record<string, { state: PluginDaemonState; error?: string }>;
 }
 
-/** Managing the installed plugins from a browser (answered with plugin.result). */
+/**
+ * Managing the plugins from a browser (answered with plugin.result). plugin.install: adds a plugin of the catalog and
+ * enables it, its daemon part running on `machines`. plugin.update: replaces an installed plugin with the catalog's
+ * newer version. plugin.remove: removes its files (only the link, for one being developed) and the settings the Gasho
+ * server keeps for it.
+ */
 export type PluginCommand =
   | { type: "plugin.enable"; plugin: string; enabled: boolean }
   | { type: "plugin.machines"; plugin: string; machines: PluginMachines }
-  | { type: "plugin.setting"; plugin: string; key: string; value: unknown };
+  | { type: "plugin.setting"; plugin: string; key: string; value: unknown }
+  | { type: "plugin.install"; plugin: string; machines: PluginMachines }
+  | { type: "plugin.update"; plugin: string }
+  | { type: "plugin.remove"; plugin: string };
+
+/** A plugin in the catalog of GashoPlugins (catalog.json): its newest version, released by GashoPlugins' Actions. */
+export interface CatalogPlugin {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  /** The version of the plugin API it is written for. */
+  api: string;
+  permissions?: PluginPermission[];
+  /** Whether it has a daemon part. */
+  daemon: boolean;
+  /** The release ("github-v1.2.0") and its file ("github-1.2.0.tgz", the files of the plugin's dist/). */
+  release: string;
+  file: string;
+  /** The file's SHA-256 (hex) and size in bytes. */
+  sha256: string;
+  size: number;
+}
+
+/** The catalog of plugins, as the Gasho server last read it (gh release download catalog). */
+export interface PluginCatalog {
+  /** The repository it is read from (GASHO_PLUGIN_REPO). */
+  repo: string;
+  /** When the Gasho server last read it (ms since the epoch); absent until it could. */
+  checkedAt?: number;
+  /** When GashoPlugins made it (its updatedAt, ISO 8601). */
+  updatedAt?: string;
+  plugins: CatalogPlugin[];
+  /** Why the last reading failed; `plugins` are then those read before, if any. */
+  error?: string;
+  /** Being read now. */
+  loading?: boolean;
+}
 
 /** A plugin whose daemon part gasho-daemon may have to run, as the Gasho server tells it. */
 export interface DaemonPluginEntry {
@@ -578,6 +620,8 @@ export type HubToClient =
       events: MachineHookEvent[];
       /** The installed plugins (absent from a Gasho server without plugins). */
       plugins?: PluginInfo[];
+      /** The catalog of plugins that can be added, as last read (absent from a Gasho server without plugins). */
+      catalog?: PluginCatalog;
     }
   | { type: "machine"; machine: MachineInfo }
   | { type: "machine.removed"; id: string }
@@ -593,7 +637,9 @@ export type HubToClient =
   /** The installed plugins, whenever one of them changes (files, state, settings, its daemon parts). */
   | { type: "plugins"; plugins: PluginInfo[] }
   | { type: "plugin.response"; requestId: string; result?: unknown; error?: string }
-  | { type: "plugin.result"; requestId: string; result: CommandResult };
+  | { type: "plugin.result"; requestId: string; result: CommandResult }
+  /** The catalog of plugins, whenever it was read again or is being read. */
+  | { type: "plugin.catalog"; catalog: PluginCatalog };
 
 // browser -> gasho-hub
 export type ClientToHub =
@@ -623,7 +669,12 @@ export type ClientToHub =
       params?: unknown;
       summary?: string;
     }
-  | ({ requestId: string } & PluginCommand);
+  | ({ requestId: string } & PluginCommand)
+  /**
+   * Reads the catalog of plugins again if it is older than 10 minutes, or at once with `refresh` (answered with
+   * plugin.catalog, to every browser).
+   */
+  | { type: "plugin.catalog.get"; refresh?: boolean };
 
 /** Models a session started from Gasho can switch to, as Claude Code's /model picker lists them. */
 export type SessionModel = "default" | "opus" | "fable" | "sonnet" | "haiku";
