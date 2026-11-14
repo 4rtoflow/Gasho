@@ -1,7 +1,8 @@
 // Reads Claude Code transcripts (~/.claude/projects/<dir>/<sessionId>.jsonl).
 // The format is internal to Claude Code, so unknown records are ignored rather than rejected.
 import fs from "node:fs/promises";
-import type { EffortLevel, PrLink, TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
+import path from "node:path";
+import type { EffortLevel, PastConversation, PrLink, TranscriptBlock, TranscriptEntry } from "@gasho/protocol";
 import { clip, inputSummary, str } from "./util.ts";
 
 /**
@@ -338,4 +339,124 @@ export class TranscriptTail {
       await fh.close();
     }
   }
+}
+
+/** Claude Code's directory for a folder's transcripts (~/.claude/projects/<this>): what is not a letter or a digit becomes "-". */
+export function projectDirName(folder: string): string {
+  return folder.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/** How much of a transcript is read for its folder and first message, and for its latest name and title. */
+const HEAD_BYTES = 64 * 1024;
+const TAIL_BYTES = 256 * 1024;
+/** How many transcripts one listing reads at most: those of other folders under the same directory name count too. */
+const MAX_READ = 200;
+
+async function readRange(file: string, start: number, length: number): Promise<Buffer> {
+  const h = await fs.open(file, "r");
+  try {
+    const buf = Buffer.alloc(length);
+    const { bytesRead } = await h.read(buf, 0, length, start);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await h.close();
+  }
+}
+
+function records(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    try {
+      const rec = JSON.parse(line) as unknown;
+      if (rec && typeof rec === "object") out.push(rec as Record<string, unknown>);
+    } catch {
+      // A line cut at the edge of what was read, or not JSON.
+    }
+  }
+  return out;
+}
+
+/** The text of a message the person typed: not a tool's result, nor what Claude Code adds on its own. */
+function typedText(rec: Record<string, unknown>): string | undefined {
+  if (rec.type !== "user" || rec.isMeta === true || rec.isSidechain === true) return undefined;
+  const content = (rec.message as { content?: unknown } | undefined)?.content;
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.map((b) => (b && typeof b === "object" && (b as { type?: unknown }).type === "text" ? String((b as { text?: unknown }).text ?? "") : "")).join("\n")
+        : "";
+  const plain = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return plain || undefined;
+}
+
+function clipChars(text: string, max: number): string {
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, max).join("")}…`;
+}
+
+/**
+ * A transcript's folder (the `cwd` its records give) and its title: the name given with /rename, else the title Claude
+ * Code gave it, else the start of its first message. Undefined for a transcript with no message in what is read.
+ */
+export async function conversationFacts(file: string): Promise<{ cwd: string; title?: string } | undefined> {
+  const size = (await fs.stat(file)).size;
+  const head = records((await readRange(file, 0, Math.min(size, HEAD_BYTES))).toString("utf8"));
+  const tailStart = Math.max(HEAD_BYTES, size - TAIL_BYTES);
+  const tail = size > tailStart ? records((await readRange(file, tailStart, size - tailStart)).toString("utf8")) : [];
+  const all = [...head, ...tail];
+  const cwd = all.map((r) => r.cwd).find((c): c is string => typeof c === "string" && c.startsWith("/"));
+  if (!cwd || !all.some((r) => r.type === "user" || r.type === "assistant")) return undefined;
+  let custom: string | undefined;
+  let ai: string | undefined;
+  for (const r of all) {
+    if (r.type === "custom-title" && typeof r.customTitle === "string" && r.customTitle.trim()) custom = r.customTitle.trim();
+    if (r.type === "ai-title" && typeof r.aiTitle === "string" && r.aiTitle.trim()) ai = r.aiTitle.trim();
+  }
+  const first = all.map(typedText).find(Boolean);
+  const title = custom ?? ai ?? (first ? clipChars(first, 80) : undefined);
+  return { cwd, ...(title ? { title } : {}) };
+}
+
+/**
+ * The conversations Claude Code keeps for `folder` (with `subfolders`, also for the folders inside it), except the
+ * `open` ones, the latest first, at most `limit`. A transcript's folder is the one its records give: the directory's
+ * name only narrows the search, as "/a/b-c" and "/a/b/c" have the same one.
+ */
+export async function pastConversations(
+  claudeDir: string,
+  folder: string,
+  { subfolders = false, open = new Set<string>(), limit = 30 }: { subfolders?: boolean; open?: ReadonlySet<string>; limit?: number } = {},
+): Promise<PastConversation[]> {
+  const projects = path.join(claudeDir, "projects");
+  const dirName = projectDirName(folder);
+  let dirs: import("node:fs").Dirent[];
+  try {
+    dirs = await fs.readdir(projects, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: { sessionId: string; file: string; mtime: number }[] = [];
+  for (const d of dirs) {
+    if (!d.isDirectory() || !(d.name === dirName || (subfolders && d.name.startsWith(`${dirName}-`)))) continue;
+    const names = await fs.readdir(path.join(projects, d.name)).catch(() => [] as string[]);
+    for (const name of names) {
+      if (!name.endsWith(".jsonl")) continue;
+      const sessionId = name.slice(0, -".jsonl".length);
+      if (open.has(sessionId)) continue;
+      const file = path.join(projects, d.name, name);
+      const stat = await fs.stat(file).catch(() => undefined);
+      if (stat?.isFile()) files.push({ sessionId, file, mtime: stat.mtimeMs });
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  const inside = (cwd: string) => cwd === folder || (subfolders && cwd.startsWith(folder.endsWith("/") ? folder : `${folder}/`));
+  const out: PastConversation[] = [];
+  for (const f of files.slice(0, MAX_READ)) {
+    if (out.length >= limit) break;
+    const facts = await conversationFacts(f.file).catch(() => undefined);
+    if (!facts || !inside(facts.cwd)) continue;
+    out.push({ sessionId: f.sessionId, cwd: facts.cwd, lastActivityAt: Math.round(f.mtime), ...(facts.title ? { title: facts.title } : {}) });
+  }
+  return out;
 }

@@ -251,6 +251,11 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
     }
     case "session.interrupt":
     case "session.remove":
+    case "session.resume":
+      return undefined;
+    case "session.history":
+      if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
+      if (cmd.subfolders !== undefined && typeof cmd.subfolders !== "boolean") return "中のフォルダーの指定が正しくありません。";
       return undefined;
     case "session.rename":
       return nameError(cmd.name, true);
@@ -362,6 +367,7 @@ export class Hub {
           : undefined;
         m.modelsAt = typeof msg.modelsAt === "number" && Number.isFinite(msg.modelsAt) ? msg.modelsAt : undefined;
         m.features = Array.isArray(msg.features) ? [...new Set(msg.features.filter((f) => FEATURES.has(f)))] : undefined;
+        m.canResume = msg.canResume === true || undefined;
         this.broadcast({ type: "machine", machine: m });
         break;
       case "command.result": {
@@ -529,6 +535,8 @@ export class Hub {
       case "session.rename":
       case "session.fork":
       case "session.remove":
+      case "session.history":
+      case "session.resume":
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
@@ -546,16 +554,18 @@ export class Hub {
     if (invalid) return reply({ ok: false, error: invalid });
     const daemon = this.daemons.get(machine);
     if (!daemon) return reply({ ok: false, error: "この working server はオフラインです。" });
-    // Audit trail of what browsers asked working servers to do.
-    const sessionId = "sessionId" in cmd ? cmd.sessionId : "";
-    const summary = this.summaryOf(machine, cmd);
-    const event: MachineHookEvent = { machine, sessionId, event: `Gasho:${cmd.type}`, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` };
-    this.store.addEvent(event);
-    // Browsers show the latest operations on the home screen.
-    this.broadcast({ type: "event", event });
+    // Audit trail of what browsers asked working servers to do (a listing changes nothing).
+    if (cmd.type !== "session.history") {
+      const sessionId = "sessionId" in cmd ? cmd.sessionId : "";
+      const summary = this.summaryOf(machine, cmd);
+      const event: MachineHookEvent = { machine, sessionId, event: `Gasho:${cmd.type}`, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` };
+      this.store.addEvent(event);
+      // Browsers show the latest operations on the home screen.
+      this.broadcast({ type: "event", event });
+    }
 
     const requestId = randomUUID();
-    // Launching and forking wait for Claude Code to start; an input may switch the model, effort and ultracode first;
+    // Launching, forking and resuming wait for Claude Code to start; an input may switch the model, effort and ultracode first;
     // removing waits for Claude Code to end; a clone takes as long as the repository needs.
     const timeout = {
       "session.launch": LAUNCH_TIMEOUT_MS,
@@ -564,6 +574,8 @@ export class Hub {
       "session.rename": RENAME_TIMEOUT_MS,
       "session.fork": FORK_TIMEOUT_MS,
       "session.remove": REMOVE_TIMEOUT_MS,
+      "session.history": REQUEST_TIMEOUT_MS,
+      "session.resume": LAUNCH_TIMEOUT_MS,
       "permission.answer": REQUEST_TIMEOUT_MS,
       "folder.create": REQUEST_TIMEOUT_MS,
       "repo.clone": CLONE_TIMEOUT_MS,
@@ -618,7 +630,10 @@ export class Hub {
       case "permission.answer":
         // What was asked, as the request said: it is gone once answered.
         return answerSummary(cmd, this.request(machine, cmd.sessionId, cmd.permissionId));
+      case "session.resume":
+        return cmd.sessionId;
       case "session.interrupt":
+      case "session.history":
         return "";
     }
   }
@@ -635,6 +650,9 @@ export class Hub {
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
     const m = this.machines.get(machine);
     if (cmd.type === "file.write") return !m || versionAtLeast(m.daemonVersion, ...FILES_SINCE) ? undefined : FILES_TOO_OLD;
+    if (cmd.type === "session.history" || cmd.type === "session.resume") {
+      return !m || m.canResume ? undefined : "この working server の gasho-daemon は古いため、過去の会話を一覧にも開き直しもできません。gasho-daemon を更新してください。";
+    }
     if (cmd.type === "permission.answer" && cmd.decision !== "deny") {
       // Claude Code takes neither a question nor a plan with "allow" alone: its dialog would stay open, and the hook
       // that Gasho answers through would be spent.

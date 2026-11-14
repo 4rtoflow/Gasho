@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { findRepos, nestedRepos, parseGitHubUrl, parseLog, parseRefs, parseStatus, parseTrack, readGitGraph } from "../src/git.ts";
+import { findRepos, nestedRepos, parseGitHubUrl, parseLog, parseRefs, parseStatus, parseTrack, readGitGraph, worktreeOf } from "../src/git.ts";
 
 test("parseGitHubUrl handles https, ssh and credentials, and rejects other hosts", () => {
   assert.deepEqual(parseGitHubUrl("https://github.com/4rtoflow/Gasho.git\n"), {
@@ -147,6 +147,40 @@ test("nestedRepos lists the repositories inside a folder that is not one, with t
     assert.equal(await nestedRepos(path.join(dir, "api")), undefined);
     // A folder with no repository at all.
     assert.equal(await nestedRepos(path.join(dir, "notes")), undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktreeOf gives every worktree of a repository the same repository, from any folder inside them", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-wt-"));
+  // macOS's temporary folder is reached through a symbolic link (/var → /private/var); git names the real folders.
+  const real = fs.realpathSync(dir);
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, stdio: "pipe" }).toString();
+  try {
+    const main = path.join(dir, "app");
+    fs.mkdirSync(path.join(main, "src"), { recursive: true });
+    run(main, "init", "-b", "main");
+    run(main, "-c", "user.name=Ama", "-c", "user.email=a@example.com", "commit", "--allow-empty", "-m", "first");
+    run(main, "worktree", "add", "-b", "feat/x", path.join(dir, "app-x"));
+    run(main, "worktree", "add", "--detach", path.join(dir, "app-detached"));
+    const bare = path.join(dir, "lib.git");
+    run(dir, "clone", "--bare", main, bare);
+    run(bare, "worktree", "add", path.join(dir, "lib-main"), "main");
+    fs.mkdirSync(path.join(dir, "notes"));
+
+    const repo = path.join(real, "app");
+    assert.deepEqual(await worktreeOf(path.join(main, "src")), { path: repo, repo, branch: "main" });
+    assert.deepEqual(await worktreeOf(path.join(dir, "app-x")), { path: path.join(real, "app-x"), repo, branch: "feat/x" });
+    assert.deepEqual(await worktreeOf(path.join(dir, "app-detached")), { path: path.join(real, "app-detached"), repo });
+    // A bare repository has no main worktree; the repository is its own folder.
+    assert.deepEqual(await worktreeOf(path.join(dir, "lib-main")), {
+      path: path.join(real, "lib-main"),
+      repo: path.join(real, "lib.git"),
+      branch: "main",
+    });
+    assert.equal(await worktreeOf(path.join(dir, "notes")), undefined);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

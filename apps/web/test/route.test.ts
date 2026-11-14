@@ -10,6 +10,7 @@ test("routes survive a round trip through the URL, including a session's panel a
     { name: "session", machine: "m1", sessionId: "s/1" },
     { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "graph" } },
     { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "graph", repo: "org/web app" } },
+    { name: "worktree", machine: "m1", path: "/Users/me/Gasho issue/a" },
   ];
   for (const r of routes) assert.deepEqual(parseHash(hrefOf(r)), r);
   assert.equal(hrefOf({ name: "session", machine: "m", sessionId: "s", panel: { kind: "graph", repo: "org/web" } }), "#/s/m/s/graph/org%2Fweb");
