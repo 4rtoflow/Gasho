@@ -1,4 +1,4 @@
-// The frame of a session's panel (the branch graph, a plugin's panel). On a computer it sits at the
+// The frame of a session's panel (the branch graph, the files, a plugin's panel). On a computer it sits at the
 // right of the session and closes with its × button or Esc; on a phone it takes the screen, with a link back.
 import { ArrowLeft, X } from "lucide-react";
 import type { ReactNode } from "react";

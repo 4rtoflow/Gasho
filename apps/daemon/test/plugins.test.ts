@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import type { DaemonToHub } from "@gasho/protocol";
+import { GitHubProxy } from "../src/github.ts";
 import { PluginRunner } from "../src/plugins.ts";
 
 const V1 = `
@@ -24,6 +25,9 @@ export default {
     slow: (params, ctx) => new Promise((resolve) => ctx.signal.addEventListener("abort", () => resolve("aborted"))),
     sh: async (params, ctx) => (await ctx.exec("echo", ["hi"])).stdout.trim(),
     missing: async (params, ctx) => { try { await ctx.exec("no-such-command-gasho", []); } catch (e) { return e.code; } },
+    ghRead: async (params, ctx) => (await ctx.github.read(params.args)).stdout.trim(),
+    ghWrite: async (params, ctx) => (await ctx.github.write(params.args, { repo: "o/n" })).stdout.trim(),
+    ghFail: async (params, ctx) => { try { await ctx.github.read(["fail"]); } catch (e) { return { code: e.code, stderr: e.stderr.trim() }; } },
     version: () => 1,
   },
 };
@@ -38,6 +42,11 @@ function setup(enabled = true) {
   const codes: Record<string, string> = { [HASH1]: V1, [HASH2]: V2 };
   let runner: PluginRunner;
   const local = { folders: ["/work"], dataDir: fs.mkdtempSync(path.join(os.tmpdir(), "gasho-plugin-data-")) };
+  // A gh that writes down each time it runs.
+  const ghDir = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-fake-gh-"));
+  const ghBin = path.join(ghDir, "gh");
+  fs.writeFileSync(ghBin, `#!/bin/sh\necho "$*" >> "${ghDir}/runs"\ncase "$*" in fail) echo boom >&2; exit 3;; esac\necho "gh $*"\n`, { mode: 0o755 });
+  const ghRuns = () => (fs.existsSync(path.join(ghDir, "runs")) ? fs.readFileSync(path.join(ghDir, "runs"), "utf8").trim().split("\n") : []);
   const send = (m: DaemonToHub) => {
     sent.push(m);
     // The Gasho server hands over the code asked for.
@@ -50,10 +59,11 @@ function setup(enabled = true) {
     session: async (id) => (id === "s1" ? { sessionId: "s1", cwd: "/work/zen", managed: true, repos: [{ path: "app" }] } : undefined),
     folders: () => local.folders,
     dataDir: local.dataDir,
+    github: new GitHubProxy({ ghBin }),
     enabled,
     log: (s) => logs.push(s),
   });
-  const call = async (method: string, extra: { sessionId?: string; timeoutMs?: number; params?: unknown } = {}) => {
+  const call = async (method: string, extra: { sessionId?: string; timeoutMs?: number; params?: unknown; write?: boolean } = {}) => {
     const requestId = `${method}-${Math.random()}`;
     await runner.request({ type: "plugin.request", requestId, plugin: "hello", method, timeoutMs: extra.timeoutMs ?? 10_000, ...extra });
     const r = sent.find((m) => m.type === "plugin.response" && m.requestId === requestId);
@@ -68,7 +78,7 @@ function setup(enabled = true) {
     for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setTimeout(r, 25));
     assert.ok(ok(), "timed out");
   };
-  return { runner, sent, logs, call, state, until, local };
+  return { runner, sent, logs, call, state, until, local, ghRuns };
 }
 
 test("a daemon part runs in a process of its own, gets its session and settings, and answers calls", async () => {
@@ -98,6 +108,31 @@ test("a daemon part runs in a process of its own, gets its session and settings,
     local.folders = ["/work", "/home/rg/repos"];
     runner.foldersChanged();
     assert.deepEqual((await call("local")).result, { folders: ["/work", "/home/rg/repos"], dataDir });
+  } finally {
+    await runner.stopAll();
+  }
+});
+
+test("gasho-daemon runs gh for a daemon part: the same read again is answered without gh, and a write reads it again", async () => {
+  const { runner, call, state, until, ghRuns } = setup();
+  try {
+    runner.update([{ id: "hello", hash: HASH1, run: true, settings: {} }]);
+    await until(() => state()?.state === "running");
+    const list = { args: ["pr", "list", "--repo", "o/n"] };
+    assert.equal((await call("ghRead", { params: list })).result, "gh pr list --repo o/n");
+    assert.equal((await call("ghRead", { params: list })).result, "gh pr list --repo o/n");
+    assert.equal(ghRuns().length, 1);
+
+    // Only a write method may change GitHub, so that the operations log has it.
+    const assign = { args: ["issue", "edit", "1", "--repo", "o/n", "--add-assignee", "@me"] };
+    assert.match((await call("ghWrite", { params: assign })).error ?? "", /kind が write のメソッド/);
+    assert.equal(ghRuns().length, 1);
+    assert.equal((await call("ghWrite", { params: assign, write: true })).result, "gh issue edit 1 --repo o/n --add-assignee @me");
+    await call("ghRead", { params: list });
+    assert.deepEqual(ghRuns(), ["pr list --repo o/n", "issue edit 1 --repo o/n --add-assignee @me", "pr list --repo o/n"]);
+
+    // A failure reads as from ctx.exec, so that a plugin explains it as before.
+    assert.deepEqual((await call("ghFail")).result, { code: 3, stderr: "boom" });
   } finally {
     await runner.stopAll();
   }

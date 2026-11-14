@@ -520,8 +520,11 @@ export type HubToDaemon =
   | { type: "plugins"; plugins: DaemonPluginEntry[] }
   /** The code of a plugin's daemon part (daemon.js), as asked for; `error` when that version is gone. */
   | { type: "plugin.code"; plugin: string; hash: string; code?: string; error?: string }
-  /** A call of a method of a plugin's daemon part, from a browser. `sessionId`: the session it is about, if any. */
-  | { type: "plugin.request"; requestId: string; plugin: string; sessionId?: string; method: string; params?: unknown; timeoutMs: number };
+  /**
+   * A call of a method of a plugin's daemon part, from a browser. `sessionId`: the session it is about, if any. `write`:
+   * a write method (gasho-plugin.json), recorded in the operations log; only it may change GitHub (ctx.github.write).
+   */
+  | { type: "plugin.request"; requestId: string; plugin: string; sessionId?: string; method: string; params?: unknown; timeoutMs: number; write?: boolean };
 
 // gasho-hub -> browser
 export type HubToClient =
