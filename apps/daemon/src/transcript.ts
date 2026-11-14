@@ -110,9 +110,25 @@ export interface TranscriptMeta {
    * Claude wrote it (not clipped), and when. Cleared by the call's result or by a new message from the person.
    */
   question?: { toolUseId: string; input: Record<string, unknown>; at?: number };
+  /**
+   * Claude's tool calls that the transcript has no result for yet, oldest first (the main conversation's only): the
+   * call's id, the tool, its input and when. Cleared like `question`. A permission dialog is about one of them.
+   */
+  openCalls?: OpenCall[];
   /** Work Claude started in the background (see BackgroundTasks). */
   background?: BackgroundTasks;
 }
+
+/** A tool call without a result yet (see TranscriptMeta.openCalls). */
+export interface OpenCall {
+  toolUseId: string;
+  name: string;
+  input: Record<string, unknown>;
+  at?: number;
+}
+
+/** How many open calls are kept: a turn that leaves more open is not waiting on a dialog for the oldest. */
+const MAX_OPEN_CALLS = 20;
 
 export function emptyMeta(): TranscriptMeta {
   return { prLinks: [], background: new BackgroundTasks() };
@@ -405,6 +421,12 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
           meta.question = { toolUseId: id, input: b.input as Record<string, unknown>, ...(at === undefined ? {} : { at }) };
         }
         if (role === "assistant" && !isSidechain) tasksOf(meta).call(id, str(b.name) ?? "", b.input, at);
+        if (role === "assistant" && !isSidechain && id) {
+          const input = b.input && typeof b.input === "object" && !Array.isArray(b.input) ? (b.input as Record<string, unknown>) : {};
+          const calls = (meta.openCalls ??= []);
+          calls.push({ toolUseId: id, name: str(b.name) ?? "", input, ...(at === undefined ? {} : { at }) });
+          if (calls.length > MAX_OPEN_CALLS) calls.shift();
+        }
         blocks.push({
           type: "tool_use",
           id,
@@ -414,6 +436,11 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
         });
       } else if (b.type === "tool_result") {
         if (meta.question && str(b.tool_use_id) === meta.question.toolUseId) delete meta.question;
+        if (meta.openCalls) {
+          const done = str(b.tool_use_id);
+          meta.openCalls = meta.openCalls.filter((c) => c.toolUseId !== done);
+          if (meta.openCalls.length === 0) delete meta.openCalls;
+        }
         if (role === "user" && !isSidechain) {
           const kept = results === 1 ? rec.toolUseResult : undefined;
           tasksOf(meta).result(str(b.tool_use_id), kept, contentToString(b.content), b.is_error === true, at);
@@ -432,7 +459,10 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
   }
   if (blocks.length === 0) return null;
   // The person wrote something (or stopped Claude) since the question: it is no longer waiting for an answer.
-  if (role === "user" && !isSidechain && blocks.some((b) => b.type === "text")) delete meta.question;
+  if (role === "user" && !isSidechain && blocks.some((b) => b.type === "text")) {
+    delete meta.question;
+    delete meta.openCalls;
+  }
   const entry: TranscriptEntry = { uuid, ts, role, blocks, isSidechain };
   if (interrupted) entry.interrupted = true;
   return entry;

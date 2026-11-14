@@ -267,6 +267,38 @@ export function promptBoxLines(screen: string): string[] | undefined {
   return box && lines.slice(box.top + 1, box.bottom);
 }
 
+/** One choice of a dialog: "❯ 1. Yes" (the cursor is on it), "  2. No". */
+export interface DialogOption {
+  n: number;
+  label: string;
+  selected: boolean;
+}
+
+const DIALOG_OPTION_RE = /^\s*(❯)?\s*(\d+)\.\s+(\S.*)$/;
+
+/**
+ * Claude Code's permission dialog for a tool, whatever it asks ("Do you want to proceed?" for a command, "Do you want
+ * to make this edit to …?", "Do you want to allow Claude to fetch this content?"): its numbered choices at the bottom
+ * of the screen, the first "Yes" and another "No…", one of them under the cursor. Undefined when the bottom of the
+ * screen shows no such choices, or the prompt box is there.
+ */
+export function permissionDialog(screen: string): DialogOption[] | undefined {
+  const lines = screenLines(screen);
+  if (promptBoxAtBottom(lines)) return undefined;
+  let options: DialogOption[] = [];
+  for (const line of bottomLines(screen, 15)) {
+    const m = DIALOG_OPTION_RE.exec(line);
+    if (!m) continue;
+    const n = Number(m[2]);
+    const option = { n, label: m[3]!.trim(), selected: m[1] !== undefined };
+    // A choice that wraps goes on without a number; numbers that start again from 1 are another list.
+    if (n === 1) options = [option];
+    else if (n === options.length + 1) options.push(option);
+  }
+  if (options[0]?.label !== "Yes" || !options.slice(1).some((o) => /^No\b/.test(o.label))) return undefined;
+  return options.filter((o) => o.selected).length === 1 ? options : undefined;
+}
+
 /**
  * Whether something at the bottom of the screen has the keys instead of the prompt box: the /model picker, the
  * question before a switch, a permission dialog, the trust dialog, the question about a folder's MCP servers or the
@@ -278,6 +310,7 @@ export function dialogOpen(screen: string): boolean {
     modelPickerOptions(screen).length > 0 ||
     switchQuestion(screen) !== undefined ||
     atBottom(screen, PERMISSION_PROMPT_RE) ||
+    permissionDialog(screen) !== undefined ||
     atBottom(screen, TRUST_PROMPT_RE) ||
     mcpQuestionOpen(screen) ||
     resumeQuestionOpen(screen)
