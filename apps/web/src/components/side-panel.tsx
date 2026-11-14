@@ -59,8 +59,10 @@ export function SidePanel({
           )}
         </div>
       </header>
-      {/* A container, so what is inside fits the panel's width rather than the screen's. */}
-      <div className="@container min-h-0 flex-1 overflow-y-auto px-4 py-4">{children}</div>
+      {/* A container, so what is inside fits the panel's width rather than the screen's. relative: an absolutely
+          placed element of a panel (a plugin's sr-only text) stays in here, rather than making the page longer (see
+          Transcript). */}
+      <div className="@container relative min-h-0 flex-1 overflow-y-auto px-4 py-4">{children}</div>
     </section>
   );
 }
