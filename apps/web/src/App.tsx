@@ -1,17 +1,19 @@
 import { motion } from "framer-motion";
 import { Home, KeyRound, ListRestart, Plus, Puzzle, Settings } from "lucide-react";
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { ResizeHandle } from "@/components/resize-handle";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
-import { DESKTOP, useMediaQuery } from "@/lib/media";
+import { DESKTOP, useMediaQuery, useWindowWidth } from "@/lib/media";
 import { arrangeSessions, rememberSessions, useSavedOrder } from "@/lib/order";
 import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
 import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { PANEL_WIDTH_MAX, PANEL_WIDTH_MIN, clampPanelWidth, defaultPanelWidth, usePanelWidth } from "@/lib/widths";
 import { PluginBadgeProbes, PluginPageView, PluginPanelView, usePluginBadges } from "@/plugins/parts";
 import { usePluginRegistry } from "@/plugins/registry";
 import { DevicesView } from "@/views/devices";
@@ -40,6 +42,42 @@ function Brand() {
       </span>
       {!collapsed && <span>Gasho</span>}
     </div>
+  );
+}
+
+/** A panel of a session beside it on a computer, its left edge dragged to change its width (lib/widths). */
+function DockedPanel({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLElement>(null);
+  const [savedWidth, setSavedWidth] = usePanelWidth();
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const windowWidth = useWindowWidth();
+  // What the conversation and the panel share (the window but the sidebar), followed as the sidebar's width changes.
+  const [room, setRoom] = useState(Number.POSITIVE_INFINITY);
+  useLayoutEffect(() => {
+    const row = ref.current?.parentElement;
+    if (!row) return;
+    const observer = new ResizeObserver(() => setRoom(row.clientWidth));
+    observer.observe(row);
+    setRoom(row.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+  const clampWidth = (w: number) => clampPanelWidth(w, room);
+  const width = clampWidth(dragWidth ?? savedWidth ?? defaultPanelWidth(windowWidth));
+  return (
+    <aside ref={ref} style={{ width }} className="relative shrink-0 border-l border-border bg-background">
+      {children}
+      <ResizeHandle
+        edge="left"
+        label="パネルの幅"
+        width={width}
+        min={PANEL_WIDTH_MIN}
+        max={clampWidth(PANEL_WIDTH_MAX)}
+        clamp={clampWidth}
+        onDrag={setDragWidth}
+        onChange={setSavedWidth}
+        onReset={() => setSavedWidth(null)}
+      />
+    </aside>
   );
 }
 
@@ -215,9 +253,9 @@ export function App() {
             )}
           </motion.main>
           {route.name === "session" && desktop && panel && (
-            <aside className="w-[clamp(380px,40vw,620px)] shrink-0 border-l border-border bg-background">
+            <DockedPanel>
               <PanelView machine={route.machine} sessionId={route.sessionId} panel={panel} docked />
-            </aside>
+            </DockedPanel>
           )}
         </div>
       </div>
