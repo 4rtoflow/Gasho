@@ -52,8 +52,9 @@ Gasho のプラグインは、Gasho の画面の決まった場所に、項目�
 | P13 | セッション画面の会話の末尾（最後の発言の下、入力欄の上）に部品を足す（API 1.2） |
 | P14 | セッション画面で、入力欄の下の行（キーの案内と文字数の行）に部品を足す（API 1.4） |
 | P15 | worktree のセッションのタブの行に、タブを足す。押すと、セッションと同じ場所にプラグインの画面を出す（API 1.5） |
+| P16 | テーマ。画面全体の色と角の丸みを変える。同時に有効にできるのは1つ（API 1.6） |
 
-P6 は、いまの GitHub の機能がホームにタイルを持っているので足した。P8 は GitHub では使わないが、working server の様子を監視するプラグインのために、API 1.5 で足した。P13 は、エージェントが作業しているあいだ、その様子を会話に出すプラグインのために、API 1.2 で足した。P14 は、セッションの Context Window の使用率と、Claude.ai のプランで決まっている使用量の上限を出すプラグインのために、API 1.4 で足した。P15 は、worktree の Issue と Pull request を、セッションと並んだタブで開くプラグイン（GashoPlugins の github-allmighty）のために、API 1.5 で足した。
+P6 は、いまの GitHub の機能がホームにタイルを持っているので足した。P8 は GitHub では使わないが、working server の様子を監視するプラグインのために、API 1.5 で足した。P13 は、エージェントが作業しているあいだ、その様子を会話に出すプラグインのために、API 1.2 で足した。P14 は、セッションの Context Window の使用率と、Claude.ai のプランで決まっている使用量の上限を出すプラグインのために、API 1.4 で足した。P15 は、worktree の Issue と Pull request を、セッションと並んだタブで開くプラグイン（GashoPlugins の github-allmighty）のために、API 1.5 で足した。P16 は、Gasho の見た目を好みの色に変えるテーマを1つずつプラグインにして、GashoPlugins のカタログから選んで入れるために、API 1.6 で足した。
 
 ## 構成
 
@@ -146,11 +147,12 @@ GitHub プラグインの場合は、次のようになる。
 | `id` | 英小文字で始まり、英小文字・数字・`-` からなる2〜32文字。GashoPlugins のディレクトリの名前と同じにする。URL、保存のキー、操作のログに使う |
 | `name`、`description` | 画面に出す名前（40文字まで）と説明 |
 | `version` | プラグインの版（1.2.0 の形）。GashoPlugins に新しい版を出すときに上げる。プラグインの画面は、カタログの版が入れた版より新しいときに「更新」を出す。ホットリロードで入れ替えるかは、版ではなく中身のハッシュで判断する |
-| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した。1.4 で、入力欄の下（P14、`composerFooter`）、SDK の `Popover`、`SessionInfo` の `context` と `limits` を足し、プラグイン専用のフォルダーで動く Claude Code をセッションとして扱わないようにした。1.5 で、daemon の部分の `ctx.emit` と画面の部分の `useEvent`（P8）、worktree のタブ（P15、`worktreeTabs`・`worktreeViews`）、`useNavigation` の `worktreeHref`・`openWorktreeView` を足した |
-| `web`、`daemon` | 画面の部分と daemon の部分のファイル。少なくともどちらか1つは要る |
+| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した。1.4 で、入力欄の下（P14、`composerFooter`）、SDK の `Popover`、`SessionInfo` の `context` と `limits` を足し、プラグイン専用のフォルダーで動く Claude Code をセッションとして扱わないようにした。1.5 で、daemon の部分の `ctx.emit` と画面の部分の `useEvent`（P8）、worktree のタブ（P15、`worktreeTabs`・`worktreeViews`）、`useNavigation` の `worktreeHref`・`openWorktreeView` を足した。1.6 で、テーマ（P16、`theme`）を足した |
+| `web`、`daemon` | 画面の部分と daemon の部分のファイル。`web`・`daemon`・`theme` のうち、少なくとも1つは要る |
 | `methods` | 画面の部分から呼べる、daemon の部分のメソッド。`kind` は、読むだけのもの（`read`）か、何かを変えるもの（`write`）か。`write` の呼び出しは操作のログに残す。`timeoutSeconds` は待つ時間で、既定は15秒、長くても120秒まで |
 | `permissions` | 読む・出す以外に、画面の部分がすること。`session.input`（セッションに発言を送る）と `session.launch`（セッションを起動する。API 1.1） |
 | `settings` | 設定の項目（P5） |
+| `theme` | テーマ（P16）の、名前と CSS の値 |
 
 ## 拡張点
 
@@ -422,6 +424,46 @@ function useIssueTab({ worktree, daemon }: WorktreeContext): WorktreeTab[] {
 画面のあいだを移るときは、`useNavigation` の `openWorktreeView(画面, 引数)` を使う。セッションの中（ヘッダーの項目やパネル）から呼ぶと、そのセッションの worktree の画面を開く。ホームのタイルのように worktree の外からは、`at` に working server の ID と worktree のフォルダーを渡す。
 
 プラグインがまだ読み込まれていないあいだは、画面の場所に「読み込み中…」を出す。無効か、ないか、読み込めなかったときと、`view` の画面がないときは、そのことを出す。`useTabs` がエラーになったときは、そのプラグインのタブを出さず、プラグインの画面にエラーを出す。
+
+### テーマ（P16）
+
+テーマは、Gasho の画面全体の色と角の丸みを変える（API 1.6）。`gasho-plugin.json` の `theme` に、名前と値を書く。テーマだけのプラグインは、画面の部分も daemon の部分も持たない。`gasho-plugin build` は、`dist/` にマニフェストだけを写す。
+
+```json
+{
+  "id": "ayu-dark",
+  "name": "ayu Dark",
+  "version": "1.0.0",
+  "description": "ayu の暗い配色（ayu-theme/vscode-ayu、MIT）",
+  "api": "1.6",
+  "theme": {
+    "background": "#10141c",
+    "foreground": "#fcf8ecbd",
+    "neutral-950": "#0d1017",
+    "primary": "#e6b450"
+  }
+}
+```
+
+Gasho の画面は、有効なテーマの値を `<html>` の CSS 変数に当て、Gasho の既定の値の代わりに使う。書かなかった名前は、既定の値のままになる。当てた値はブラウザーに覚えておき、次に開いたときは、画面を描く前に当てる。初めて開く origin（`localhost:7740` と LAN の IP は別の origin）では、Gasho サーバーにつながるまで既定の色が出る。
+
+書ける名前は次のとおり。値は `;`・`{`・`}` を含まない64文字までの CSS の値（`#10141c`、`oklch(0.2 0 0)` など）で、Gasho サーバーが確かめる。
+
+| まとまり | 名前 | 当てる CSS 変数 |
+|---|---|---|
+| 背景と文字 | `background`・`foreground`・`card`・`card-foreground`・`popover`・`popover-foreground`・`surface`・`surface-raised`・`surface-hover` | `--<名前>` |
+| 強調 | `primary`・`primary-foreground`・`secondary`・`secondary-foreground`・`muted`・`muted-foreground`・`accent`・`accent-foreground`・`destructive` | `--<名前>` |
+| 枠 | `border`・`border-hover`・`input`・`ring` | `--<名前>` |
+| サイドバー | `sidebar`・`sidebar-foreground`・`sidebar-primary`・`sidebar-primary-foreground`・`sidebar-accent`・`sidebar-accent-foreground`・`sidebar-border`・`sidebar-ring` | `--<名前>` |
+| グラフ | `chart-1`〜`chart-5` | `--<名前>` |
+| 灰色 | `neutral-50`・`neutral-100`〜`neutral-900`（100 ごと）・`neutral-950` | `--color-<名前>`（Tailwind CSS の灰色。`bg-neutral-950` などのクラスが読む） |
+| 角の丸み | `radius` | `--radius` |
+
+同時に有効にできるテーマは1つである。プラグインの画面でテーマを有効にするか、カタログから追加すると、Gasho サーバーがほかのテーマを無効にし、操作のログに残す。P12 でリンクしたプラグインは、一度も切り替えていないと有効として扱うので、テーマが2つ以上有効になることがある。そのときは ID の順で最初のテーマを当て、プラグインの画面にそのことを出す。テーマを無効にするか外すと、既定の色に戻る。どれも、ページを読み込み直さずに変わる（P11）。
+
+作れるのは暗いテーマだけである。`<html>` に `dark` クラスが付いていて、Gasho の画面は暗い色の値を使う。
+
+テーマで変わるのは、テーマの変数のクラス（`bg-surface`・`text-muted-foreground` など）と、neutral の灰色のクラス（`bg-neutral-950` など）で書いた色である。Gasho の画面の色は、このどちらかで書く。色コード（`bg-[#0b0b0c]`）や neutral 以外の灰色（`zinc` など）で書いたところは、テーマで変わらない。白と黒（`text-white`・`bg-white/[0.07]` など）と、状態やグラフの色（`text-emerald-400` など）は、テーマで変えない。
 
 ## 画面の部分から使えるもの
 
@@ -812,7 +854,7 @@ Gasho サーバーは、入れたプラグインを置くフォルダーを監�
 3. そのプラグインの部品を、新しい版の部品に入れ替えて描き直す
 4. 古い `web.css` を外す
 
-1か2で失敗したときは、前の版を動かし続け、プラグインの画面に理由を出す。入れ替えのあいだも、Gasho のほかの部分と、ほかのプラグインはそのまま動く。
+1か2で失敗したときは、前の版を動かし続け、プラグインの画面に理由を出す。入れ替えのあいだも、Gasho のほかの部分と、ほかのプラグインはそのまま動く。テーマ（P16）は読み込むファイルを持たないので、プラグインの一覧を受け取るたびに、有効なテーマの値を当て直す。
 
 入れ替えると、そのプラグインの部品は作り直すので、部品が自分で持っていた値は消える。Gasho が持っている値は残る。
 

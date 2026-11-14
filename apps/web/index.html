@@ -12,6 +12,15 @@
          The icons are Noto Emoji's 🙏 (SIL OFL 1.1, /licenses/noto-emoji-OFL.txt) on the background color. -->
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <!-- The theme in use (src/plugins/theme.ts), set before the page is drawn: a reload shows its colors at once. -->
+    <script>
+      try {
+        const vars = JSON.parse(localStorage.getItem("gasho.theme") || "{}");
+        for (const [name, value] of Object.entries(vars)) {
+          if (name.startsWith("--") && typeof value === "string") document.documentElement.style.setProperty(name, value);
+        }
+      } catch {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

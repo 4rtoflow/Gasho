@@ -61,14 +61,32 @@ test("checkManifest takes a good manifest and says what is wrong with a bad one"
   assert.match(bad({}, "other"), /フォルダーの名前/);
   assert.match(bad({ api: "2.0" }), /API 2\.0/);
   assert.match(bad({ api: "1.9" }), /API 1\.9/);
-  assert.match(bad({ api: "1.6" }), /この Gasho は 1\.5 までです/);
+  assert.match(bad({ api: "1.7" }), /この Gasho は 1\.6 までです/);
   assert.match(bad({ version: "1" }), /version/);
   assert.match(bad({ web: { js: "../x.js" } }), /web\.js/);
   assert.match(bad({}, "hello", new Set(["gasho-plugin.json", "web.js", "web.css"])), /daemon\.js のファイル（daemon\.js）がありません/);
-  assert.match(bad({ web: undefined, daemon: undefined }), /web と daemon/);
+  assert.match(bad({ web: undefined, daemon: undefined }), /web・daemon・theme/);
   assert.match(bad({ methods: { go: { kind: "maybe" } } }), /kind/);
   assert.match(bad({ permissions: ["root"] }), /permissions/);
   assert.match(bad({ settings: { x: { type: "select", scope: "server", label: "x", options: [] } } }), /options/);
+
+  // A theme alone is a plugin (API 1.6). Only Gasho's names, and values that stay one CSS value.
+  const theme = { id: "hello", name: "Hello", version: "1.0.0", api: "1.6", theme: { background: " #10141c ", "neutral-950": "oklch(0.2 0 0)" } };
+  const onlyManifest = new Set(["gasho-plugin.json"]);
+  const t = checkManifest(theme, "hello", onlyManifest);
+  assert.ok("manifest" in t);
+  assert.deepEqual(t.manifest.theme, { background: "#10141c", "neutral-950": "oklch(0.2 0 0)" });
+  const badTheme = (m: object) => {
+    const r = checkManifest({ ...theme, ...m }, "hello", onlyManifest);
+    return "error" in r ? r.error : "";
+  };
+  assert.match(badTheme({ api: "1.5" }), /api を 1\.6 以上/);
+  assert.match(badTheme({ theme: {} }), /1つ以上/);
+  assert.match(badTheme({ theme: { "color-white": "#fff" } }), /color-white という名前はありません/);
+  assert.match(badTheme({ theme: JSON.parse('{"__proto__": "#fff"}') }), /__proto__ という名前はありません/);
+  assert.match(badTheme({ theme: { background: "red; color: blue" } }), /theme\.background/);
+  assert.match(badTheme({ theme: { background: "#000 } body { display: none" } }), /theme\.background/);
+  assert.match(badTheme({ theme: { background: "x".repeat(65) } }), /theme\.background/);
 });
 
 test("settingProblem checks values against their settings", () => {
@@ -120,9 +138,10 @@ test("the registry reads plugin folders, copies each version into the cache, and
   reg.close();
 });
 
-async function setup() {
+async function setup(...more: object[]) {
   const dir = tmp();
   writePlugin(dir);
+  for (const m of more) writePlugin(dir, m);
   const registry = new PluginRegistry({ dir, cacheDir: tmp() });
   await registry.scan();
   const store = new Store(":memory:");
@@ -224,6 +243,25 @@ test("calls of a plugin are relayed to the working server and the answer goes ba
   hub.onClientMessage(client, { type: "plugin.machines", requestId: "m1", plugin: "hello", machines: [] });
   call("greet", { requestId: "r-none" });
   assert.match((answer("r-none") as { error?: string }).error ?? "", /動かしていません/);
+});
+
+test("only one theme is enabled at a time: enabling one disables the others, recorded in the operations log", async () => {
+  const theme = (id: string) => ({ id, name: id, version: "1.0.0", api: "1.6", theme: { background: "#000" } });
+  const { client, hub, store } = await setup(theme("ayu-dark"), theme("vscode-dark"));
+  const enabled = () => Object.fromEntries((lastPlugins(client.sent) ?? []).map((p) => [p.id, p.enabled]));
+  const enable = (plugin: string, on = true) => hub.onClientMessage(client, { type: "plugin.enable", requestId: `e-${plugin}-${on}`, plugin, enabled: on });
+  // Plugins never switched count as enabled, so two themes can be (the screen uses the first).
+  assert.deepEqual(enabled(), { "ayu-dark": true, hello: true, "vscode-dark": true });
+
+  enable("ayu-dark");
+  assert.deepEqual(enabled(), { "ayu-dark": true, hello: true, "vscode-dark": false });
+  assert.ok(store.recentEvents().some((e) => e.event === "Gasho:plugin.enable" && e.summary?.startsWith("vscode-dark [off]（ayu-dark に切り替え）")));
+  enable("vscode-dark");
+  assert.deepEqual(enabled(), { "ayu-dark": false, hello: true, "vscode-dark": true });
+  // Turning a theme off turns no other on; a plugin that is no theme leaves the themes as they are.
+  enable("vscode-dark", false);
+  enable("hello");
+  assert.deepEqual(enabled(), { "ayu-dark": false, hello: true, "vscode-dark": false });
 });
 
 test("server settings are checked against the manifest, kept, and sent to browsers and gasho-daemon", async () => {

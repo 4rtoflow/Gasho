@@ -556,7 +556,62 @@ export interface PluginManifest {
   methods?: Record<string, PluginMethodSpec>;
   permissions?: PluginPermission[];
   settings?: Record<string, PluginSettingSpec>;
+  /** A theme (P16, API 1.6): CSS values by name; the names left out keep Gasho's own. */
+  theme?: Partial<Record<PluginThemeName, string>>;
 }
+
+/**
+ * What a theme (P16) may set: Gasho's theme variables (--background, …, --radius) and the steps of Tailwind CSS's
+ * neutral gray (--color-neutral-50 … 950), which the screen's gray classes (bg-neutral-950, …) read.
+ */
+export type PluginThemeName =
+  | "background"
+  | "foreground"
+  | "card"
+  | "card-foreground"
+  | "popover"
+  | "popover-foreground"
+  | "surface"
+  | "surface-raised"
+  | "surface-hover"
+  | "primary"
+  | "primary-foreground"
+  | "secondary"
+  | "secondary-foreground"
+  | "muted"
+  | "muted-foreground"
+  | "accent"
+  | "accent-foreground"
+  | "destructive"
+  | "border"
+  | "border-hover"
+  | "input"
+  | "ring"
+  | "sidebar"
+  | "sidebar-foreground"
+  | "sidebar-primary"
+  | "sidebar-primary-foreground"
+  | "sidebar-accent"
+  | "sidebar-accent-foreground"
+  | "sidebar-border"
+  | "sidebar-ring"
+  | "chart-1"
+  | "chart-2"
+  | "chart-3"
+  | "chart-4"
+  | "chart-5"
+  | "neutral-50"
+  | "neutral-100"
+  | "neutral-200"
+  | "neutral-300"
+  | "neutral-400"
+  | "neutral-500"
+  | "neutral-600"
+  | "neutral-700"
+  | "neutral-800"
+  | "neutral-900"
+  | "neutral-950"
+  | "radius";
 
 /** Where a plugin's daemon part runs: on every working server, or on those listed (machine ids). */
 export type PluginMachines = "all" | string[];

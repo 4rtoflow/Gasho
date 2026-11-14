@@ -10,11 +10,11 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import type { PluginManifest, PluginMethodSpec, PluginPermission, PluginSettingSpec } from "@gasho/protocol";
+import type { PluginManifest, PluginMethodSpec, PluginPermission, PluginSettingSpec, PluginThemeName } from "@gasho/protocol";
 
 /** The plugin API this Gasho server serves: plugins written for 1.0 … 1.PLUGIN_API_MINOR. */
 export const PLUGIN_API_MAJOR = 1;
-export const PLUGIN_API_MINOR = 5;
+export const PLUGIN_API_MINOR = 6;
 /** The version of the plugin API, as plugins and gasho-daemon name it. */
 export const PLUGIN_API = `${PLUGIN_API_MAJOR}.${PLUGIN_API_MINOR}`;
 
@@ -23,6 +23,60 @@ export const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const API_RE = /^(\d+)\.(\d+)$/;
 const KEY_RE = /^[A-Za-z][\w-]{0,63}$/;
 const PERMISSIONS = new Set<PluginPermission>(["session.input", "session.launch"]);
+/** The names a theme (P16) may set. */
+const THEME_NAMES: Record<PluginThemeName, true> = {
+  background: true,
+  foreground: true,
+  card: true,
+  "card-foreground": true,
+  popover: true,
+  "popover-foreground": true,
+  surface: true,
+  "surface-raised": true,
+  "surface-hover": true,
+  primary: true,
+  "primary-foreground": true,
+  secondary: true,
+  "secondary-foreground": true,
+  muted: true,
+  "muted-foreground": true,
+  accent: true,
+  "accent-foreground": true,
+  destructive: true,
+  border: true,
+  "border-hover": true,
+  input: true,
+  ring: true,
+  sidebar: true,
+  "sidebar-foreground": true,
+  "sidebar-primary": true,
+  "sidebar-primary-foreground": true,
+  "sidebar-accent": true,
+  "sidebar-accent-foreground": true,
+  "sidebar-border": true,
+  "sidebar-ring": true,
+  "chart-1": true,
+  "chart-2": true,
+  "chart-3": true,
+  "chart-4": true,
+  "chart-5": true,
+  "neutral-50": true,
+  "neutral-100": true,
+  "neutral-200": true,
+  "neutral-300": true,
+  "neutral-400": true,
+  "neutral-500": true,
+  "neutral-600": true,
+  "neutral-700": true,
+  "neutral-800": true,
+  "neutral-900": true,
+  "neutral-950": true,
+  radius: true,
+};
+/** The plugin API that brought themes. */
+const THEME_API_MINOR = 6;
+/** A theme's value, at most (characters). */
+const THEME_VALUE_MAX = 64;
 export const DEFAULT_TIMEOUT_SECONDS = 15;
 export const MAX_TIMEOUT_SECONDS = 120;
 /** A plugin's files, at most. */
@@ -102,13 +156,25 @@ function settingError(key: string, spec: unknown): string | undefined {
   }
 }
 
+/** What is wrong with a theme (P16) of a plugin written for the plugin API `api` (undefined when nothing is). */
+function themeError(theme: unknown, api: string): string | undefined {
+  if (Number(API_RE.exec(api)?.[2]) < THEME_API_MINOR) return `theme を使うには、api を 1.${THEME_API_MINOR} 以上にしてください。`;
+  if (!isRecord(theme) || Object.keys(theme).length === 0) return "theme に、名前と値を1つ以上書いてください。";
+  for (const [key, value] of Object.entries(theme)) {
+    if (!Object.hasOwn(THEME_NAMES, key)) return `theme に ${key.slice(0, 40)} という名前はありません。`;
+    // One CSS value: it cannot end the declaration, or the rule, it is put in.
+    if (!isText(value, THEME_VALUE_MAX) || /[;{}]/.test(value)) return `theme.${key} は、; { } を含まない${THEME_VALUE_MAX}文字までの値にしてください。`;
+  }
+  return undefined;
+}
+
 /**
  * Checks a plugin's gasho-plugin.json: its fields, the plugin API it needs, and that the files it names are among
  * `files` (paths relative to its folder). `folder`: the name of its folder, which must be its id.
  */
 export function checkManifest(raw: unknown, folder: string | undefined, files: ReadonlySet<string>): ManifestCheck {
   if (!isRecord(raw)) return { error: "gasho-plugin.json が JSON のオブジェクトではありません。" };
-  const { id, name, version, description, api, web, daemon, methods, permissions, settings } = raw;
+  const { id, name, version, description, api, web, daemon, methods, permissions, settings, theme } = raw;
   if (typeof id !== "string" || !ID_RE.test(id)) return { error: "id は、英小文字で始まり、英小文字・数字・- からなる2〜32文字にしてください。" };
   if (folder !== undefined && folder !== id) return { error: `フォルダーの名前（${folder}）と id（${id}）が違います。` };
   if (!isText(name, 40)) return { error: "name を40文字までで書いてください。" };
@@ -141,7 +207,12 @@ export function checkManifest(raw: unknown, folder: string | undefined, files: R
     if (typeof js !== "string") return js;
     manifest.daemon = { js };
   }
-  if (!manifest.web && !manifest.daemon) return { error: "web と daemon のどちらかは要ります。" };
+  if (theme !== undefined) {
+    const wrong = themeError(theme, api as string);
+    if (wrong) return { error: wrong };
+    manifest.theme = Object.fromEntries(Object.entries(theme as Record<string, string>).map(([k, v]) => [k, v.trim()]));
+  }
+  if (!manifest.web && !manifest.daemon && !manifest.theme) return { error: "web・daemon・theme のどれかは要ります。" };
   if (methods !== undefined) {
     if (!isRecord(methods)) return { error: "methods が正しくありません。" };
     const out: Record<string, PluginMethodSpec> = {};

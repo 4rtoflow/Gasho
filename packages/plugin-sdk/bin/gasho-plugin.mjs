@@ -7,8 +7,9 @@
 // daemon part), as gasho-plugin.json says which there are. dist/ gets the manifest, web.js and web.css (an ES module for
 // the browser) and daemon.js (an ES module for Node.js), each with what it uses inside it, except the modules the web
 // part shares with Gasho's screen (react, react-dom, @gasho/plugin-sdk): their imports read what Gasho puts on
-// globalThis.__gasho, so that one React runs the whole page. With --watch, it builds again whenever a source changes,
-// and the Gasho server reloads the plugin (hot reload) once it has linked the folder (hub:plugin add --link).
+// globalThis.__gasho, so that one React runs the whole page. A theme alone (gasho-plugin.json's theme) has no sources:
+// dist/ gets only the manifest. With --watch, it builds again whenever a source changes, and the Gasho server reloads
+// the plugin (hot reload) once it has linked the folder (hub:plugin add --link).
 //
 // Plain JavaScript: Node.js runs it from node_modules, where it strips no TypeScript.
 import fs from "node:fs";
@@ -38,7 +39,7 @@ function readManifest(root) {
   if (typeof manifest?.id !== "string" || !/^[a-z][a-z0-9-]{1,31}$/.test(manifest.id)) {
     throw new Error("gasho-plugin.json: id must be 2-32 of a-z, 0-9 and -, starting with a letter");
   }
-  if (!manifest.web && !manifest.daemon) throw new Error("gasho-plugin.json: give web, daemon, or both");
+  if (!manifest.web && !manifest.daemon && !manifest.theme) throw new Error("gasho-plugin.json: give web, daemon or theme (or several)");
   return manifest;
 }
 

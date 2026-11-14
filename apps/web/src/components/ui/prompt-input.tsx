@@ -396,7 +396,7 @@ function ModelPicker({
                   maxHeight: pos.maxHeight,
                   transformOrigin: dropUp ? "bottom left" : "top left",
                 }}
-                className="z-[100] overflow-y-auto overscroll-contain rounded-2xl bg-white p-1.5 shadow-xl outline-none ring-1 ring-black/[0.08] dark:bg-[#161617] dark:ring-white/[0.1]"
+                className="z-[100] overflow-y-auto overscroll-contain rounded-2xl bg-white p-1.5 shadow-xl outline-none ring-1 ring-black/[0.08] dark:bg-popover dark:ring-white/[0.1]"
               >
             {models.map((m, i) => {
               const on = i === selected;
@@ -796,7 +796,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
         ref={cardRef}
         {...dragProps}
         className={cx(
-          "relative rounded-[24px] bg-white p-2 ring-1 transition-[box-shadow] duration-200 dark:bg-[#0f0f10]",
+          "relative rounded-[24px] bg-white p-2 ring-1 transition-[box-shadow] duration-200 dark:bg-surface",
           shellMode
             ? "ring-amber-500/50 focus-within:ring-amber-500/70 dark:ring-amber-400/40 dark:focus-within:ring-amber-400/60"
             : "ring-black/[0.08] focus-within:ring-black/25 dark:ring-white/[0.09] dark:focus-within:ring-white/25",

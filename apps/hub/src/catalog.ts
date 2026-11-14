@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { CatalogPlugin, PluginCatalog } from "@gasho/protocol";
+import type { CatalogPlugin, PluginCatalog, PluginManifest } from "@gasho/protocol";
 import { ID_RE, MAX_BYTES, MAX_FILES, readPluginFolder, swapPluginFolder, VERSION_RE } from "./plugins.ts";
 import { readTgz } from "./tar.ts";
 
@@ -238,9 +238,9 @@ export class PluginCatalogSource extends EventEmitter {
 /**
  * Puts a plugin's release file in place of the plugin in the plugins folder, after checking it: it unpacks safely
  * (tar.ts), and what it holds is the catalog's version of that plugin and passes the registry's checks. Until it is
- * swapped in, the version before stays (swapPluginFolder).
+ * swapped in, the version before stays (swapPluginFolder). Gives the manifest of what it put in place.
  */
-export async function installRelease(pluginsDir: string, entry: CatalogPlugin, tgz: Buffer): Promise<void> {
+export async function installRelease(pluginsDir: string, entry: CatalogPlugin, tgz: Buffer): Promise<PluginManifest> {
   const { files, dirs } = readTgz(tgz, { maxBytes: MAX_BYTES, maxFiles: MAX_FILES });
   await fsp.mkdir(pluginsDir, { recursive: true });
   // Made inside the plugins folder (on the same disk, for the swap); the registry leaves out names starting with ".".
@@ -258,6 +258,7 @@ export async function installRelease(pluginsDir: string, entry: CatalogPlugin, t
     if (read.manifest.id !== entry.id) throw new Error(`中身の id（${read.manifest.id}）がカタログ（${entry.id}）と違います。`);
     if (read.manifest.version !== entry.version) throw new Error(`中身の版（${read.manifest.version}）がカタログ（${entry.version}）と違います。`);
     await swapPluginFolder(pluginsDir, entry.id, made);
+    return read.manifest;
   } catch (e) {
     await fsp.rm(made, { recursive: true, force: true });
     throw e;
