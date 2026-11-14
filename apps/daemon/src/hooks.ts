@@ -96,16 +96,20 @@ export interface HookServerOptions {
    * closes before that (Claude Code gave up). Without it, PermissionRequest is answered at once like other hooks.
    */
   onPermissionRequest?: (payload: Record<string, unknown>, reply: HookReply) => (() => void) | undefined;
+  /** What the status line relay of a session Gasho started sent (POST /statusline; see statusline.ts). */
+  onStatusLine?: (payload: Record<string, unknown>) => void;
 }
 
 /**
  * Answers every request at once with an empty 200, so a hook never delays Claude Code; a PermissionRequest is passed
- * to `onPermissionRequest` (and to `onEvent`) and answered when it says.
+ * to `onPermissionRequest` (and to `onEvent`) and answered when it says. The status line relay posts to /statusline,
+ * with the same secret.
  */
 export function startHookServer(opts: HookServerOptions): http.Server {
   let lastRejectLog = 0;
   const server = http.createServer((req, res) => {
-    if (req.method !== "POST" || req.url !== "/hooks") {
+    const statusLine = req.url === "/statusline";
+    if (req.method !== "POST" || (req.url !== "/hooks" && !statusLine)) {
       res.writeHead(404).end();
       return;
     }
@@ -137,6 +141,11 @@ export function startHookServer(opts: HookServerOptions): http.Server {
         const text = body ? JSON.stringify(body) : "";
         res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(text) }).end(text);
       };
+      if (statusLine) {
+        reply(undefined);
+        if (payload) opts.onStatusLine?.(payload);
+        return;
+      }
       if (payload && payload.hook_event_name === "PermissionRequest" && opts.onPermissionRequest) {
         const dropped = opts.onPermissionRequest(payload, reply);
         res.on("close", () => {

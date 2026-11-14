@@ -26,6 +26,7 @@ import { githubRepoOf, nestedRepos, readGitGraph, worktreeOf } from "./git.ts";
 import { GitHubProxy } from "./github.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
+import { isInside, statusLineLaunch, statusLineOf, userStatusLine } from "./statusline.ts";
 import { HubClient } from "./hub-client.ts";
 import { answersMessage, OPEN_QUESTION, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
 import {
@@ -76,7 +77,7 @@ import { RegisteredRepos } from "./repos.ts";
 import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
-import { log } from "./util.ts";
+import { log, str } from "./util.ts";
 
 export const DAEMON_VERSION = "0.14.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
@@ -119,6 +120,8 @@ const LATE_PICKER_WAIT_MS = 10_000;
 const PROBE_MIN_AGE_MS = 30_000;
 /** An idle session's tokens are counted again after this long (a working one at every refresh). */
 const TOKENS_IDLE_MS = 30_000;
+/** How long the sessions wait to be sent after a status line report, for the reports that follow it. */
+const EMIT_DELAY_MS = 500;
 /** After a look at the model names whose "/model" was not taken in time, how long to watch for the picker it opens. */
 const LATE_PICKER_WATCH_MS = 5 * 60_000;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -171,6 +174,7 @@ export class Daemon {
   private refreshing = false;
   private refreshAgain = false;
   private refreshTimer: NodeJS.Timeout | undefined;
+  private emitTimer: NodeJS.Timeout | undefined;
   private polling = false;
   private github = new Map<string, { at: number; repo?: GitHubRepo }>();
   private repos = new Map<string, { at: number; repos?: SessionRepo[] }>();
@@ -284,10 +288,16 @@ export class Daemon {
       port: this.cfg.hookPort,
       secret: this.cfg.hookSecret,
       onPermissionRequest: (payload, reply) => {
+        // A plugin's own Claude Code is no session of Gasho's: Gasho does not answer for it.
+        if (this.fromPlugin(payload)) {
+          reply(undefined);
+          return undefined;
+        }
         const id = this.permissions.add(payload, reply);
         return id ? () => this.permissions.dropped(id) : undefined;
       },
       onEvent: (payload) => {
+        if (this.fromPlugin(payload)) return;
         this.permissions.observe(payload);
         const ev = summarizeHook(payload);
         if (!ev) return;
@@ -295,6 +305,7 @@ export class Daemon {
         // Hooks often mean the status changed; refresh soon instead of waiting for the next poll.
         this.scheduleRefresh(250);
       },
+      onStatusLine: (payload) => this.applyStatusLine(payload),
     });
     setInterval(() => void this.refresh(), this.cfg.pollIntervalMs);
     setInterval(() => void this.pollTails(), 1000);
@@ -304,6 +315,45 @@ export class Daemon {
       log("cannot watch the sessions directory; relying on polling", e);
     }
     void this.refresh();
+  }
+
+  /**
+   * Whether a hook comes from a Claude Code that a plugin's daemon part runs in its own folder (as the usage plugin
+   * does, to read the plan's usage limits): no session of Gasho's.
+   */
+  private fromPlugin(payload: Record<string, unknown>): boolean {
+    const cwd = str(payload.cwd);
+    return cwd !== undefined && isInside(cwd, this.cfg.pluginDataDir);
+  }
+
+  /**
+   * What the status line of a session Gasho started reported (statusline.ts): its context window, and the plan's usage
+   * limits. A report that changes nothing keeps the time of the one before, which is that of the reply it came from.
+   */
+  private applyStatusLine(payload: Record<string, unknown>): void {
+    const report = statusLineOf(payload);
+    const t = report && this.tracked.get(report.sessionId);
+    if (!report || !t) return;
+    const { info } = t;
+    const c = report.context;
+    if (c && !(info.context && info.context.used === c.used && info.context.size === c.size && info.context.percent === c.percent)) {
+      info.context = c;
+      this.scheduleEmit();
+    }
+    const l = report.limits;
+    if (l && JSON.stringify({ ...l, at: 0 }) !== JSON.stringify({ ...info.limits, at: 0 })) {
+      info.limits = l;
+      this.scheduleEmit();
+    }
+  }
+
+  /** Sends the sessions soon, once for what comes in meanwhile (status line reports come in bursts). */
+  private scheduleEmit(): void {
+    if (this.emitTimer) return;
+    this.emitTimer = setTimeout(() => {
+      this.emitTimer = undefined;
+      this.emitSessions();
+    }, EMIT_DELAY_MS);
   }
 
   private scheduleRefresh(delayMs: number): void {
@@ -324,7 +374,8 @@ export class Daemon {
       const rows = await listAgents(this.cfg.claudeBin);
       const seen = new Set<string>();
       for (const row of rows) {
-        if (!row.sessionId || !row.cwd) continue;
+        // A Claude Code that a plugin runs in its own folder is no session (see fromPlugin).
+        if (!row.sessionId || !row.cwd || isInside(row.cwd, this.cfg.pluginDataDir)) continue;
         seen.add(row.sessionId);
         const t = this.tracked.get(row.sessionId) ?? this.newTracked(row);
         this.tracked.set(row.sessionId, t);
@@ -1036,14 +1087,20 @@ export class Daemon {
     | { error: string; needsTrust?: true; trustWarnings?: string[] }
   > {
     const terminal = terminalName(rcName);
+    // Its status line reports the context window and the plan's usage limits to gasho-daemon (statusline.ts).
+    const statusLine = statusLineLaunch({
+      port: this.cfg.hookPort,
+      secret: this.cfg.hookSecret,
+      user: await userStatusLine(dir, this.cfg.claudeDir).catch(() => undefined),
+    });
     let pid: number;
     try {
       pid = await this.terminals.start({
         name: terminal,
         cwd: dir,
         file: this.cfg.claudeBin,
-        args: ["--remote-control", rcName, ...claudeArgs],
-        env: cleanEnv(),
+        args: ["--remote-control", rcName, ...claudeArgs, ...statusLine.args],
+        env: { ...cleanEnv(), ...statusLine.env },
       });
     } catch (e) {
       log(`could not start a terminal for "${rcName}"`, e);

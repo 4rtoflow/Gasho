@@ -18,7 +18,7 @@ Gasho のプラグインは、Gasho の画面の決まった場所に、項目�
 | プラグインの画面 | サイドバーの「プラグイン」から開くページ（`#/plugins`）。ホームや設定と同じく、メインの領域に出す。GashoPlugins のプラグインを追加・更新し、有効・無効を切り替え、外す |
 | 画面の部分 | ブラウザーで動く ES モジュール（`web.js`）。拡張点に部品を足す |
 | daemon の部分 | gasho-daemon が working server の子プロセスで動かす ES モジュール（`daemon.js`）。画面の部分から呼ばれて、コマンドを実行したりファイルを読んだりする |
-| 拡張点 | プラグインが部品を足せる、画面の決まった場所。サイドバー、ページ、セッションのヘッダー、セッションのパネル、設定、ホームのタイル、会話の末尾の7つ |
+| 拡張点 | プラグインが部品を足せる、画面の決まった場所。サイドバー、ページ、セッションのヘッダー、セッションのパネル、設定、ホームのタイル、会話の末尾、入力欄の下の8つ |
 | ホットリロード | 動いている Gasho で、プラグインを新しい版に入れ替えること。ページの読み込み直しも、Gasho サーバーと gasho-daemon の起動し直しも要らない |
 | SDK | プラグインを書くための npm パッケージ。Gasho のリポジトリの `packages/plugin-sdk/` で作り、GitHub Packages に `@4rtoflow/gasho-plugin-sdk` として公開する。プラグインのコードでは `@gasho/plugin-sdk` の名前で使う |
 
@@ -50,8 +50,9 @@ Gasho のプラグインは、Gasho の画面の決まった場所に、項目�
 | P11 | ホットリロード。追加・更新・有効・無効・外すを、ページの読み込み直しも、Gasho サーバーと gasho-daemon の起動し直しもせずに反映する |
 | P12 | 作っているプラグインを、Gasho サーバーのコマンドで、リンクして入れる |
 | P13 | セッション画面の会話の末尾（最後の発言の下、入力欄の上）に部品を足す（API 1.2） |
+| P14 | セッション画面で、入力欄の下の行（キーの案内と文字数の行）に部品を足す（API 1.4） |
 
-P6 は、いまの GitHub の機能がホームにタイルを持っているので足した。P8 は GitHub では使わないが、working server の様子を監視するプラグインのために用意する。P13 は、エージェントが作業しているあいだ、その様子を会話に出すプラグインのために、API 1.2 で足した。
+P6 は、いまの GitHub の機能がホームにタイルを持っているので足した。P8 は GitHub では使わないが、working server の様子を監視するプラグインのために用意する。P13 は、エージェントが作業しているあいだ、その様子を会話に出すプラグインのために、API 1.2 で足した。P14 は、セッションの Context Window の使用率と、Claude.ai のプランで決まっている使用量の上限を出すプラグインのために、API 1.4 で足した。
 
 ## 構成
 
@@ -144,7 +145,7 @@ GitHub プラグインの場合は、次のようになる。
 | `id` | 英小文字で始まり、英小文字・数字・`-` からなる2〜32文字。GashoPlugins のディレクトリの名前と同じにする。URL、保存のキー、操作のログに使う |
 | `name`、`description` | 画面に出す名前（40文字まで）と説明 |
 | `version` | プラグインの版（1.2.0 の形）。GashoPlugins に新しい版を出すときに上げる。プラグインの画面は、カタログの版が入れた版より新しいときに「更新」を出す。ホットリロードで入れ替えるかは、版ではなく中身のハッシュで判断する |
-| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した |
+| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した。1.4 で、入力欄の下（P14、`composerFooter`）、SDK の `Popover`、`SessionInfo` の `context` と `limits` を足し、プラグイン専用のフォルダーで動く Claude Code をセッションとして扱わないようにした |
 | `web`、`daemon` | 画面の部分と daemon の部分のファイル。少なくともどちらか1つは要る |
 | `methods` | 画面の部分から呼べる、daemon の部分のメソッド。`kind` は、読むだけのもの（`read`）か、何かを変えるもの（`write`）か。`write` の呼び出しは操作のログに残す。`timeoutSeconds` は待つ時間で、既定は15秒、長くても120秒まで |
 | `permissions` | 読む・出す以外に、画面の部分がすること。`session.input`（セッションに発言を送る）と `session.launch`（セッションを起動する。API 1.1） |
@@ -154,7 +155,7 @@ GitHub プラグインの場合は、次のようになる。
 
 ### 画面のどこに出るか
 
-セッション画面では、サイドバーの項目（P1）、ヘッダーの項目（P3）、パネル（P4）、会話の末尾の部品（P13）が次の場所に出る。サイドバーの「プラグイン」は Gasho の項目で、プラグインの画面（P9）を開く。
+セッション画面では、サイドバーの項目（P1）、ヘッダーの項目（P3）、パネル（P4）、会話の末尾の部品（P13）、入力欄の下の部品（P14）が次の場所に出る。サイドバーの「プラグイン」は Gasho の項目で、プラグインの画面（P9）を開く。
 
 ```
 ┌────────────────┬───────────────────────────────────┬─────────────────┐
@@ -170,12 +171,13 @@ GitHub プラグインの場合は、次のようになる。
 │ * main         │ ┌───────────────────────────────┐ │                 │
 │   Gasho        │ │ Agent への指示を入力...       │ │  P4 のパネル    │
 │ * feat/x       │ └───────────────────────────────┘ │                 │
-│   Gasho        │                                   │                 │
+│   Gasho        │  ↵ で送信     ◔ 36% 0/20000 ◀P14  │                 │
 └────────────────┴───────────────────────────────────┴─────────────────┘
 
 P1 サイドバーの項目 ─▶ P2 のページを開く（#/p/<ID>/<ページ>）
 P3 ヘッダーの項目   ─▶ P4 のパネルを右に開く（スマホでは画面全体）
 P13 会話の末尾      ─▶ 最後の発言の下に出し、会話と一緒にスクロールする
+P14 入力欄の下      ─▶ 入力欄の下の行で、文字数の左に出す（スマホでも出す）
 ```
 
 ホームのタイル（P6）と、設定画面のプラグインの区切り（P5）は、次の場所に出る。
@@ -354,6 +356,27 @@ conversationEnd: [{ id: "spinner", when: (c) => c.machine.connected && c.session
 - 同時に動いているツールは、名前と要約で区別する。いちばんあとに始めたものを返す
 - 作業も確認待ちもしていないセッションでは、空のオブジェクトを返す
 
+### 入力欄の下（P14）
+
+部品は、セッション画面で、入力欄の下の行に出す。キーの案内（「↵ で送信」）と文字数（「0/20000」）が並ぶ行で、部品は文字数の左に並べる（API 1.4）。キーの案内は、幅が 640px 未満の画面とタッチ端末では隠れるが、部品は文字数と同じく、いつも出す。Gasho から入力できないセッション（`claude rc` が起動したもの）では、文字数のない行の右端に出す。行の高さは 1.5rem なので、部品はその中に収め、詳しい内容は SDK の `Popover` に出す。セッションの Context Window の使用率のような、セッションの様子を小さく出すのに使う。
+
+```tsx
+composerFooter: [{ id: "usage", when: (c) => c.session.context !== undefined, component: UsageRing }],
+```
+
+部品が受け取るものと、`when` と `order` の決まりは、会話の末尾（P13）と同じである。プラグインが複数あるときは、`order` の小さいものから左に並べる。部品がエラーを投げたときは、行が狭いので「もう一度」を出さず、部品を出さない。エラーは、プラグインの画面に出す。
+
+Gasho から起動したセッションの `SessionInfo` には、Claude Code がステータスラインに渡す値が入る。入れるのは、プラグインの API 1.4 に対応した gasho-daemon である。
+
+| フィールド | 中身 |
+|---|---|
+| `context` | Context Window。いま使っているトークン数（`used`）、大きさ（`size`）、使用率（`percent`、0〜100 の整数）と、Claude Code が知らせた時刻（`at`）。最初の返答の前はない |
+| `limits` | Claude.ai のプランの使用量の上限。5時間の上限（`fiveHour`）と、すべてのモデルを合わせた週の上限（`sevenDay`）で、それぞれ使用率（`percent`）とリセットの時刻（`resetsAt`）を持つ。そのセッションの最後の返答の時点の値で、`at` はその時刻。最初の返答の前と、API キーで使っているセッションではない。5時間の上限は、プランによってない |
+
+値は、Claude Code がステータスラインのコマンドに渡す JSON の `context_window` と `rate_limits` から、gasho-daemon が取る。gasho-daemon は、セッションを起動するとき（フォークを含む）、`--settings` で、ステータスラインのコマンドを gasho-daemon の中継のコマンド（`statusline-relay`）にする。中継のコマンドは、受け取った値を、hooks を受けているのと同じ 127.0.0.1 のポート（`/statusline`）に、hooks と同じ秘密の値を付けて送る。そして、利用者がそのフォルダーに設定していたステータスラインのコマンドを同じ JSON で実行し、その出力を返す。`--settings` は利用者とプロジェクトの設定より優先されるので、こうしないと、利用者のステータスラインが消える。`padding` と `refreshInterval` も引き継ぐ。値の変わらない報告では `at` を変えないので、`at` は、値が変わった返答の時刻になる。
+
+`limits` は、Claude Code が API の返答のヘッダーから読む値で、モデルごとの週の上限（Fable など）は入らない。モデルごとの週の上限は、Claude Code の `/usage` が、Claude.ai の使用量のエンドポイントから読んでいる。プラグインで出すときは、daemon の部分で Claude Code を動かして読む（「プラグインが動かす Claude Code」）。
+
 ## 画面の部分から使えるもの
 
 画面の部分は、Gasho の状態と操作を、SDK のフックと関数で使う。プラグインが SDK だけを使うようにするのは、Gasho の中を変えても、プラグインが壊れないようにするためである。
@@ -387,6 +410,7 @@ conversationEnd: [{ id: "spinner", when: (c) => c.machine.connected && c.session
 | `Tile` | ホームのタイルの枠 |
 | `Markdown` | 会話と同じ Markdown の表示。HTML は出さず、画像は読み込まずにリンクにする |
 | `RelativeTime` | 「3分前」の表示。ポインターを乗せると時刻を出す |
+| `Popover` | ボタンから開く小さな画面（API 1.4）。開くボタン（`trigger`）、開く向き（`side`、`align`）、読み上げる名前（`label`）、クラス（`className`）を受け取る。開いているかをプラグインが持つときは、`open` と `onOpenChange` も渡す。Esc、外を押す、ボタンをもう一度押すと閉じる。モーダルにしないので、後ろの会話はスクロールできる。中身は、開いているあいだだけ描く |
 
 型（`MachineInfo`、`SessionInfo`、`GitHubRepo` など）は、`@gasho/protocol` のものを SDK から使う。
 
@@ -472,7 +496,7 @@ export default defineDaemonPlugin({
 | `ctx.session` | 呼び出しで指したセッション。gasho-daemon が見ているセッションだけで、ID、フォルダー、名前、GitHub のリポジトリ、フォルダーの中のリポジトリを持つ。`repo(パス)` は、セッションのフォルダー（パスを渡さないとき）か、gasho-daemon がその中で見つけたリポジトリのフォルダーを、その GitHub のリポジトリと一緒に返す |
 | `ctx.settings` | Gasho サーバーに保存した設定の値（`scope: "server"`） |
 | `ctx.folders()` | その working server で、Gasho がセッションを起動できるフォルダー（Claude Code が信頼しているフォルダーと、その親）。画面の `MachineInfo.folders` と同じもの。ブラウザーから来たパスで git などを動かす前に、この中にあるかを確かめるのに使う（API 1.1） |
-| `ctx.dataDir` | その working server での、このプラグイン専用のフォルダー（`~/.local/share/gasho/plugin-data/<ID>/`）。呼び出しをまたいで覚えておくもの（選んだ項目など）を置く。プラグインを更新しても外しても残る（API 1.1） |
+| `ctx.dataDir` | その working server での、このプラグイン専用のフォルダー（`~/.local/share/gasho/plugin-data/<ID>/`）。呼び出しをまたいで覚えておくもの（選んだ項目など）を置く。プラグインを更新しても外しても残る（API 1.1）。この中で動く Claude Code は、gasho-daemon がセッションとして扱わない（「プラグインが動かす Claude Code」、API 1.4） |
 | `ctx.signal` | 待つ時間を過ぎたときと、子プロセスを止めるときに、中断を知らせる AbortSignal |
 | `ctx.exec(コマンド, 引数, 指定)` | コマンドを、シェルを通さず、制御端末なしで実行する。gh と git が入力を求めて止まらないよう、`GH_PROMPT_DISABLED=1` と `GIT_TERMINAL_PROMPT=0` を付け、待つ時間と出力の大きさに上限を付ける。待つ時間を過ぎたら、プロセスグループに SIGTERM を送る |
 | `ctx.github` | working server の gh を、gasho-daemon に実行してもらう。`read(引数, 指定)` で読み、`write(引数, { repo })` で GitHub を変える。gh は `ctx.exec` ではなく、これで動かす（「GitHub を読む・変える」、API 1.3） |
@@ -501,6 +525,12 @@ await ctx.github.write(["issue", "edit", "12", "--repo", "4rtoflow/Gasho", "--ad
 - `read` の記録がどのリポジトリのものかは、引数の `--repo`（`-R`）か、`gh api repos/<owner>/<name>/…` のパスで決める。ほかの形（`gh api graphql` など）では、`repo` に書く
 - `write` は、`gasho-plugin.json` の `kind` が `write` のメソッドの中でだけ使える。ほかのメソッドと `start` から使うと、`PluginError` になる。GitHub を変えたことが、そのメソッドの呼び出しとして操作のログに残るようにするためである
 - gasho-daemon は、gh を `GASHO_GH_BIN`（既定は `gh`）で実行し、gasho-daemon を動かしている人のログインを使う
+
+### プラグインが動かす Claude Code（API 1.4）
+
+daemon の部分は、Claude Code を `ctx.dataDir` の中で動かす。gasho-daemon は、このフォルダーの中で動いている Claude Code をセッションとして扱わず、Gasho のセッションの一覧に出さない。そのフックも無視する。Claude Code は、`-p` で動かしていても、動いているあいだは `claude agents --json` にふつうのセッションと同じ形で出る。gasho-daemon はこの一覧からセッションを見つけるので、ほかのフォルダーで動かすと、Gasho のセッションの一覧に出てしまう。
+
+たとえば、Claude.ai のプランで決まっている、モデルごとの週の上限は、Agent SDK の制御リクエスト `get_usage` で読める。Claude Code を `-p --input-format stream-json --output-format stream-json` で動かし、`initialize` と `get_usage` を標準入力で渡す。発言は送らないので、モデルは呼ばない。`ctx.exec` は標準入力を渡せないので、`sh -c` の中で、決まった文字列をパイプで渡す。`get_usage` は試験中の制御リクエストで、返す形が変わるかもしれない。
 
 ### daemon の部分を動かす場所
 
@@ -561,7 +591,7 @@ data は 256KB までにし、同じ topic のイベントは1秒に1回まで�
 GashoPlugins にあるもの
 ┌────────────────────────────────────────────────────────────────────┐
 │ plugin-b  0.1.0  plugin-b の説明                            [追加] │
-│ plugin-c  0.2.0  この Gasho では使えない（API 1.4 が要る）         │
+│ plugin-c  0.2.0  この Gasho では使えない（API 1.5 が要る）         │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -783,8 +813,8 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 
 プラグインの CSS は、そのプラグインの部品の中にだけ当てる。プラグインのクラスは、Gasho のクラスと同じ Tailwind CSS の層に入り、Gasho の CSS より後にあるので、そのまま足すと Gasho の要素にも当たる。たとえば、プラグインの `.flex` が、Gasho のヘッダーの `md:hidden` を上書きし、広い画面でもスマホ用のヘッダーが出る。ほかのプラグインの部品にも同じことが起きる。そこで画面は、`web.css` のスタイルの規則を、部品を包む要素（`data-gasho-plugin="<ID>"`）の中だけに当たるように書き換えてから足す。テーマの変数（`theme` の層）、`@property`、`@keyframes` は、ページ全体に当てる。
 
-- 当たるのは、ページ、セッションのパネル、ホームのタイル、設定の部品の中。セッションのヘッダーとサイドバーの項目は Gasho が描くので、プラグインの CSS は当たらない
-- 部品の外（`document.body` など）に要素を出すときは、`data-gasho-plugin="<ID>"` を付けた要素で包む
+- 当たるのは、ページ、セッションのパネル、ホームのタイル、設定、会話の末尾、入力欄の下の部品と、SDK の `Popover` の中。セッションのヘッダーとサイドバーの項目は Gasho が描くので、プラグインの CSS は当たらない
+- 部品の外（`document.body` など）に要素を出すときは、`data-gasho-plugin="<ID>"` を付けた要素で包む。SDK の `Popover` は、中身をこの要素で包んでページの末尾に出すので、プラグインの CSS が当たる
 
 次のときは、プラグインの画面にそのプラグインを「読み込めない」と理由つきで出し、Gasho のほかの部分はそのまま動かす。
 

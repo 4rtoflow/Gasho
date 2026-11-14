@@ -1,13 +1,17 @@
 "use client";
 // From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item can have a second line
 // (`description`), for a worktree's repository, a section's title can have buttons (`action`, for "＋",
-// `secondaryAction`, and `tools`), and the items of a section can be put in another order by dragging them (`sort`).
+// `secondaryAction`, and `tools`), the items of a section can be put in another order by dragging them (`sort`), and the
+// width on a computer can be changed by dragging the right edge (`ResizeHandle`, lib/widths).
 
 import * as React from "react";
 import { AnimatePresence, motion, useDragControls, type PanInfo } from "framer-motion";
 import { ChevronRight, GripVertical, PanelLeft } from "lucide-react";
+import { useWindowWidth } from "../../lib/media";
+import { SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, clampSidebarWidth, useSidebarWidth } from "../../lib/widths";
 import { useSortable, type Sortable } from "../../lib/sortable";
 import { cn } from "../../lib/utils";
+import { ResizeHandle } from "../resize-handle";
 
 function useControllableState<T>(
   value: T | undefined,
@@ -35,7 +39,6 @@ function useControllableState<T>(
 }
 
 const spring = { type: "spring", stiffness: 420, damping: 36, mass: 0.8 } as const;
-const EXPANDED = 248;
 const COLLAPSED = 56;
 
 export type SidebarChild = { id: string; label: string; badge?: string | number };
@@ -97,6 +100,12 @@ export function Sidebar({
   const [mobileOpen, setMobileOpen] = useControllableState(mobileProp, false, onMobileOpenChange);
   // Gasho: the drawer is swiped closed from anywhere but what drags an item to another place.
   const drawerDrag = useDragControls();
+  // Gasho: the width saved, or the one being dragged to (saved when the drag ends).
+  const [savedWidth, setSavedWidth] = useSidebarWidth();
+  const [dragWidth, setDragWidth] = React.useState<number | null>(null);
+  const windowWidth = useWindowWidth();
+  const clampWidth = (w: number) => clampSidebarWidth(w, windowWidth);
+  const width = clampWidth(dragWidth ?? savedWidth ?? SIDEBAR_WIDTH_DEFAULT);
 
   // ⌘B / Ctrl+B
   React.useEffect(() => {
@@ -128,14 +137,29 @@ export function Sidebar({
     <>
       <motion.aside
         initial={false}
-        animate={{ width: collapsed ? COLLAPSED : EXPANDED }}
-        transition={spring}
+        animate={{ width: collapsed ? COLLAPSED : width }}
+        // While dragged, the edge stays under the pointer.
+        transition={dragWidth === null ? spring : { duration: 0 }}
         className={cn(
-          "hidden h-full shrink-0 overflow-hidden border-r border-neutral-200 bg-white md:block dark:border-neutral-800 dark:bg-neutral-950",
+          "relative hidden h-full shrink-0 overflow-hidden border-r border-neutral-200 bg-white md:block dark:border-neutral-800 dark:bg-neutral-950",
           className
         )}
       >
         <Panel {...content} collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+        {!collapsed && (
+          <ResizeHandle
+            edge="right"
+            label="サイドバーの幅"
+            width={width}
+            min={SIDEBAR_WIDTH_MIN}
+            max={clampWidth(SIDEBAR_WIDTH_MAX)}
+            clamp={clampWidth}
+            onDrag={setDragWidth}
+            // The default width is not saved, so that it is followed if it changes.
+            onChange={(w) => setSavedWidth(w === SIDEBAR_WIDTH_DEFAULT ? null : w)}
+            onReset={() => setSavedWidth(null)}
+          />
+        )}
       </motion.aside>
 
       <AnimatePresence>
