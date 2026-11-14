@@ -1,0 +1,64 @@
+# Publishes gasho-daemon (@4rtoflow/gasho-daemon) and the plugin SDK (@4rtoflow/gasho-plugin-sdk) to GitHub Packages
+# from main every 15 minutes, when what goes into them changed since their last release. scripts/release.ts decides the
+# versions (x.y.z: y up for a pull request labeled "enhancement" or a new plugin API, z up otherwise), commits them to
+# main, tags the commit (daemon-v<version>, plugin-sdk-v<version>) and publishes. Run it by hand to release at once.
+name: Release
+
+on:
+  schedule:
+    # Every 15 minutes, off the full hour, when GitHub's schedule is the busiest and the runs are late.
+    - cron: "4,19,34,49 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # the commit of the versions and the tags
+  packages: write
+  pull-requests: read # the labels of the merged pull requests
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: "@4rtoflow"
+      - id: plan
+        run: node scripts/release.ts plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.plan.outputs.release == 'true'
+        run: node scripts/release.ts apply
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+      - if: steps.plan.outputs.todo == 'true'
+        run: npm ci
+      - if: steps.plan.outputs.release == 'true'
+        run: npm run typecheck
+      - if: steps.plan.outputs.daemon == 'true'
+        run: node --test --disable-warning=ExperimentalWarning "apps/daemon/test/*.test.ts"
+      - if: steps.plan.outputs.release == 'true'
+        run: node scripts/release.ts pack
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+      - id: commit
+        if: steps.plan.outputs.release == 'true'
+        run: node scripts/release.ts commit
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+      - if: steps.plan.outputs.todo == 'true'
+        run: node scripts/release.ts publish
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+          TAGS: ${{ steps.commit.outputs.tags }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
