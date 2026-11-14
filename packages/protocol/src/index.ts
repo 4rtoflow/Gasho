@@ -694,7 +694,8 @@ export type SessionCommand =
   | { type: "repo.clone"; parent: string; repo: string; name?: string }
   /**
    * Registers the repository that the folder `path` is in, so that the sidebar lists its worktrees. A folder in one of
-   * its worktrees registers the repository's own folder (SessionWorktree.repo), which the result gives (`path`).
+   * its worktrees registers the repository's own folder (SessionWorktree.repo), which the result gives (`path`). So does
+   * a folder outside any repository that has worktrees of only that repository directly inside it.
    */
   | { type: "repo.register"; path: string }
   /** Takes a registered repository (its folder, as MachineInfo.repos names it) off the list. */

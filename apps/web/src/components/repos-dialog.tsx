@@ -145,7 +145,7 @@ function MachineRepos({ machine }: { machine: MachineInfo }) {
               className="space-y-2"
             >
               <label className="block space-y-1.5">
-                <span className="text-xs text-muted-foreground">登録するフォルダー（worktree のフォルダーなら、そのリポジトリを登録します）</span>
+                <span className="text-xs text-muted-foreground">登録するフォルダー（worktree のフォルダーや、worktree を並べた親フォルダーなら、そのリポジトリを登録します）</span>
                 <select value={picked} disabled={busy !== undefined} onChange={(e) => setFolder(e.target.value)} className={FIELD}>
                   {choices.map((f) => (
                     <option key={f} value={f}>

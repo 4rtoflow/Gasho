@@ -3,9 +3,26 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { RegisteredRepo } from "@gasho/protocol";
-import { githubRepoOf, listWorktrees, worktreeOf } from "./git.ts";
+import { findRepos, githubRepoOf, listWorktrees, worktreeOf } from "./git.ts";
 
 const UNREADABLE = "リポジトリを読めません。フォルダーが無くなったか、git のリポジトリではなくなっています。";
+/** Repositories named in the message when a folder holds several. */
+const NAMED = 5;
+
+/** The repository `dir` is in, or else the one repository whose worktrees are directly inside it. */
+async function repoOf(dir: string): Promise<{ repo: string } | { error: string }> {
+  const worktree = await worktreeOf(dir);
+  if (worktree) return { repo: worktree.repo };
+  const inside = await Promise.all((await findRepos(dir, { maxDepth: 1 })).map((d) => worktreeOf(d)));
+  const repos = [...new Set(inside.flatMap((w) => (w ? [w.repo] : [])))].sort();
+  if (repos.length === 1) return { repo: repos[0]! };
+  if (repos.length === 0) return { error: "このフォルダーは git のリポジトリの中になく、直下にもリポジトリがありません。" };
+  const names = repos.slice(0, NAMED).map((r) => path.basename(r).replace(/\.git$/, ""));
+  const more = repos.length > NAMED ? ` ほか ${repos.length - NAMED} 個` : "";
+  return {
+    error: `このフォルダーの直下には、別々のリポジトリが ${repos.length} 個あります（${names.join("、")}${more}）。登録するリポジトリのフォルダーを選んでください。`,
+  };
+}
 
 export class RegisteredRepos {
   private file: string;
@@ -25,17 +42,20 @@ export class RegisteredRepos {
     }
   }
 
-  /** Registers the repository that the folder `dir` is in: its own folder, also when `dir` is in another of its worktrees. */
+  /**
+   * Registers the repository that the folder `dir` is in: its own folder, also when `dir` is in another of its worktrees.
+   * Outside a repository, `dir` may be the folder that a repository and its worktrees are kept side by side in.
+   */
   async register(dir: string): Promise<{ path: string } | { error: string }> {
     const stat = await fs.stat(dir).catch(() => undefined);
     if (!stat?.isDirectory()) return { error: `フォルダーがありません：${dir}` };
-    const worktree = await worktreeOf(dir);
-    if (!worktree) return { error: "このフォルダーは git のリポジトリの中にありません。" };
-    if (!this.paths.includes(worktree.repo)) {
-      this.paths.push(worktree.repo);
+    const found = await repoOf(dir);
+    if ("error" in found) return found;
+    if (!this.paths.includes(found.repo)) {
+      this.paths.push(found.repo);
       await this.save();
     }
-    return { path: worktree.repo };
+    return { path: found.repo };
   }
 
   async unregister(repo: string): Promise<void> {

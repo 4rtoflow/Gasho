@@ -70,7 +70,7 @@ gasho-daemon は GitHub Packages の npm パッケージ `@4rtoflow/gasho-daemon
 
 セッションがすべて無くなった worktree も、ブラウザーが覚えていて、一覧の最後に残す。その worktree を押すと、セッションの無い worktree の画面が開き、そこの「サイドバーから外す」で一覧から外せる。覚えるのはそのブラウザーだけなので、スマホと PC では別になる。登録したリポジトリ（次の段落）の worktree は、覚えずに git の一覧に合わせて出し入れする。
 
-リポジトリを登録すると、その worktree を、Gasho のセッションが無くても一覧に出す。一覧の見出しの絞り込みのボタン（「＋」の左）から「リポジトリを登録・解除…」を開き、working server ごとにフォルダーを選んで登録する。worktree のフォルダーを選ぶと、そのリポジトリの本体のフォルダーを登録する。gasho-daemon が `git worktree list` で worktree を 10 秒おきに読み、セッションのある worktree の後ろに並べる。Orca や git で worktree を足したり消したりすると、一覧も変わる。登録は gasho-daemon の置き場（`~/.config/gasho/repos.json`）に残るので、どのブラウザーにも同じ一覧が出る。登録と解除は、working server がつながっているときだけできる。
+リポジトリを登録すると、その worktree を、Gasho のセッションが無くても一覧に出す。一覧の見出しの絞り込みのボタン（「＋」の左）から「リポジトリを登録・解除…」を開き、working server ごとにフォルダーを選んで登録する。worktree のフォルダーを選ぶと、そのリポジトリの本体のフォルダーを登録する。リポジトリの外のフォルダーを選ぶと、その直下にある worktree が1つのリポジトリのものなら、そのリポジトリを登録する（本体と worktree を1つの親フォルダーに並べる置き方）。直下に別々のリポジトリがあるときは登録しない。gasho-daemon が `git worktree list` で worktree を 10 秒おきに読み、セッションのある worktree の後ろに並べる。Orca や git で worktree を足したり消したりすると、一覧も変わる。登録は gasho-daemon の置き場（`~/.config/gasho/repos.json`）に残るので、どのブラウザーにも同じ一覧が出る。登録と解除は、working server がつながっているときだけできる。
 
 絞り込みのボタンでリポジトリを1つ選ぶと、一覧にはそのリポジトリの worktree だけを出し、見出しを「worktree · <リポジトリ名>」にする。「すべて」で元に戻す。選べるのは、一覧にある worktree のリポジトリ（登録していなくても、セッションがあれば出る）。選んだリポジトリはブラウザーごとに覚える。
 
