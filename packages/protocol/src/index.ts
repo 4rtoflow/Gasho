@@ -32,7 +32,7 @@ export interface SessionRepo {
   github?: GitHubRepo;
 }
 
-/** The git worktree a session's folder is in (gasho-daemon 0.15.0 and later). */
+/** The git worktree a session's folder is in. Older gasho-daemons do not tell it. */
 export interface SessionWorktree {
   /** The worktree's top folder. */
   path: string;

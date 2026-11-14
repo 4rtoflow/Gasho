@@ -25,8 +25,8 @@ export interface WorktreeSessions {
 }
 
 /**
- * The worktree a session is in. A session in a folder that is not in a repository, or one whose gasho-daemon is older
- * than 0.15.0 (it does not tell the worktree), is in a worktree of its own folder.
+ * The worktree a session is in. A session in a folder that is not in a repository, or one whose gasho-daemon is too old
+ * to tell the worktree, is in a worktree of its own folder.
  */
 export function worktreeId(machine: string, s: SessionInfo): string {
   return [machine, s.worktree?.path ?? s.cwd].join("\u001f");
