@@ -184,16 +184,18 @@ node apps/hub/src/cli.ts revoke <端末の ID>      # 取り消し（30秒以内
 
 Gasho の画面と gasho-daemon には、プラグインで機能を足せる。仕組みは [docs/plugins.md](docs/plugins.md) にまとめた。プラグインは [GashoPlugins](https://github.com/4rtoflow/GashoPlugins) に置く。GitHub の Issues と Pull requests のパネル、ホームの GitHub のタイルも、GitHub プラグイン（`github`）になった。
 
-いまは、Gasho サーバーでコマンドを実行して入れる。GashoPlugins から画面で選んで入れる機能は、次の段階で作る。
+プラグインは、サイドバーの「プラグイン」の画面で、GashoPlugins にあるものから選んで追加する。GashoPlugins の GitHub Actions が、版を上げたプラグインをビルドしてリリースに置き、プラグインの一覧（カタログ）を作る。Gasho サーバーは、そのカタログとプラグインを、Gasho サーバーのマシンの GitHub CLI（gh）で取ってくる。Gasho サーバーのマシンで `gh auth login` を済ませておく。
+
+プラグインの画面では、プラグインを追加するほかに、有効・無効を切り替え、daemon の部分（working server で動く部分）を動かす working server を選び、カタログに新しい版があれば更新し、外すことができる。どれも、Gasho サーバーと gasho-daemon を起動し直さずに、開いている画面と gasho-daemon にすぐ反映する。daemon の部分は、プラグインに対応した gasho-daemon でだけ動く。古い gasho-daemon の working server では、プラグインの画面に「gasho-daemon が古い」と出る。
+
+作っているプラグインは、Gasho サーバーでコマンドを実行して入れる。
 
 ```bash
-npm run hub:plugin -- add ~/repos/GashoPlugins/github/dist          # ビルドしたプラグインを入れる
 npm run hub:plugin -- add --link ~/repos/GashoPlugins/github/dist   # 作っているあいだ。ビルドするたびに画面と gasho-daemon が入れ替わる
+npm run hub:plugin -- add ~/repos/GashoPlugins/github/dist          # ビルドしたものを写して入れる（カタログを使わないとき）
 npm run hub:plugin -- list
 npm run hub:plugin -- remove github
 ```
-
-入れたプラグインは、サイドバーの「プラグイン」の画面に出る。そこで有効・無効を切り替え、daemon の部分（working server で動く部分）を動かす working server を選ぶ。入れ直したり有効にしたりしても、Gasho サーバーと gasho-daemon を起動し直さなくてよい。daemon の部分は、プラグインに対応した gasho-daemon でだけ動く。古い gasho-daemon の working server では、プラグインの画面に「gasho-daemon が古い」と出る。
 
 ### 外から使う（必要なとき）
 
@@ -235,12 +237,13 @@ gasho-daemon（`@4rtoflow/gasho-daemon`）とプラグインの SDK（`@4rtoflow
 | `GASHO_WEB_DIST` | hub | `apps/web/dist` |
 | `GASHO_PLUGINS_DIR` | hub | `~/.local/share/gasho/plugins`（入れたプラグイン） |
 | `GASHO_PLUGIN_CACHE` | hub | `~/.cache/gasho/hub-plugins`（配るプラグインの版ごとの写し） |
+| `GASHO_PLUGIN_REPO` | hub | `4rtoflow/GashoPlugins`（プラグインを追加するリポジトリ） |
 | `GASHO_DAEMON_CONFIG` | daemon | `~/.config/gasho/daemon.json` |
 | `GASHO_HUB_URL` | daemon | 登録した Gasho サーバーから決める |
 | `GASHO_HOOK_PORT` | daemon | `7741` |
 | `GASHO_HOOK_SECRET` | daemon・hooks install | なし |
 | `GASHO_CLAUDE_DIR` / `GASHO_CLAUDE_BIN` | daemon | `~/.claude` / `claude` |
-| `GASHO_GH_BIN` | daemon | `gh` |
+| `GASHO_GH_BIN` | hub・daemon | `gh` |
 | `GASHO_POLL_MS` | daemon | `3000` |
 | `GASHO_PLUGINS` | daemon | なし。`none` にすると、この working server ではプラグインの daemon の部分を動かさない |
 
