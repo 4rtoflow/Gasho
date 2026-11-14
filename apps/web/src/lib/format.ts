@@ -13,6 +13,17 @@ export function relativeTime(ms: number | undefined, now = Date.now()): string {
   return rtf.format(Math.round(sec / 86400), "day");
 }
 
+/** How long ago `since` was, for something still going on: "40秒", "12分", "1時間5分", "2日". */
+export function elapsedTime(since: number, now = Date.now()): string {
+  const sec = Math.max(0, Math.floor((now - since) / 1000));
+  if (sec < 60) return `${sec}秒`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}分`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return min % 60 ? `${hours}時間${min % 60}分` : `${hours}時間`;
+  return `${Math.floor(hours / 24)}日`;
+}
+
 export function clockTime(iso: string | undefined): string {
   if (!iso) return "";
   const d = new Date(iso);
