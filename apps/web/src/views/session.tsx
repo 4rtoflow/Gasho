@@ -23,7 +23,7 @@ import { promptDraft, usePicks } from "@/lib/drafts";
 import { addPending, noneWaiting, pendingShown, removePending, settlePending, usePending } from "@/lib/pending";
 import { go, type SessionPanel } from "@/lib/route";
 import { closeSessionHeaderOnPhone, useSessionHeaderShown } from "@/lib/session-header";
-import { rememberOpened, worktreeId } from "@/lib/sessions";
+import { rememberOpened, worktreeId, worktreesByLastUse } from "@/lib/sessions";
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
@@ -94,7 +94,7 @@ export function SessionView({
 
   return (
     <div className="flex h-full flex-col">
-      <SessionTabs machine={m} session={s} onAction={onSessionAction} />
+      <SessionTabs worktree={worktreesByLastUse([m]).find((w) => w.id === worktree)!} current={sessionId} onAction={onSessionAction} />
       {headerShown ? (
         <header className="shrink-0 space-y-2 border-b border-border px-4 py-3 md:px-6">
           <BackLink />

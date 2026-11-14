@@ -43,11 +43,21 @@ export type Route =
   | { name: "plugins" }
   /** A page of a plugin: #/p/<plugin>/<page>?<params>. */
   | { name: "plugin"; plugin: string; page: string; params: Record<string, string> }
-  | { name: "session"; machine: string; sessionId: string; panel?: SessionPanel };
+  | { name: "session"; machine: string; sessionId: string; panel?: SessionPanel }
+  /** A worktree with no session open: #/w/<machine>/<its top folder>. */
+  | { name: "worktree"; machine: string; path: string };
 
 export function parseHash(hash: string): Route {
   if (hash === "#/devices") return { name: "devices" };
   if (hash === "#/plugins") return { name: "plugins" };
+  const worktree = hash.match(/^#\/w\/([^/]+)\/([^/]+)$/);
+  if (worktree?.[1] && worktree[2]) {
+    try {
+      return { name: "worktree", machine: decodeURIComponent(worktree[1]), path: decodeURIComponent(worktree[2]) };
+    } catch {
+      return { name: "home" };
+    }
+  }
   // A plugin's page, and a plugin's panel of a session: …/p/<plugin>/<id>, with the params as the query.
   const [where, query] = hash.split("?", 2) as [string, string | undefined];
   const page = where.match(/^#\/p\/([^/]+)\/([^/]+)$/);
@@ -101,6 +111,8 @@ export function hrefOf(r: Route): string {
   if (r.name === "devices") return "#/devices";
   if (r.name === "plugins") return "#/plugins";
   if (r.name === "plugin") return `#/p/${encodeURIComponent(r.plugin)}/${encodeURIComponent(r.page)}${queryOf(r.params)}`;
+  // The folder is one segment, its slashes encoded.
+  if (r.name === "worktree") return `#/w/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.path)}`;
   const base = `#/s/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.sessionId)}`;
   if (!r.panel) return base;
   if (r.panel.kind === "plugin") {

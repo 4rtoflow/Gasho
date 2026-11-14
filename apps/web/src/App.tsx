@@ -7,7 +7,16 @@ import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
 import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
-import { notificationShown, sessionToOpen, worktreeId, worktreesByLastUse, type WorktreeSessions } from "@/lib/sessions";
+import { rememberWorktrees, useRememberedWorktrees } from "@/lib/remembered-worktrees";
+import {
+  notificationShown,
+  rememberedOf,
+  sessionToOpen,
+  worktreeId,
+  worktreeKey,
+  worktreesByLastUse,
+  type WorktreeSessions,
+} from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { PluginBadgeProbes, PluginPageView, PluginPanelView, usePluginBadges } from "@/plugins/parts";
@@ -19,6 +28,7 @@ import { LaunchDialog } from "@/views/launch";
 import { PairView } from "@/views/pair";
 import { PluginsView } from "@/views/plugins";
 import { SessionView } from "@/views/session";
+import { WorktreeView } from "@/views/worktree";
 
 /** A worktree's status in the sidebar: that of its most pressing session. */
 function worktreeStatus(w: WorktreeSessions): SessionStatus {
@@ -87,14 +97,17 @@ export function App() {
   // The plugins' web parts (docs/plugins.md): their sidebar items and the badges their hooks give.
   const { parts } = usePluginRegistry();
   const badges = usePluginBadges();
+  // Every worktree with sessions is kept, so that it stays in the sidebar once they are gone.
+  const remembered = useRememberedWorktrees();
+  useEffect(() => rememberWorktrees(worktreesByLastUse(machines).map(rememberedOf)), [machines]);
 
   if (auth === "checking") return <Centered>読み込み中…</Centered>;
   if (auth === "unreachable") return <Centered>Gasho サーバーにつながりません。再試行しています…</Centered>;
   if (auth === "unregistered") return <PairView />;
 
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
-  // The worktrees of all working servers in one list, the one used last first.
-  const worktrees = worktreesByLastUse(machines);
+  // The worktrees of all working servers in one list, the one used last first, then those without sessions.
+  const worktrees = worktreesByLastUse(machines, remembered);
   // The plugins' sidebar items: between ホーム and 端末, in the plugins' order. Each opens a page of its plugin.
   const pluginItems = parts.flatMap(({ info, def }) =>
     (def.sidebar ?? []).map((item) => {
@@ -133,7 +146,9 @@ export function App() {
       ? openSession
         ? worktreeId(route.machine, openSession)
         : ""
-      : route.name === "plugin"
+      : route.name === "worktree"
+        ? worktreeKey(route.machine, route.path)
+        : route.name === "plugin"
         ? (pluginItems.find((i) => i.plugin === route.plugin && i.page.id === route.page)?.id ?? "")
         : route.name;
   const panel = route.name === "session" ? route.panel : undefined;
@@ -148,8 +163,9 @@ export function App() {
           const item = pluginItems.find((i) => i.id === id);
           if (item) return go({ name: "plugin", plugin: item.plugin, page: item.page.id, params: item.page.params ?? {} });
           const w = worktrees.find((x) => x.id === id);
-          const s = w && sessionToOpen(w);
-          if (w && s) go({ name: "session", machine: w.machine.id, sessionId: s.sessionId });
+          if (!w) return;
+          const s = sessionToOpen(w);
+          go(s ? { name: "session", machine: w.machine.id, sessionId: s.sessionId } : { name: "worktree", machine: w.machine.id, path: w.path });
         }}
         mobileOpen={mobileOpen}
         onMobileOpenChange={setMobileOpen}
@@ -175,6 +191,13 @@ export function App() {
             {route.name === "devices" && <DevicesView />}
             {route.name === "plugins" && <PluginsView />}
             {route.name === "plugin" && <PluginPageView plugin={route.plugin} page={route.page} params={route.params} />}
+            {route.name === "worktree" && (
+              <WorktreeView
+                key={worktreeKey(route.machine, route.path)}
+                worktree={worktrees.find((w) => w.id === worktreeKey(route.machine, route.path))}
+                onSessionAction={setSessionAction}
+              />
+            )}
             {route.name === "session" && (desktop || !panel) && (
               <SessionView
                 key={`${route.machine}/${route.sessionId}`}

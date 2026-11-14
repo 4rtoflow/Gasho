@@ -9,7 +9,7 @@ import { BUTTON_DANGER, BUTTON_PRIMARY, BUTTON_SECONDARY, DIALOG_OVERLAY, DIALOG
 import { sessionLabel } from "@/lib/format";
 import { go, useRoute } from "@/lib/route";
 import { forkName, MAX_SESSION_NAME, nameProblem } from "@/lib/session-names";
-import { daemonAtLeast } from "@/lib/sessions";
+import { daemonAtLeast, tabAfterRemoval, worktreeId, worktreesByLastUse } from "@/lib/sessions";
 import { sendCommand, useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -250,15 +250,24 @@ function RemoveDialog({ request: { machine, session }, onClose }: DialogProps) {
   const remove = async () => {
     setBusy(true);
     setError(undefined);
+    // Its worktree's tabs as they are before it goes.
+    const m = machines.find((x) => x.id === machine.id);
+    const worktree = m && worktreesByLastUse([m]).find((w) => w.id === worktreeId(machine.id, live));
     const r = await sendCommand(machine.id, { type: "session.remove", sessionId: session.sessionId }, REMOVE_WAIT_MS);
     setBusy(false);
     if (!r.ok) {
       setError(r.error ?? "削除できませんでした。");
       return;
     }
-    // The open session is gone: back home, in place of its page.
+    // The open session is gone: the tab next to it opens in place of its page, or the worktree once it has no tab.
     if (route.name === "session" && route.machine === machine.id && route.sessionId === session.sessionId) {
-      go({ name: "home" }, { replace: true });
+      const next = worktree && tabAfterRemoval(worktree, session.sessionId);
+      go(
+        next
+          ? { name: "session", machine: machine.id, sessionId: next.sessionId }
+          : { name: "worktree", machine: machine.id, path: worktree?.path ?? live.worktree?.path ?? live.cwd },
+        { replace: true },
+      );
     }
     onClose();
   };
@@ -269,9 +278,13 @@ function RemoveDialog({ request: { machine, session }, onClose }: DialogProps) {
       {working && "作業の途中で止まります。"}
       {live.pendingInputs ? `送信待ちの ${live.pendingInputs} 件は送りません。` : ""}
     </>,
-    <>
-      会話の記録は {machine.name} に残ります。端末で <code className="font-mono text-[0.92em]">claude --resume</code> を使うと開き直せます。
-    </>,
+    machine.canResume ? (
+      <>会話の記録は {machine.name} に残ります。タブの左の過去の会話から開き直せます。</>
+    ) : (
+      <>
+        会話の記録は {machine.name} に残ります。端末で <code className="font-mono text-[0.92em]">claude --resume</code> を使うと開き直せます。
+      </>
+    ),
   ];
 
   return (

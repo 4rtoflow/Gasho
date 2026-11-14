@@ -70,7 +70,7 @@ import {
 } from "./managed.ts";
 import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
 import { SessionTerminals, Terminals } from "./terminal.ts";
-import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
+import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
 import { log } from "./util.ts";
@@ -498,6 +498,7 @@ export class Daemon {
       models: this.models?.options,
       modelsAt: this.models?.at,
       features: [...INPUT_FEATURES],
+      canResume: true,
     });
   }
 
@@ -765,6 +766,8 @@ export class Daemon {
       case "session.rename":
       case "session.fork":
       case "session.remove":
+      case "session.history":
+      case "session.resume":
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
@@ -789,6 +792,12 @@ export class Daemon {
               break;
             case "session.remove":
               result = await this.remove(m.sessionId);
+              break;
+            case "session.history":
+              result = await this.history(m.cwd, m.subfolders === true);
+              break;
+            case "session.resume":
+              result = await this.resume(m.sessionId);
               break;
             case "permission.answer": {
               if (m.permissionId.startsWith(OPEN_QUESTION)) {
@@ -1158,6 +1167,50 @@ export class Daemon {
     }
     await this.refresh();
     return { ok: true, sessionId: forkId, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
+  }
+
+  /** The conversations of a folder that no Claude Code has open now (see pastConversations). */
+  private async history(cwd: string, subfolders: boolean): Promise<CommandResult> {
+    const history = await pastConversations(this.cfg.claudeDir, path.resolve(cwd), { subfolders, open: new Set(this.tracked.keys()) });
+    return { ok: true, history };
+  }
+
+  /**
+   * Opens a conversation that no Claude Code has open again, in its folder, as a session started from Gasho:
+   * `claude --remote-control <name> --resume <id>` in a new terminal. Its name is the conversation's (see
+   * conversationFacts); without one, it is named after its next message, as a new session is.
+   */
+  private async resume(sessionId: string): Promise<CommandResult> {
+    if (!this.canLaunch) return { ok: false, error: NO_TERMINAL };
+    // Open in two processes, the conversation would be written by both.
+    if (this.tracked.has(sessionId)) return { ok: false, error: "この会話は、いま別の Claude Code が開いています。" };
+    const file = await findTranscript(this.cfg.claudeDir, sessionId);
+    const facts = file ? await conversationFacts(file).catch(() => undefined) : undefined;
+    if (!facts) return { ok: false, error: "この会話の記録が見つかりません。" };
+    const stat = await fsp.stat(facts.cwd).catch(() => undefined);
+    if (!stat?.isDirectory()) return { ok: false, error: `会話のフォルダーがありません：${facts.cwd}` };
+    const titled = facts.title ? titleName(facts.title) : undefined;
+    const name = titled ?? `${path.basename(facts.cwd)}-gasho`;
+    const started = await this.startClaude(facts.cwd, name, { claudeArgs: ["--resume", sessionId], resuming: true });
+    if ("error" in started) {
+      // Only the launcher asks whether to trust a folder.
+      const error = started.needsTrust
+        ? "このフォルダーは、もう Claude Code に信頼されていません。「新しいセッション」でこのフォルダーを選んで信頼してから、もう一度開いてください。"
+        : started.error;
+      return { ok: false, error };
+    }
+    const { sessionId: id, terminal, pid } = started;
+    this.managed.add({ sessionId: id, terminal, pid, cwd: facts.cwd, name, launchedAt: Date.now(), ...(titled ? {} : { autoName: true }) });
+    await this.managed.save();
+    log(`resumed ${sessionId} as "${name}" (${id})`);
+    const warnings: string[] = started.mcpDeclined ? [MCP_DECLINED] : [];
+    if (started.resumeAsked) {
+      warnings.push(
+        "前の発言から時間がたっていて会話も長いため、Claude Code が要約から始めるかを尋ねました。会話はそのまま引き継いでいます。次の返答では、会話をすべて読み直します（時間とトークンが多くかかります）。",
+      );
+    }
+    await this.refresh();
+    return { ok: true, sessionId: id, ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}) };
   }
 
   /**

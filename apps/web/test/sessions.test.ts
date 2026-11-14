@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { MachineInfo, SessionInfo } from "@gasho/protocol";
-import { worktreesByLastUse } from "../src/lib/sessions.ts";
+import { rememberedOf, tabAfterRemoval, worktreesByLastUse } from "../src/lib/sessions.ts";
 
 const session = (sessionId: string, extra: Partial<SessionInfo> = {}): SessionInfo => ({
   sessionId,
@@ -51,4 +51,23 @@ test("a worktree is named by its branch, else its folder, and its repository by 
       ["notes", undefined],
     ],
   );
+});
+
+test("remembered worktrees without sessions come last, once each; the tab after a removed one is the next, else the one before", () => {
+  const app = { path: "/src/app", repo: "/src/app", branch: "main" };
+  const mac = machine("mac", [session("a", { cwd: "/src/app", worktree: app, startedAt: 1 }), session("b", { cwd: "/src/app", worktree: app, startedAt: 2 })]);
+  const [live] = worktreesByLastUse([mac]);
+  assert.ok(live);
+  const gone = { machine: "mac", path: "/src/app-old", label: "feat/old", repo: "app", subfolders: true };
+  const list = worktreesByLastUse([mac], [gone, rememberedOf(live), { ...gone, machine: "unregistered" }]);
+  assert.deepEqual(
+    list.map((w) => `${w.label} ${w.path} ${w.sessions.length}`),
+    ["main /src/app 2", "feat/old /src/app-old 0"],
+  );
+
+  assert.equal(tabAfterRemoval(live, "a")?.sessionId, "b");
+  assert.equal(tabAfterRemoval(live, "b")?.sessionId, "a");
+  const [one] = worktreesByLastUse([machine("mac", [session("a")])]);
+  assert.ok(one);
+  assert.equal(tabAfterRemoval(one, "a"), undefined);
 });

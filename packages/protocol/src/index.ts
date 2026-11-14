@@ -237,6 +237,8 @@ export interface MachineInfo {
    * older than 0.6.0, which can switch the model and carry files, but not the effort level or ultracode.
    */
   features?: InputFeature[];
+  /** Whether gasho-daemon lists a folder's past conversations and opens one again (session.history, session.resume). */
+  canResume?: boolean;
 }
 
 /** Something registered with the Gasho server: a browser or a working server. */
@@ -493,6 +495,8 @@ export type DaemonToHub =
       models?: ModelOption[];
       modelsAt?: number;
       features?: InputFeature[];
+      /** Answers session.history and session.resume. */
+      canResume?: boolean;
     }
   | { type: "command.result"; requestId: string; result: CommandResult }
   | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
@@ -649,6 +653,16 @@ export type SessionCommand =
    */
   | { type: "session.remove"; sessionId: string }
   /**
+   * The conversations Claude Code keeps for the folder `cwd` (with `subfolders`, also for the folders inside it) that
+   * no Claude Code has open now, the latest first (`history`). Only reads; the operations log does not record it.
+   */
+  | { type: "session.history"; cwd: string; subfolders?: boolean }
+  /**
+   * Opens a conversation of session.history again in its folder, as a session started from Gasho
+   * (`claude --remote-control <name> --resume <id>`). Its name is the conversation's.
+   */
+  | { type: "session.resume"; sessionId: string }
+  /**
    * Answers one of a session's `permissionRequests`. A request with `questions` takes "allow" with `answers` (one per
    * question, in order). A request with a `plan`: "allow" approves it and goes on in `mode` (when given). "deny" with
    * a `message`: Claude is told it and goes on from there (a plan: plans again), instead of stopping.
@@ -674,7 +688,7 @@ export interface CommandResult {
   ok: boolean;
   error?: string;
   /**
-   * session.launch, session.fork: the new session. session.input: whether the input waits for the session to become
+   * session.launch, session.fork, session.resume: the new session. session.input: whether the input waits for the session to become
    * idle; session.rename: whether `/rename` does.
    */
   sessionId?: string;
@@ -696,4 +710,17 @@ export interface CommandResult {
   written?: FileStamp;
   /** file.write with `baseHash`: the file changed after it was read (by Claude, or anyone else), so it was not written. */
   conflict?: boolean;
+  /** session.history: the conversations, the latest first. */
+  history?: PastConversation[];
+}
+
+/** A conversation Claude Code keeps on a working server, which no Claude Code has open now. */
+export interface PastConversation {
+  sessionId: string;
+  /** Its name (/rename), or the title Claude Code gave it, or the start of its first message. */
+  title?: string;
+  /** The folder it ran in. */
+  cwd: string;
+  /** When its transcript was last written (ms since the epoch). */
+  lastActivityAt: number;
 }

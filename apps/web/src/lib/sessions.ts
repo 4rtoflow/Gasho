@@ -20,8 +20,21 @@ export interface WorktreeSessions {
   label: string;
   /** The repository's name: its GitHub repository's, or its folder's. Absent outside a repository. */
   repo?: string;
-  /** In the order they started, which is the order of the tabs. */
+  /** Its top folder: where "＋" starts a session and whose past conversations are listed. */
+  path: string;
+  /** Whether it is a git worktree, whose sessions may run in the folders inside `path` too. */
+  subfolders: boolean;
+  /** In the order they started, which is the order of the tabs. Empty for a worktree this browser remembers. */
   sessions: SessionInfo[];
+}
+
+/** A worktree this browser keeps in the sidebar once its sessions are gone, until it is taken off (see remembered-worktrees). */
+export interface RememberedWorktree {
+  machine: string;
+  path: string;
+  label: string;
+  repo?: string;
+  subfolders: boolean;
 }
 
 /**
@@ -29,11 +42,18 @@ export interface WorktreeSessions {
  * to tell the worktree, is in a worktree of its own folder.
  */
 export function worktreeId(machine: string, s: SessionInfo): string {
-  return [machine, s.worktree?.path ?? s.cwd].join("\u001f");
+  return worktreeKey(machine, s.worktree?.path ?? s.cwd);
 }
 
-/** The worktrees of the sessions Gasho shows, of all working servers (the sidebar's list): the one used last first. */
-export function worktreesByLastUse(machines: MachineInfo[]): WorktreeSessions[] {
+export function worktreeKey(machine: string, path: string): string {
+  return [machine, path].join("\u001f");
+}
+
+/**
+ * The worktrees of the sessions Gasho shows, of all working servers (the sidebar's list): the one used last first.
+ * Then the `remembered` ones that have no session now, in the order given.
+ */
+export function worktreesByLastUse(machines: MachineInfo[], remembered: RememberedWorktree[] = []): WorktreeSessions[] {
   const byId = new Map<string, WorktreeSessions>();
   for (const machine of machines) {
     for (const s of shownSessions(machine)) {
@@ -45,13 +65,34 @@ export function worktreesByLastUse(machines: MachineInfo[]): WorktreeSessions[] 
       }
       const w = s.worktree;
       const repo = s.github?.name ?? (w ? basename(w.repo).replace(/\.git$/, "") : undefined);
-      byId.set(id, { id, machine, label: w?.branch ?? basename(w?.path ?? s.cwd), ...(repo ? { repo } : {}), sessions: [s] });
+      const path = w?.path ?? s.cwd;
+      byId.set(id, { id, machine, label: w?.branch ?? basename(path), ...(repo ? { repo } : {}), path, subfolders: Boolean(w), sessions: [s] });
     }
   }
   const worktrees = [...byId.values()];
   for (const w of worktrees) w.sessions.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0) || a.sessionId.localeCompare(b.sessionId));
   const latest = (w: WorktreeSessions) => Math.max(...w.sessions.map(lastUsed));
-  return worktrees.sort((a, b) => latest(b) - latest(a) || a.id.localeCompare(b.id));
+  worktrees.sort((a, b) => latest(b) - latest(a) || a.id.localeCompare(b.id));
+  for (const r of remembered) {
+    const machine = machines.find((m) => m.id === r.machine);
+    const id = worktreeKey(r.machine, r.path);
+    if (!machine || byId.has(id)) continue;
+    byId.set(id, { id, machine, label: r.label, ...(r.repo ? { repo: r.repo } : {}), path: r.path, subfolders: r.subfolders, sessions: [] });
+    worktrees.push(byId.get(id)!);
+  }
+  return worktrees;
+}
+
+/** What the sidebar keeps of a worktree once its sessions are gone. */
+export function rememberedOf(w: WorktreeSessions): RememberedWorktree {
+  return { machine: w.machine.id, path: w.path, label: w.label, ...(w.repo ? { repo: w.repo } : {}), subfolders: w.subfolders };
+}
+
+/** The tab to open once the open session's tab is gone: the one after it, else the one before. */
+export function tabAfterRemoval(w: WorktreeSessions, sessionId: string): SessionInfo | undefined {
+  const i = w.sessions.findIndex((s) => s.sessionId === sessionId);
+  if (i < 0) return undefined;
+  return w.sessions[i + 1] ?? w.sessions[i - 1];
 }
 
 /** The session each worktree had open last, by worktreeId, while this page is open. */
