@@ -84,3 +84,13 @@ export function rememberSessions(ids: readonly string[], saved: readonly string[
   const shown = new Set(ids);
   return [...ids, ...(saved ?? []).filter((id) => !shown.has(id))].slice(0, MAX_SAVED);
 }
+
+/**
+ * The whole list in order once the part of it that is shown (the sidebar narrowed to one repository) was put in the
+ * order `ids`: the shown items take their places among the others, which stay where they were.
+ */
+export function reorderShown(all: readonly string[], ids: readonly string[]): string[] {
+  const shown = new Set(ids);
+  let next = 0;
+  return all.map((id) => (shown.has(id) ? (ids[next++] ?? id) : id));
+}

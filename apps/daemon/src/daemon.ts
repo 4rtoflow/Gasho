@@ -13,6 +13,7 @@ import type {
   InputFile,
   ModelOption,
   PermissionRequestInfo,
+  RegisteredRepo,
   SessionInfo,
   SessionModel,
   SessionRepo,
@@ -30,7 +31,7 @@ import { startHookServer, summarizeHook } from "./hooks.ts";
 import { isInside, statusLineLaunch, statusLineOf, userStatusLine } from "./statusline.ts";
 import { HubClient } from "./hub-client.ts";
 import { type Install, type Layout, layoutOf } from "./install.ts";
-import { answersMessage, OPEN_QUESTION, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
+import { answersMessage, dialogCall, OPEN_DIALOG, OPEN_QUESTION, openPermissionRequest, openQuestionRequest, PermissionRequests, questionAnswers } from "./permissions.ts";
 import {
   atBottom,
   bannerModel,
@@ -38,6 +39,7 @@ import {
   cleanEnv,
   clearPromptKeys,
   dialogOpen,
+  permissionDialog,
   EFFORT_LEVELS,
   forkName,
   isAlive,
@@ -63,7 +65,7 @@ import {
   sessionName,
   shellInputProblem,
   statusLine,
-  surveyOpen,
+  noticeKey,
   switchedForSession,
   switchQuestion,
   type TaskRow,
@@ -95,6 +97,7 @@ import {
   sessionStatus,
 } from "./sessions.ts";
 import { SessionTerminals, Terminals } from "./terminal.ts";
+import { RegisteredRepos } from "./repos.ts";
 import { conversationFacts, emptyMeta, pastConversations, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import type { SessionWire } from "./plugin-ipc.ts";
 import { PluginRunner } from "./plugins.ts";
@@ -106,6 +109,8 @@ const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the worktree a folder is in, or the repositories inside it, and their branches are reused. */
 const REPOS_CACHE_MS = 60_000;
 const FOLDERS_REFRESH_MS = 5 * 60_000;
+/** How often the registered repositories' worktrees are read again: one may be made or removed elsewhere (Orca, git). */
+const REGISTERED_REFRESH_MS = 10_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
 /** A fork: how long Claude Code may take to show its prompt box once it runs, and then to write the copy's transcript. */
 const FORK_READY_MS = 15_000;
@@ -227,6 +232,11 @@ export class Daemon {
   private permissions = new PermissionRequests(() => this.emitSessions());
   private canLaunch = false;
   private folders: string[] = [];
+  private registered: RegisteredRepos;
+  private registeredRepos: RegisteredRepo[] = [];
+  private reposSent = "";
+  /** Counts the reads of the registered repositories: a read that a later one overtook is not sent. */
+  private reposRead = 0;
   private flushing = new Set<string>();
   /** Sessions whose /rename to the name from the first message was sent, until Claude Code records it (nameAfterTitle). */
   private titleSent = new Set<string>();
@@ -268,6 +278,7 @@ export class Daemon {
     });
     this.terminals = new SessionTerminals(new Terminals({ stateDir: cfg.stateDir, env: cleanEnv() }), new Zellij(cleanEnv()));
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
+    this.registered = new RegisteredRepos(path.join(cfg.stateDir, "repos.json"));
     this.plugins = new PluginRunner({
       cacheDir: cfg.pluginCacheDir,
       send: (m) => this.hub.send(m),
@@ -284,8 +295,10 @@ export class Daemon {
       hello: () => ({ type: "hello", machineId: cfg.machineId, token: cfg.token, daemonVersion: DAEMON_VERSION }),
       onReady: () => {
         this.lastSent = "";
+        this.reposSent = "";
         this.emitSessions();
         this.emitCapabilities();
+        this.emitRepos();
         // Also tells the Gasho server that this gasho-daemon runs plugins.
         this.plugins.status(true);
       },
@@ -330,6 +343,9 @@ export class Daemon {
     setInterval(() => void this.refreshFolders(), FOLDERS_REFRESH_MS).unref();
     await this.updater.load();
     setTimeout(() => void this.updater.prune().catch((e: unknown) => log("could not remove the versions no longer used", e)), PRUNE_VERSIONS_MS).unref();
+    await this.registered.load();
+    await this.refreshRepos();
+    setInterval(() => void this.refreshRepos(), REGISTERED_REFRESH_MS).unref();
 
     this.hub.connect();
     startHookServer({
@@ -600,7 +616,7 @@ export class Daemon {
           name: m?.name ?? t.info.name,
           managed: m ? true : undefined,
           pendingInputs: pending || undefined,
-          permissionRequests: this.permissions.of(t.info.sessionId) ?? this.openQuestion(t),
+          permissionRequests: this.permissions.of(t.info.sessionId) ?? this.openQuestion(t) ?? this.openPermission(t),
         };
       })
       .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
@@ -617,6 +633,34 @@ export class Daemon {
     this.folders = folders;
     this.emitCapabilities();
     this.plugins.foldersChanged();
+  }
+
+  private async refreshRepos(): Promise<void> {
+    const read = ++this.reposRead;
+    const repos = await this.registered.read();
+    if (read !== this.reposRead) return;
+    this.registeredRepos = repos;
+    this.emitRepos();
+  }
+
+  private emitRepos(): void {
+    const json = JSON.stringify(this.registeredRepos);
+    if (json === this.reposSent || !this.hub.connected) return;
+    this.reposSent = json;
+    this.hub.send({ type: "repos", repos: this.registeredRepos });
+  }
+
+  private async registerRepo(dir: string): Promise<CommandResult> {
+    const r = await this.registered.register(path.resolve(dir));
+    if ("error" in r) return { ok: false, error: r.error };
+    await this.refreshRepos();
+    return { ok: true, path: r.path };
+  }
+
+  private async unregisterRepo(repo: string): Promise<CommandResult> {
+    await this.registered.unregister(repo);
+    await this.refreshRepos();
+    return { ok: true };
   }
 
   private emitCapabilities(): void {
@@ -912,6 +956,8 @@ export class Daemon {
       case "permission.answer":
       case "folder.create":
       case "repo.clone":
+      case "repo.register":
+      case "repo.unregister":
       case "file.write":
       case "daemon.update": {
         let result: CommandResult;
@@ -949,6 +995,10 @@ export class Daemon {
                 result = await this.answerQuestion(m);
                 break;
               }
+              if (m.permissionId.startsWith(OPEN_DIALOG)) {
+                result = await this.answerDialog(m);
+                break;
+              }
               const error = this.permissions.answer(m.sessionId, m.permissionId, m.decision, { answers: m.answers, mode: m.mode, message: m.message });
               result = error ? { ok: false, error } : { ok: true };
               break;
@@ -958,6 +1008,12 @@ export class Daemon {
               break;
             case "repo.clone":
               result = await this.cloneRepo(m.parent, m.repo, m.name);
+              break;
+            case "repo.register":
+              result = await this.registerRepo(m.path);
+              break;
+            case "repo.unregister":
+              result = await this.unregisterRepo(m.path);
               break;
             case "file.write":
               result = await this.writeFile(m);
@@ -1613,8 +1669,8 @@ export class Daemon {
 
   /**
    * Types `text` into Claude Code's prompt box and presses Enter once, checking each step on the screen:
-   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; the feedback survey above
-   *   the box is dismissed ("0");
+   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; a notice above the box
+   *   that has the keys is closed first (the feedback survey with "0", the offer to set up auto mode with Esc);
    * - the box is emptied first (Claude Code may have put a stopped prompt back, or a key may have gone into it);
    * - the text must be in the box before Enter, and the box must let go of it after Enter.
    * Enter is never pressed twice for one paste: if Claude Code takes an Enter late, a second one could land in what
@@ -1650,14 +1706,16 @@ export class Daemon {
     let ready = await waitFor((s) => typedInBox(s) !== undefined, 3000);
     if (!ready) return "not-typed";
     if (entered) {
-      // Taken after all if the box no longer holds the text. Otherwise press Enter, unless the survey has the keys.
+      // Taken after all if the box no longer holds the text. Otherwise press Enter, unless a notice above the box
+      // (the survey, the offer to set up auto mode) has the keys.
       if (!promptHolds(ready, text)) return "sent";
-      return surveyOpen(ready.plain) ? "not-typed" : enter();
+      return noticeKey(ready.plain) ? "not-typed" : enter();
     }
-    if (surveyOpen(ready.plain)) {
-      await this.terminals.keys(session, "0");
-      // Decide on what the screen shows now: had the survey not taken the "0", it is in the box.
-      ready = await waitFor((s) => !surveyOpen(s.plain) && typedInBox(s) !== undefined, 1500);
+    const key = noticeKey(ready.plain);
+    if (key) {
+      await this.terminals.keys(session, key);
+      // Decide on what the screen shows now: had the notice not taken the key, a "0" is in the box.
+      ready = await waitFor((s) => !noticeKey(s.plain) && typedInBox(s) !== undefined, 1500);
       if (!ready) return "not-typed";
     }
     if (typedInBox(ready)) {
@@ -2139,6 +2197,54 @@ export class Daemon {
     this.scheduleRefresh(500);
     this.emitSessions();
     log(`${s.name}: closed Claude's question${message ? "; the answers go as the next message" : ""}`);
+    return { ok: true, ...(message ? { queued: true } : {}) };
+  }
+
+  /**
+   * A permission dialog that gasho-daemon holds no hook for (see openPermissionRequest): shown from the transcript
+   * while a session started from Gasho waits on a permission prompt.
+   */
+  private openPermission(t: Tracked): PermissionRequestInfo[] | undefined {
+    if (t.info.status !== "waiting" || t.info.waitingFor !== "permission prompt" || !this.managed.has(t.info.sessionId)) return undefined;
+    const c = dialogCall(t.meta.openCalls);
+    return c ? [openPermissionRequest(c)] : undefined;
+  }
+
+  /**
+   * Answers a permission shown from the transcript (see openPermission) with the keys of Claude Code's dialog: "allow"
+   * puts the cursor on "Yes" and presses Enter; "deny" presses Esc, as "No" in the terminal: Claude stops, and a
+   * message given goes as the next message. Nothing is pressed unless the session still waits and its screen shows
+   * the dialog.
+   */
+  private async answerDialog(m: Extract<HubToDaemon, { type: "permission.answer" }>): Promise<CommandResult> {
+    const gone: CommandResult = { ok: false, error: "この確認には、すでに答えられています。" };
+    const s = this.managed.get(m.sessionId);
+    const t = this.tracked.get(m.sessionId);
+    const shown = t && this.openPermission(t)?.[0];
+    if (!s || shown?.id !== m.permissionId) return gone;
+    if (m.decision === "always") return { ok: false, error: "この確認では、今後も許可することはできません。" };
+    if ((await this.currentStatus(s.pid)) !== "waiting") return gone;
+    const read = async () => permissionDialog((await this.terminals.screen(s.terminal).catch(() => undefined))?.plain ?? "");
+    let options = await read();
+    const missing: CommandResult = { ok: false, error: "端末に確認の画面が見当たらないため、答えられませんでした。端末か公式アプリで答えてください。" };
+    if (!options) return missing;
+    const message = m.decision === "deny" ? m.message?.trim() : undefined;
+    if (m.decision === "deny") {
+      await this.terminals.keys(s.terminal, "Esc");
+    } else {
+      for (let i = 0; options && !options[0]!.selected && i < options.length; i++) {
+        await this.terminals.keys(s.terminal, "Up");
+        await sleep(150);
+        options = await read();
+      }
+      if (!options?.[0]?.selected) return missing;
+      await this.terminals.keys(s.terminal, "Enter");
+    }
+    this.settleUntil.set(m.sessionId, Date.now() + INTERRUPT_SETTLE_MS);
+    if (message) this.managed.enqueue(m.sessionId, { id: m.requestId, text: message });
+    this.scheduleRefresh(500);
+    this.emitSessions();
+    log(`${s.name}: answered Claude Code's permission dialog (${m.decision}) by its keys`);
     return { ok: true, ...(message ? { queued: true } : {}) };
   }
 }

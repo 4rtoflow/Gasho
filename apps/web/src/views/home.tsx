@@ -12,6 +12,8 @@ import {
   Cpu,
   FilePen,
   FolderDown,
+  FolderGit2,
+  FolderMinus,
   FolderPlus,
   GitFork,
   GripHorizontal,
@@ -672,6 +674,8 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:permission.answer": ShieldCheck,
   "Gasho:folder.create": FolderPlus,
   "Gasho:repo.clone": FolderDown,
+  "Gasho:repo.register": FolderGit2,
+  "Gasho:repo.unregister": FolderMinus,
   "Gasho:file.write": FilePen,
   "Gasho:plugin.call": Puzzle,
   "Gasho:plugin.enable": Puzzle,
@@ -685,8 +689,8 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
 
 /**
  * What Gasho was asked to do lately: starting, forking, renaming and removing sessions, instructions and stops, the
- * folders made and repositories cloned to start sessions in, and the files saved or made in sessions' folders (the
- * Gasho server's records).
+ * folders made and repositories cloned to start sessions in, the repositories registered and taken off, and the files
+ * saved or made in sessions' folders (the Gasho server's records).
  */
 function Operations({ events, machines, now }: { events: MachineHookEvent[]; machines: MachineInfo[]; now: number }) {
   const items = events
@@ -764,6 +768,10 @@ function operationText(e: MachineHookEvent): string {
   }
   // "owner/name → where it went".
   if (e.event === "Gasho:repo.clone") return `clone：${summary.split(" → ")[0]}`;
+  // The folder given: the repository's own, or a folder in one of its worktrees.
+  if (e.event === "Gasho:repo.register" || e.event === "Gasho:repo.unregister") {
+    return `${e.event === "Gasho:repo.register" ? "リポジトリを登録" : "リポジトリを解除"}：${summary.split("/").filter(Boolean).pop() ?? summary}`;
+  }
   // "notes/a.md [new] [1KB]": the file's path in the session's folder, whether it was made, its size.
   if (e.event === "Gasho:file.write") {
     const file = summary.replace(/(\s*\[(new|\d+KB)\])+$/, "");

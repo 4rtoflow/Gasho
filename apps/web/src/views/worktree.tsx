@@ -1,6 +1,6 @@
-// A worktree with no session open: a plugin's screen that one of its tabs opened (docs/plugins.md, P15), or a worktree
-// whose sessions are all gone, kept in the sidebar by this browser. Its tabs row still starts a new session ("＋") and
-// opens a past conversation again.
+// A worktree with no session open: a plugin's screen that one of its tabs opened (docs/plugins.md, P15), a worktree of a
+// repository registered with its working server, or one whose sessions are all gone, kept in the sidebar by this
+// browser. Its tabs row still starts a new session ("＋") and opens a past conversation again.
 import { ArrowLeft } from "lucide-react";
 import { useEffect } from "react";
 import { BUTTON_SECONDARY } from "@/components/dialog-styles";
@@ -56,16 +56,20 @@ export function WorktreeView({
           </p>
         </div>
         <p>この worktree にセッションはありません。タブの右の「＋」で新しいセッションを起動するか、左の履歴から過去の会話を開き直せます。</p>
-        <button
-          type="button"
-          className={BUTTON_SECONDARY}
-          onClick={() => {
-            forgetWorktree(worktree.machine.id, worktree.path);
-            go({ name: "home" }, { replace: true });
-          }}
-        >
-          サイドバーから外す
-        </button>
+        {worktree.registered ? (
+          <p>登録したリポジトリ{worktree.repo ? `（${worktree.repo}）` : ""}の worktree なので、git の一覧にあるあいだはサイドバーに出ます。</p>
+        ) : (
+          <button
+            type="button"
+            className={BUTTON_SECONDARY}
+            onClick={() => {
+              forgetWorktree(worktree.machine.id, worktree.path);
+              go({ name: "home" }, { replace: true });
+            }}
+          >
+            サイドバーから外す
+          </button>
+        )}
       </div>
     </div>
   );

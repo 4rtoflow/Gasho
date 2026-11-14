@@ -1,8 +1,8 @@
 "use client";
 // From easyui.site (Sidebar). Changed for Gasho: user-visible strings are in Japanese, an item can have a second line
-// (`description`), for a worktree's repository, a section's title can have buttons (`action`, for "＋", and
-// `secondaryAction`), the items of a section can be put in another order by dragging them (`sort`), and the width on
-// a computer can be changed by dragging the right edge (`ResizeHandle`, lib/widths).
+// (`description`), for a worktree's repository, a section's title can have buttons (`action`, for "＋",
+// `secondaryAction`, and `tools`), the items of a section can be put in another order by dragging them (`sort`), and the
+// width on a computer can be changed by dragging the right edge (`ResizeHandle`, lib/widths).
 
 import * as React from "react";
 import { AnimatePresence, motion, useDragControls, type PanInfo } from "framer-motion";
@@ -64,6 +64,8 @@ export type SidebarSection = {
   action?: SidebarAction;
   /** Gasho: a button before `action`, only in the full sidebar (not in the icon-only one). */
   secondaryAction?: SidebarAction;
+  /** Gasho: what goes before `secondaryAction`, such as a menu, also only in the full sidebar. */
+  tools?: React.ReactNode;
   sort?: SidebarSort;
 };
 
@@ -226,6 +228,10 @@ export function SidebarTrigger({ className, ...props }: React.ComponentProps<"bu
 
 /* ───────────────────────── internals ───────────────────────── */
 
+/** Gasho: the look of a button at the right of a section's title (SectionAction, and what `tools` gives). */
+export const SECTION_BUTTON =
+  "grid size-6 shrink-0 place-items-center rounded-md text-neutral-400 outline-none transition-colors hover:bg-neutral-100 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-white dark:focus-visible:ring-neutral-600/60 [&>svg]:size-4";
+
 /** Gasho: the button at the right of a section's title. In the drawer, it closes the drawer too (`onNavigate`). */
 function SectionAction({ action, onNavigate }: { action: SidebarAction; onNavigate?: () => void }) {
   return (
@@ -237,7 +243,7 @@ function SectionAction({ action, onNavigate }: { action: SidebarAction; onNaviga
       }}
       aria-label={action.label}
       title={action.label}
-      className="grid size-6 shrink-0 place-items-center rounded-md text-neutral-400 outline-none transition-colors hover:bg-neutral-100 hover:text-neutral-900 focus-visible:ring-2 focus-visible:ring-neutral-400/50 dark:text-neutral-500 dark:hover:bg-neutral-800 dark:hover:text-white dark:focus-visible:ring-neutral-600/60 [&>svg]:size-4"
+      className={SECTION_BUTTON}
     >
       {action.icon}
     </button>
@@ -560,6 +566,7 @@ function Panel({
                 ) : (
                   <div className="flex items-center gap-1 pb-1 pl-2.5 pr-1 pt-4">
                     <p className="min-w-0 flex-1 truncate text-xs text-neutral-400 dark:text-neutral-500">{section.title}</p>
+                    {section.tools}
                     {/* Changes the list in place: the drawer stays open to show it. */}
                     {section.secondaryAction && <SectionAction action={section.secondaryAction} />}
                     {section.action && <SectionAction action={section.action} onNavigate={onNavigate} />}

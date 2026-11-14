@@ -32,6 +32,8 @@ import {
   safeFileName,
   statusLine,
   surveyOpen,
+  autoModeOfferOpen,
+  noticeKey,
   switchedForSession,
   switchQuestion,
   terminalName,
@@ -443,6 +445,38 @@ test("the survey counts only right above the prompt box, and only with its choic
   const quoted = screenWith("❯ ").replace("● はい", "● 「How is Claude doing this session?」と「1: Bad 2: Fine 3: Good 0: Dismiss」が出ます。\n✻ Churned for 1s");
   assert.ok(!surveyOpen(quoted));
   assert.ok(!surveyOpen("● How is Claude doing this session? (optional)\n  1: Bad    2: Fine   3: Good   0: Dismiss"));
+});
+
+test("the offer to set up auto mode above the prompt box is closed with Esc, and only when it is shown there", () => {
+  // As Claude Code 2.1.325 draws it in a 50-column terminal: the box stays below it, holding a dim suggestion.
+  const offer = screenWith("❯ PATで進めて").replace(
+    "● はい",
+    [
+      "● はい",
+      RULE,
+      "  Teach auto mode about your environment?",
+      "",
+      "  Auto mode works better when it knows your",
+      "  environment. Takes about a minute.",
+      "",
+      "  ❯ 1. Yes",
+      "    2. Not now",
+      "    3. Don't show again",
+      "",
+      "  Enter to confirm · Esc to cancel",
+    ].join("\n"),
+  );
+  assert.ok(autoModeOfferOpen(offer));
+  assert.equal(noticeKey(offer), "Esc");
+  assert.ok(!dialogOpen(offer));
+  // Quoted in the conversation, with more below it.
+  const quoted = screenWith("❯ ").replace("● はい", "● 「Teach auto mode about your environment?」が出ます。\n  Enter to confirm · Esc to cancel と出ます。\n✻ Churned for 1s");
+  assert.ok(!autoModeOfferOpen(quoted));
+  // Another question that ends the same way is not taken for it.
+  const other = screenWith("❯ ").replace("● はい", ["● はい", RULE, "  Something else?", "  ❯ 1. Yes", "  Enter to confirm · Esc to cancel"].join("\n"));
+  assert.ok(!autoModeOfferOpen(other));
+  assert.equal(noticeKey(other), undefined);
+  assert.equal(noticeKey(screenWith("❯ ")), undefined);
 });
 
 test("the question is judged by its own lines: \"hook\" in the conversation above does not make it a hook's question", () => {

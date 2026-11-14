@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { arrangeSessions, arrangeTiles, rememberSessions, sameOrder } from "../src/lib/order.ts";
+import { arrangeSessions, arrangeTiles, rememberSessions, reorderShown, sameOrder } from "../src/lib/order.ts";
 
 const TILES = ["busy", "waiting", "idle", "sent", "sessions", "notifications"];
 
@@ -42,6 +42,11 @@ test("saving the sessions' order keeps the saved sessions not shown now, after t
   const many = Array.from({ length: 300 }, (_, i) => `old${i}`);
   assert.equal(rememberSessions(["a"], many).length, 200);
   assert.equal(rememberSessions(["a"], many)[0], "a");
+});
+
+test("dragging in the sidebar narrowed to one repository leaves the other repositories' worktrees where they were", () => {
+  assert.deepEqual(reorderShown(["a1", "b1", "a2", "b2", "a3"], ["a3", "a1", "a2"]), ["a3", "b1", "a1", "b2", "a2"]);
+  assert.deepEqual(reorderShown(["a", "b"], ["b", "a"]), ["b", "a"]);
 });
 
 test("sameOrder compares the ids one by one", () => {

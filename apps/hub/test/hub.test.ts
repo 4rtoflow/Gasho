@@ -584,6 +584,33 @@ test("making folders, cloning and trusting go to a gasho-daemon 0.10.0 or later,
   ]);
 });
 
+test("registering a repository goes to a gasho-daemon that sends its repositories, which reach browsers; older ones are refused", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.14.0" });
+  hub.onClientMessage(c, { type: "repo.register", requestId: "r0", machine: machineId, path: "/home/rg/repos/app" });
+  let reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && reply.requestId === "r0" && !reply.result.ok);
+  assert.match(reply.result.error ?? "", /リポジトリを登録できません/);
+  hub.onClientMessage(c, { type: "repo.register", requestId: "r1", machine: machineId, path: "app" });
+  reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && reply.requestId === "r1" && reply.result.error === "フォルダーを絶対パスで指定してください。");
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.15.0" });
+  const repos = [{ path: "/home/rg/repos/app", worktrees: [{ path: "/home/rg/repos/app", branch: "main" }, { path: "/home/rg/repos/app-x" }] }];
+  hub.onDaemonMessage(d, { type: "repos", repos });
+  const machine = c.sent.at(-1);
+  assert.ok(machine?.type === "machine");
+  assert.deepEqual(machine.machine.repos, repos);
+  hub.onClientMessage(c, { type: "repo.unregister", requestId: "r2", machine: machineId, path: "/home/rg/repos/app" });
+  assert.ok(d.sent.at(-1)?.type === "repo.unregister");
+  const summaries = c.sent.flatMap((m) => (m.type === "event" ? [[m.event.event, m.event.summary?.replace(/ \(by .*\)$/, "")]] : []));
+  assert.deepEqual(summaries, [["Gasho:repo.unregister", "/home/rg/repos/app"]]);
+});
+
 test("validateCommand checks an answer to a permission request", () => {
   const ok = { type: "permission.answer" as const, sessionId: "s1", permissionId: "p1", decision: "allow" as const };
   assert.equal(validateCommand(ok), undefined);

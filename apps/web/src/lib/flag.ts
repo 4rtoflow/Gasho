@@ -1,17 +1,17 @@
-// Small on/off choices of this browser (a folded list and the like), kept in localStorage. A private window or
-// blocked storage just uses the default.
+// Small choices of this browser (a folded list, the repository the sidebar is narrowed to, and the like), kept in
+// localStorage. A private window or blocked storage just uses the default.
 import { useSyncExternalStore } from "react";
 
 const listeners = new Set<() => void>();
-const values = new Map<string, boolean>();
+/** What is saved under each key read so far (null: nothing). */
+const values = new Map<string, string | null>();
 
-function read(key: string, fallback: boolean): boolean {
+function read(key: string): string | null {
   const known = values.get(key);
   if (known !== undefined) return known;
-  let value = fallback;
+  let value: string | null = null;
   try {
-    const saved = localStorage.getItem(key);
-    if (saved === "1" || saved === "0") value = saved === "1";
+    value = localStorage.getItem(key);
   } catch {
     // storage unavailable
   }
@@ -19,23 +19,33 @@ function read(key: string, fallback: boolean): boolean {
   return value;
 }
 
-function write(key: string, value: boolean): void {
+function write(key: string, value: string | null): void {
   values.set(key, value);
   try {
-    localStorage.setItem(key, value ? "1" : "0");
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
   } catch {
     // keep it for this page view only
   }
   for (const l of listeners) l();
 }
 
-export function useFlag(key: string, fallback: boolean): [boolean, (value: boolean) => void] {
-  const value = useSyncExternalStore(
+function useSaved(key: string): string | null {
+  return useSyncExternalStore(
     (l) => {
       listeners.add(l);
       return () => listeners.delete(l);
     },
-    () => read(key, fallback),
+    () => read(key),
   );
-  return [value, (next) => write(key, next)];
+}
+
+export function useFlag(key: string, fallback: boolean): [boolean, (value: boolean) => void] {
+  const saved = useSaved(key);
+  return [saved === "1" ? true : saved === "0" ? false : fallback, (next) => write(key, next ? "1" : "0")];
+}
+
+/** One of several choices, such as an id (undefined: none chosen). */
+export function useChoice(key: string): [string | undefined, (value: string | undefined) => void] {
+  return [useSaved(key) ?? undefined, (next) => write(key, next ?? null)];
 }
