@@ -159,7 +159,7 @@ export async function doctor(o: {
   checks.push(
     (await listening(o.hookPort))
       ? { level: "ok", name: "daemon", detail: `動いています（127.0.0.1:${o.hookPort}）` }
-      : { level: "warn", name: "daemon", detail: "動いていません", hint: `${DAEMON} run で動かすか、常駐させてください（${DAEMON} service print）` },
+      : { level: "warn", name: "daemon", detail: "動いていません", hint: `${DAEMON} run で動かすか、常駐させてください（${DAEMON} service install）` },
   );
   return checks;
 }
@@ -203,9 +203,18 @@ export interface ServiceInput {
   home: string;
 }
 
+/**
+ * Folders npm puts first on PATH while it runs a command (npx, npm exec, npm run): the package's own bin folder in
+ * npx's cache, node_modules/.bin of the folder it runs in and of each folder above it, and its node-gyp shim. They mean
+ * nothing to a service, and npx's may be gone later.
+ */
+function addedByNpm(dir: string): boolean {
+  return /(^|\/)node_modules\/\.bin\/?$/.test(dir) || dir.includes("/_npx/") || /\/node-gyp-bin\/?$/.test(dir);
+}
+
 /** The PATH the service gets: Node.js's folder first, then this shell's PATH (where claude and gh are found). */
 export function servicePath(node: string, envPath: string | undefined): string {
-  const dirs = [path.dirname(node), ...(envPath ?? "").split(":")].filter(Boolean);
+  const dirs = [path.dirname(node), ...(envPath ?? "").split(":").filter((d) => !addedByNpm(d))].filter(Boolean);
   return [...new Set(dirs)].join(":");
 }
 
@@ -236,6 +245,35 @@ const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
 /** The label of the launchd agent. */
 export const LAUNCHD_LABEL = "local.gasho.daemon";
+
+/** The name of the systemd user service. */
+export const SYSTEMD_UNIT = "gasho-daemon.service";
+
+/** Where `service install` writes the service's file: undefined on a system without systemd or launchd. */
+export function serviceFile(platform: NodeJS.Platform, home: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (platform === "linux") return path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "systemd", "user", SYSTEMD_UNIT);
+  if (platform === "darwin") return path.join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  return undefined;
+}
+
+/**
+ * The commands that make the service manager read the service's file again and start the daemon with it (stopping
+ * the one it runs now). The first one of launchd's may fail: the agent was not loaded yet.
+ */
+export function activateCommands(platform: NodeJS.Platform, file: string, uid: number): { argv: string[]; mayFail?: boolean }[] {
+  if (platform === "darwin") {
+    return [
+      { argv: ["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`], mayFail: true },
+      { argv: ["launchctl", "bootstrap", `gui/${uid}`, file] },
+    ];
+  }
+  const unit = SYSTEMD_UNIT.replace(/\.service$/, "");
+  return [
+    { argv: ["systemctl", "--user", "daemon-reload"] },
+    { argv: ["systemctl", "--user", "enable", unit] },
+    { argv: ["systemctl", "--user", "restart", unit] },
+  ];
+}
 
 /** A launchd agent (~/Library/LaunchAgents/local.gasho.daemon.plist). */
 export function launchdPlist(o: ServiceInput): string {

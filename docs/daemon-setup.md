@@ -85,21 +85,30 @@ daemon は動かせます。! の機能は、入れるまで使えません。
 
 ## 5. 常駐させる
 
-gasho-daemon を、マシンの起動とともに動かし、止まったら動かし直すようにする。そのための設定ファイルは `service print` が書き出す。Ubuntu では systemd のユーザーサービス、Mac では launchd のエージェントになる。
+gasho-daemon を、マシンの起動とともに動かし、止まったら動かし直すようにする。Ubuntu では systemd のユーザーサービス、Mac では launchd のエージェントで動かす。設定は `service install` がまとめて行う。
 
-`service print` は、実行した端末の PATH と Node.js の場所を設定ファイルに書き込む。npx で実行したときは、npx のキャッシュは消えることがあるので、同じ版の gasho-daemon を npx で起動する設定になる（キャッシュにあればネットワークを使わない）。`npm install -g` で入れたときは、入れた場所の gasho-daemon を直接起動する。`doctor` で claude・gh が見つかる端末で実行する。あとでこれらを入れ直して場所が変わったら、もう一度書き出す。
+```bash
+npx @4rtoflow/gasho-daemon service install
+```
+
+`service install` は、次のことを行う。
+
+1. 実行した版の gasho-daemon を、版ごとのフォルダー（`~/.local/share/gasho/daemon/versions/<版>`）に npm で入れ、起動できることを確かめる
+2. 使う版を指すリンク（`~/.local/share/gasho/daemon/current`）を、その版に向ける
+3. `current` の gasho-daemon を起動する設定ファイルを書き出す。前の設定ファイルがあれば、`.bak` を付けて残す
+4. systemd か launchd に設定を読み直させ、gasho-daemon を起動する。動いていれば、動かし直す
+
+こうして常駐させた gasho-daemon は、Gasho の画面から更新できる（「更新する」）。設定ファイルには、実行した端末の PATH と Node.js の場所が入るので、`doctor` で claude・gh が見つかる端末で実行する。あとでこれらを入れ直して場所が変わったら、もう一度実行する。
+
+設定ファイルを書き出すだけにしたいときは、`service print` を使う。npx で実行したときは、同じ版の gasho-daemon を npx で起動する設定になり、Gasho の画面からは更新できない。
 
 ### Ubuntu（systemd）
 
+設定ファイルは `~/.config/systemd/user/gasho-daemon.service` に書き出す。ログインしていなくても、マシンが起動したときから gasho-daemon が動くように、一度だけ次を実行しておく（`service install` も、まだのときは知らせる）。
+
 ```bash
-mkdir -p ~/.config/systemd/user
-npx @4rtoflow/gasho-daemon service print > ~/.config/systemd/user/gasho-daemon.service
-systemctl --user daemon-reload
-systemctl --user enable --now gasho-daemon
 loginctl enable-linger "$USER"
 ```
-
-最後の `loginctl enable-linger` で、ログインしていなくても、マシンが起動したときから gasho-daemon が動く。
 
 Gasho から起動したセッション（端末と Claude Code）は、セッションごとに systemd のスコープ（`gasho-<名前>-xxxx.scope`）を作って、その中で動かす。gasho-daemon のサービスの外なので、gasho-daemon を動かし直したり止めたりしても、セッションは止まらない。動いているセッションは `systemctl --user list-units 'gasho-*.scope'` で見られる。端末を直接見て操作するには `gasho-daemon attach <名前>` を使う（Ctrl+] で抜ける）。
 
@@ -112,10 +121,7 @@ Gasho から起動したセッション（端末と Claude Code）は、セッ�
 
 ### Mac（launchd）
 
-```bash
-npx @4rtoflow/gasho-daemon service print > ~/Library/LaunchAgents/local.gasho.daemon.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.gasho.daemon.plist
-```
+設定ファイルは `~/Library/LaunchAgents/local.gasho.daemon.plist` に書き出す。
 
 | すること | コマンド |
 |---|---|
@@ -164,17 +170,30 @@ npx @4rtoflow/gasho-daemon hooks install   # 追記する
 
 ## 更新する
 
-常駐の設定は、書き出したときの版の gasho-daemon を起動する。新しい版にするときは、新しい版で設定を書き出し直してから、動かし直す。
+`service install` で常駐させた gasho-daemon は、Gasho の画面から更新できる。「端末」の画面の「gasho-daemon の更新」に、working server ごとの版と、公開されている最新の版が出る。「<版> に更新」を押すと、gasho-daemon が次の順に進め、画面にもその段階が出る。
+
+1. 新しい版を、今の版とは別のフォルダーに npm で入れる
+2. 新しい版を一度起動して、動くことを確かめる
+3. Gasho から送るのを待っている入力があれば、送り終えるまで待つ。5分たっても残っているときは、更新をやめる
+4. 使う版を新しい版に切り替えて終わる。systemd か launchd が、新しい版で起動し直す
+
+1〜3 で失敗したときは何も変えず、画面に理由を出す。セッションは止まらない。動かし直すあいだ（10秒ほど）は、その working server の様子が届かない。Gasho で答えるのを待っている権限の確認は、動かし直したあとは Gasho から答えられなくなるので、端末か公式アプリで答える。
+
+前の版のフォルダーは残しておき、画面の「<版> に戻す」で戻せる。使わなくなった版のフォルダーは、gasho-daemon が起動してしばらくしてから消す。今の版、戻す先の版、セッションの端末が使っている版は残す。
+
+公開されている最新の版は、Gasho サーバーが30分ごとに `npm view` で調べる。すぐに調べるときは、画面の「今すぐ調べる」を押す。Gasho サーバーのマシンにも、2 の GitHub Packages の設定が要る。調べなくてよいときは、Gasho サーバーを `GASHO_LATEST_CHECK=off` で起動する。
+
+### 手で更新する
+
+Gasho の画面から更新できないときは、working server で次を実行する。Gasho からの更新に対応する前の版の gasho-daemon、`service print` で常駐させた gasho-daemon、常駐させずに動かしている gasho-daemon がそうで、画面にもこのコマンドが出る。最新の版を入れ、これからは Gasho から更新できる形で常駐させ直す。
 
 ```bash
-npx @4rtoflow/gasho-daemon@latest service print > ~/.config/systemd/user/gasho-daemon.service   # Mac では 5 の plist に書き出す
-systemctl --user daemon-reload
-systemctl --user restart gasho-daemon
+npx @4rtoflow/gasho-daemon@latest service install
 ```
 
 0.10.0 までの gasho-daemon は、systemd で動かしているときに起動したセッションを、自分のサービスの中で動かしていた。そのため、0.10.0 から更新して動かし直すと、そのセッションは止まる。会話は working server に残るので、端末で `claude --resume` を使えば開き直せる。
 
-Mac では、書き出したあと `launchctl bootout` と `launchctl bootstrap` で読み直す（5 の表）。`npm install -g` で入れたときは、`npm install -g @4rtoflow/gasho-daemon@latest` のあと動かし直す。clone したリポジトリで動かしているときは、`git pull` のあと動かし直す。
+`npm install -g` で入れて `service print` で常駐させたときは、`npm install -g @4rtoflow/gasho-daemon@latest` のあと動かし直す。clone したリポジトリで動かしているときは、`git pull` のあと動かし直す。
 
 新しい機能には、Gasho サーバーと gasho-daemon の両方の更新が要ることが多いので、Gasho サーバーも同じ版にしておく。gasho-daemon の版は、ホームの「working server」のタイルに出る。
 
@@ -183,6 +202,7 @@ Mac では、書き出したあと `launchctl bootout` と `launchctl bootstrap`
 1. 常駐をやめる
    - Ubuntu：`systemctl --user disable --now gasho-daemon` のあと、`~/.config/systemd/user/gasho-daemon.service` を消す
    - Mac：`launchctl bootout gui/$(id -u)/local.gasho.daemon` のあと、`~/Library/LaunchAgents/local.gasho.daemon.plist` を消す
+   - `service install` で入れた gasho-daemon の版は、`~/.local/share/gasho/daemon` にある。フォルダーごと消す
 2. 登録を取り消す：Gasho の「端末」画面でこの working server を取り消し、`~/.config/gasho/` を消す
 3. hooks を入れたときは、`~/.claude/settings.json` から Gasho の hooks（`http://127.0.0.1:7741/hooks` を送り先にしたもの）を消す。インストールしたときのバックアップから戻してもよい
 
@@ -197,7 +217,11 @@ Mac では、書き出したあと `launchctl bootout` と `launchctl bootstrap`
 | Issues と Pull requests が出ない | Gasho の「プラグイン」の画面で、GitHub プラグインが入っていて有効か、その working server が「動いている」か。「gasho-daemon が古い」と出たら gasho-daemon を更新する。パネルにエラーが出るときは `doctor` の GitHub CLI |
 | セッション画面に「ファイル」が出ない | gasho-daemon が 0.11.0 以上か |
 | 通知が来ない | `doctor` の hooks。`~/.config/gasho/daemon.env` と `~/.claude/settings.json` の秘密の値が同じか |
-| 常駐させると claude や gh が見つからない | 設定ファイルの PATH。`doctor` で見つかる端末で `service print` を実行し直す |
+| 常駐させると claude や gh が見つからない | 設定ファイルの PATH。`doctor` で見つかる端末で `service install` を実行し直す |
+| Gasho の画面から更新できない | 画面に出る理由。多くは、working server で `npx @4rtoflow/gasho-daemon@latest service install` を一度実行すれば直る |
+| 更新に失敗する（npm で入れられない） | working server の npm の設定（2）。`npm view @4rtoflow/gasho-daemon version` が版を返すか |
+| 「公開されている最新の版」を調べられない | Gasho サーバーのマシンの npm の設定（2）。Gasho サーバーを動かしている端末で `npm view @4rtoflow/gasho-daemon version` |
+| 更新のあと、working server がつながらない | ログ（5 の表）。`~/.local/share/gasho/daemon/current` を前の版のフォルダーに向け直して動かし直すと、前の版に戻る |
 
 ## 設定（環境変数）
 
@@ -214,3 +238,5 @@ gasho-daemon の設定は環境変数で変える。gasho-daemon のコマンド
 | `GASHO_GH_BIN` | GitHub CLI のコマンド | `gh` |
 | `GASHO_POLL_MS` | セッションの一覧を読み直す間隔（ミリ秒） | `3000` |
 | `GASHO_PLUGINS` | `none` にすると、この working server ではプラグインの daemon の部分を動かさない | なし |
+| `GASHO_DAEMON_HOME` | `service install` と更新が、gasho-daemon を版ごとに入れるフォルダー | `~/.local/share/gasho/daemon` |
+| `GASHO_NPM_BIN` | 更新で版を入れる npm | Node.js と同じフォルダーの `npm` |

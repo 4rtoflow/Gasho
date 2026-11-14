@@ -5,6 +5,7 @@ import type {
   ClientToHub,
   CommandResult,
   DaemonToHub,
+  DaemonUpdateInfo,
   DeviceInfo,
   HubToClient,
   HubToDaemon,
@@ -14,6 +15,7 @@ import type {
   PermissionRequestInfo,
   SessionCommand,
 } from "@gasho/protocol";
+import type { LatestCheck } from "./latest.ts";
 import { notificationFor } from "./notify.ts";
 import type { PluginCatalogSource } from "./catalog.ts";
 import { PluginHub } from "./plugin-hub.ts";
@@ -98,6 +100,40 @@ export function legacyFeatures(daemonVersion: string | undefined): InputFeature[
 export function versionAtLeast(version: string | undefined, major: number, minor: number): boolean {
   const [a = 0, b = 0] = (version ?? "").split(".").map((n) => Number.parseInt(n, 10) || 0);
   return a > major || (a === major && b >= minor);
+}
+
+/** A version of gasho-daemon (daemon.update). */
+const VERSION_RE = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+const UPDATE_STEPS = new Set(["install", "check", "wait", "restart"]);
+/** Said when a gasho-daemon does not say whether Gasho can update it (one from before updates from Gasho). */
+const UPDATE_TOO_OLD =
+  "この working server の gasho-daemon は古いため、Gasho からは更新できません。working server で npx @4rtoflow/gasho-daemon@latest service install を実行してください。";
+
+/** What a gasho-daemon says about updating it, kept to what is expected (it is shown to browsers). */
+export function updateInfoOf(u: unknown): DaemonUpdateInfo | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const x = u as Record<string, unknown>;
+  const text = (v: unknown, max: number) => (typeof v === "string" && v.length > 0 ? v.slice(0, max) : undefined);
+  const version = (v: unknown) => (typeof v === "string" && VERSION_RE.test(v) ? v : undefined);
+  const at = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const p = (x.progress ?? {}) as Record<string, unknown>;
+  const f = (x.failed ?? {}) as Record<string, unknown>;
+  const pv = version(p.version);
+  const pat = at(p.at);
+  const fv = version(f.version);
+  const fe = text(f.error, 2000);
+  const fat = at(f.at);
+  const installed = Array.isArray(x.installed) ? (x.installed.filter((v) => version(v) !== undefined).slice(0, 50) as string[]) : [];
+  const step = typeof p.step === "string" && UPDATE_STEPS.has(p.step) ? (p.step as NonNullable<DaemonUpdateInfo["progress"]>["step"]) : undefined;
+  return {
+    canUpdate: x.canUpdate === true,
+    reason: text(x.reason, 500),
+    command: text(x.command, 300),
+    installed: installed.length > 0 ? installed : undefined,
+    previous: version(x.previous),
+    progress: pv && step && pat !== undefined ? { version: pv, step, at: pat } : undefined,
+    failed: fv && fe && fat !== undefined ? { version: fv, error: fe, at: fat } : undefined,
+  };
 }
 
 /** gasho-daemon 0.9.0 renames, forks and removes sessions. */
@@ -286,6 +322,8 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       if (cmd.mode !== undefined && cmd.mode !== "auto" && cmd.mode !== "default") return "計画を承認したあとの進め方の指定が正しくありません。";
       if (cmd.message !== undefined && (typeof cmd.message !== "string" || cmd.message.length > MAX_INPUT)) return `伝えることは${MAX_INPUT}文字までです。`;
       return undefined;
+    case "daemon.update":
+      return typeof cmd.version === "string" && VERSION_RE.test(cmd.version) ? undefined : "版の指定が正しくありません。";
     case "file.write": {
       const wrong = filePathError(cmd.path, true);
       if (wrong) return wrong;
@@ -309,9 +347,13 @@ export class Hub {
   private commands = new Map<string, PendingCommand>();
   /** The plugins (docs/plugins.md); absent when the Gasho server was started without a plugins folder (tests). */
   private plugins: PluginHub | undefined;
+  /** The latest published versions; absent when they are not looked up. */
+  private latest: LatestCheck | undefined;
 
-  constructor(store: Store, opts: { plugins?: PluginRegistry; catalog?: PluginCatalogSource } = {}) {
+  constructor(store: Store, opts: { plugins?: PluginRegistry; catalog?: PluginCatalogSource; latest?: LatestCheck } = {}) {
     this.store = store;
+    this.latest = opts.latest;
+    opts.latest?.subscribe((latest) => this.broadcast({ type: "latest", latest }));
     for (const m of store.loadMachines()) this.machines.set(m.id, m);
     if (opts.plugins) {
       this.plugins = new PluginHub({
@@ -348,6 +390,8 @@ export class Hub {
       m.connected = true;
       m.lastSeen = Date.now();
       m.daemonVersion = msg.daemonVersion;
+      // Said again by its capabilities; an update that ended with the restart is over.
+      m.update = undefined;
       this.store.saveMachine(m);
       this.store.touchDevice(device.id);
       peer.send({ type: "welcome" });
@@ -384,6 +428,7 @@ export class Hub {
         m.modelsAt = typeof msg.modelsAt === "number" && Number.isFinite(msg.modelsAt) ? msg.modelsAt : undefined;
         m.features = Array.isArray(msg.features) ? [...new Set(msg.features.filter((f) => FEATURES.has(f)))] : undefined;
         m.canResume = msg.canResume === true || undefined;
+        m.update = updateInfoOf(msg.update);
         this.broadcast({ type: "machine", machine: m });
         break;
       case "repos":
@@ -478,6 +523,7 @@ export class Hub {
       events: this.store.recentEvents(),
       ...(this.plugins ? { plugins: this.plugins.infos(), pluginEvents: this.plugins.retainedEvents() } : {}),
       ...(this.plugins?.catalog() ? { catalog: this.plugins.catalog() } : {}),
+      ...(this.latest ? { latest: this.latest.latest() } : {}),
     });
   }
 
@@ -543,6 +589,9 @@ export class Hub {
         this.store.markRead(msg.ids);
         this.broadcast({ type: "notification.read", ids: msg.ids });
         break;
+      case "latest.check":
+        if (this.latest) void this.latest.check(true);
+        break;
       case "plugin.catalog.get":
         this.plugins?.onClientMessage(peer, msg);
         break;
@@ -571,7 +620,8 @@ export class Hub {
       case "repo.clone":
       case "repo.register":
       case "repo.unregister":
-      case "file.write": {
+      case "file.write":
+      case "daemon.update": {
         const { requestId: clientRequestId, machine, ...cmd } = msg;
         this.relayCommand(peer, clientRequestId, machine, cmd);
         break;
@@ -614,6 +664,8 @@ export class Hub {
       "repo.register": REQUEST_TIMEOUT_MS,
       "repo.unregister": REQUEST_TIMEOUT_MS,
       "file.write": REQUEST_TIMEOUT_MS,
+      // Answered as soon as the update has begun; its steps follow with the capabilities.
+      "daemon.update": REQUEST_TIMEOUT_MS,
     }[cmd.type];
     const timer = setTimeout(() => {
       if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
@@ -675,6 +727,9 @@ export class Hub {
         const task = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId)?.background?.find((x) => x.id === cmd.taskId);
         return task ? `${task.title.slice(0, 300)} [${task.kind}]` : cmd.taskId;
       }
+      case "daemon.update":
+        // From which version to which.
+        return `${this.machines.get(machine)?.daemonVersion ?? "?"} → ${cmd.version}`;
       case "session.interrupt":
       case "session.history":
         return "";
@@ -692,6 +747,7 @@ export class Hub {
   /** A command that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
     const m = this.machines.get(machine);
+    if (cmd.type === "daemon.update") return m?.update?.canUpdate ? undefined : (m?.update?.reason ?? UPDATE_TOO_OLD);
     if (cmd.type === "file.write") return !m || versionAtLeast(m.daemonVersion, ...FILES_SINCE) ? undefined : FILES_TOO_OLD;
     if (cmd.type === "repo.register" || cmd.type === "repo.unregister") {
       // A gasho-daemon that registers repositories sends them as soon as it connects.

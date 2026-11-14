@@ -9,6 +9,7 @@ import { ReposDialog } from "@/components/repos-dialog";
 import { SessionActionDialog, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
+import { updateTo } from "@/lib/daemon-update";
 import { useChoice } from "@/lib/flag";
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery, useWindowWidth } from "@/lib/media";
@@ -147,7 +148,7 @@ export function App() {
   useEffect(() => {
     if (isOldGitHubLink(location.hash)) go(route, { replace: true });
   }, [route]);
-  const { auth, me, machines, notifications, connected, plugins, catalog } = useAppState();
+  const { auth, me, machines, notifications, connected, plugins, catalog, latest } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
   // What was picked from a session tab's menu (rename, fork, remove); its dialog is open meanwhile.
   const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
@@ -192,7 +193,7 @@ export function App() {
       items: [
         { id: "home", label: "ホーム", icon: <Home />, badge: unread || undefined },
         ...pluginItems.map(({ id, label, icon, badge }) => ({ id, label, icon, badge })),
-        { id: "devices", label: "端末", icon: <KeyRound /> },
+        { id: "devices", label: "端末", icon: <KeyRound />, badge: machines.some((m) => updateTo(m, latest)) ? "更新" : undefined },
         // The plugins that the catalog has a newer version of.
         { id: "plugins", label: "プラグイン", icon: <Puzzle />, badge: updateCount(plugins, catalog) || undefined },
         { id: "settings", label: "設定", icon: <Settings /> },

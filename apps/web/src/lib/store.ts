@@ -9,6 +9,7 @@ import type {
   GashoNotification,
   GitGraph,
   HubToClient,
+  LatestVersions,
   MachineHookEvent,
   MachineInfo,
   PluginCatalog,
@@ -75,6 +76,8 @@ export interface State {
   plugins: PluginInfo[];
   /** The catalog of GashoPlugins, as the Gasho server last read it (P10). */
   catalog?: PluginCatalog;
+  /** The latest published versions, as the Gasho server looked them up (absent when it does not). */
+  latest?: LatestVersions;
 }
 
 const PAGE_SIZE = 80;
@@ -342,7 +345,17 @@ function handle(m: HubToClient): void {
       update({ catalog: m.catalog });
       break;
     case "snapshot":
-      update({ machines: m.machines, notifications: m.notifications, events: m.events.slice(-MAX_EVENTS), plugins: m.plugins ?? [], catalog: m.catalog });
+      update({
+        machines: m.machines,
+        notifications: m.notifications,
+        events: m.events.slice(-MAX_EVENTS),
+        plugins: m.plugins ?? [],
+        catalog: m.catalog,
+        latest: m.latest,
+      });
+      break;
+    case "latest":
+      update({ latest: m.latest });
       break;
     case "machine": {
       const machines = state.machines.filter((x) => x.id !== m.machine.id);
@@ -514,6 +527,11 @@ export function loadTranscript(machine: string, sessionId: string, older = false
   } else {
     requestPage(machine, sessionId, undefined);
   }
+}
+
+/** Has the Gasho server look up the latest published versions now. */
+export function checkLatest(): void {
+  send({ type: "latest.check" });
 }
 
 export function markRead(ids: string[]): void {

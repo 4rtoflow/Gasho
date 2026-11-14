@@ -4,6 +4,7 @@ import path from "node:path";
 import { dbFileOf, loadConfig, pluginsDirOf } from "./config.ts";
 import { ghRunner, PluginCatalogSource } from "./catalog.ts";
 import { Hub } from "./hub.ts";
+import { LatestCheck, npmBin, npmLatest } from "./latest.ts";
 import { buildAllowList } from "./netallow.ts";
 import { PluginRegistry, readPluginFolder, removePluginFolder, swapPluginFolder } from "./plugins.ts";
 import { createServer } from "./server.ts";
@@ -45,7 +46,11 @@ async function start(): Promise<void> {
     log: (s) => console.log(`${new Date().toISOString()} [gasho-hub] ${s}`),
   });
   catalog.start();
-  const hub = new Hub(store, { plugins, catalog });
+  // The latest published versions, with npm and the user's .npmrc (GASHO_LATEST_CHECK=off: not looked up).
+  const npm = npmBin();
+  const latest = process.env.GASHO_LATEST_CHECK === "off" ? undefined : new LatestCheck({ lookup: (name) => npmLatest(npm, name) });
+  const hub = new Hub(store, { plugins, catalog, latest });
+  latest?.start();
   const server = createServer({ hub, store, webDist: cfg.webDist, allow: buildAllowList(cfg.allowNets), plugins });
   server.listen(cfg.port, cfg.host, () => {
     const log = (s: string) => console.log(`${new Date().toISOString()} [gasho-hub] ${s}`);
@@ -59,6 +64,7 @@ async function start(): Promise<void> {
     process.on(sig, () => {
       catalog.stop();
       plugins.close();
+      latest?.close();
       server.close();
       store.close();
       process.exit(0);
