@@ -7,6 +7,7 @@
 import { motion, useTransform } from "framer-motion";
 import {
   CircleDot,
+  CircleStop,
   Cpu,
   FilePen,
   FolderDown,
@@ -664,6 +665,7 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:session.launch": Rocket,
   "Gasho:session.input": Send,
   "Gasho:session.interrupt": Square,
+  "Gasho:session.stopTask": CircleStop,
   "Gasho:session.rename": Pencil,
   "Gasho:session.fork": GitFork,
   "Gasho:session.remove": Trash2,
@@ -771,6 +773,11 @@ function operationText(e: MachineHookEvent): string {
     return `${/\[new\]/.test(summary.slice(file.length)) ? "ファイルを作成" : "ファイルを保存"}：${file.split("/").pop() ?? file}`;
   }
   if (e.event === "Gasho:session.interrupt") return "作業を止めた";
+  // What was stopped and its kind ("[shell]"), or "[all]".
+  if (e.event === "Gasho:session.stopTask") {
+    const title = summary.replace(/\s*\[(all|shell|monitor|agent|workflow)\]$/, "");
+    return title ? `バックグラウンドのタスクを止めた：${title}` : "バックグラウンドのタスクをすべて止めた";
+  }
   // The new name, the fork's name, the removed session's name.
   if (e.event === "Gasho:session.rename") return summary ? `名前を変更：${summary}` : "名前を変えた";
   if (e.event === "Gasho:session.fork") return summary ? `フォーク：${summary}` : "フォークした";

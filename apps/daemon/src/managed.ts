@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { EffortLevel, ModelOption, SessionModel } from "@gasho/protocol";
+import type { BackgroundTaskKind, EffortLevel, ModelOption, SessionModel } from "@gasho/protocol";
 
 const execFileP = promisify(execFile);
 
@@ -24,11 +24,13 @@ export const PERMISSION_PROMPT_RE = /Do you want to proceed\?/;
  * what is drawn dim (SGR 2): in the prompt box, that is Claude Code's suggestion for the next message and its
  * placeholder, which nobody typed. Unless the terminal's own cursor is used, Claude Code draws its cursor on the first
  * character of these in reverse video (SGR 7) instead of dim; a single reversed character followed by dim text is left
- * out too. Both keep every line break, so their lines match.
+ * out too. Both keep every line break, so their lines match. `reversed` keeps only what is drawn in reverse video
+ * (the rest is spaces), with the same lines.
  */
 export interface Screen {
   plain: string;
   typed: string;
+  reversed?: string;
 }
 
 // CSI (with SGR as the "m" case), OSC, character set selection, and the other two-character escapes.
@@ -38,6 +40,7 @@ const ESCAPE_RE = /\x1b(?:\[([0-?]*)[ -\/]*([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)
 export function readScreen(ansi: string): Screen {
   let plain = "";
   let typed = "";
+  let reversed = "";
   let dim = false;
   let inverse = false;
   // A reversed character held back until it is known whether dim text follows it (then it is Claude Code's cursor).
@@ -46,6 +49,7 @@ export function readScreen(ansi: string): Screen {
   const text = (s: string) => {
     if (!s) return;
     plain += s;
+    reversed += inverse ? s : s.replace(/[^\n]/g, " ");
     if (dim) {
       typed += s.replace(/[^\n]/g, "");
       cursor = "";
@@ -79,7 +83,7 @@ export function readScreen(ansi: string): Screen {
     }
   }
   text(ansi.slice(at));
-  return { plain, typed: typed + cursor };
+  return { plain, typed: typed + cursor, reversed };
 }
 
 /** A screen read from plain text, where nothing is dim (for screens that need no more). */
@@ -317,6 +321,136 @@ export function promptHolds(s: Screen, text: string): boolean {
  */
 export function clearPromptKeys(lines: number): string[] {
   return Array.from({ length: Math.max(1, lines) + 1 }, () => ["Ctrl u", "Backspace"]).flat();
+}
+
+/**
+ * Claude Code's line above the prompt box once Claude's turn has ended while it still waits for subagents (or
+ * workflows) it started in the background: "✻ Waiting for 1 background agent to finish". Claude Code still reports
+ * the session as busy then, but Esc stops nothing.
+ */
+const BACKGROUND_WAIT_RE = /\bWaiting for \d+ background \w+/;
+
+/** Whether Claude's turn has ended and Claude waits for subagents or workflows running in the background. */
+export function waitingForBackground(screen: string): boolean {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  if (!box) return false;
+  return BACKGROUND_WAIT_RE.test(lines.slice(Math.max(0, box.top - 6), box.top).join(" ").replace(/\s+/g, " "));
+}
+
+/**
+ * Whether the item for the background tasks in the footer under the prompt box ("1 shell", "2 local agents") has the
+ * keys: ↓ from the prompt box gives it to it, and Claude Code then draws it in reverse video. Enter then opens the list
+ * of background tasks. When only subagents run, ↓ selects the row of agents under the footer instead, which is not
+ * this.
+ */
+export function tasksItemFocused(s: Screen): boolean {
+  const lines = screenLines(s.plain);
+  const box = promptBox(lines);
+  if (!box || !s.reversed) return false;
+  const footer = s.reversed.split("\n").slice(box.bottom + 1, box.bottom + 3).join(" ");
+  return /\b\d+ [a-z]/i.test(footer.replace(/\s+/g, " "));
+}
+
+/**
+ * Whether ↓ from the prompt box gave the keys to the row of subagents under the footer ("❯ ● main", shown while
+ * subagents run) instead of the item for the background tasks; ↑ gives them back to the prompt box.
+ */
+export function agentRowFocused(screen: string): boolean {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  return box !== undefined && lines.slice(box.bottom + 1).some((l) => /^\s*❯\s*[●◯○◉]\s/.test(l));
+}
+
+/** A row of Claude Code's list of background tasks (/tasks). */
+export interface TaskRow {
+  /** What the row shows of the task (a shell's command, a subagent's description), cut with "…" to fit. */
+  label: string;
+  /** The word after it: "running", "done", … */
+  state: string;
+  /** The row has the cursor (❯). */
+  selected: boolean;
+  /** The group it is listed in ("Shells", "Local agents", "Completed", …), or for a list of one group, what its summary says ("1 active shell"). */
+  group: string;
+}
+
+/**
+ * Claude Code's list of background tasks, or its view of one task (shown at once when /tasks finds only one; ← goes
+ * back to the list from it). `cursorAway`: the cursor is on a row that is no task ("Earlier in this session").
+ */
+export type TasksDialog = { view: "list"; summary: string; rows: TaskRow[]; cursorAway: boolean } | { view: "details" };
+
+/** The hints at the bottom of the list ("↑/↓ to select · Enter to view · x to stop · Esc to close"), and of one task's view. */
+const TASK_LIST_HINT_RE = /↑\/↓ to select\b.*\bEsc to close/;
+const TASK_DETAILS_HINT_RE = /← to go back\b.*\bto close\b/;
+/** "❯ ● sleep 900          running", "✔ slow helper   done · Haiku 5.5": a status mark, the label, then its state. */
+const TASK_ROW_RE = /^\s*(❯\s*)?[●◯○◉◎✔✓✗✘×■◆⏺]\s+(.+?)\s{2,}([a-z]+)\b/;
+/** "Shells (2)", "Local agents (1)", "Completed (1)": a group's heading. */
+const TASK_GROUP_RE = /^\s*([A-Z][A-Za-z ]*?) \(\d+\)\s*$/;
+const TASK_EARLIER_RE = /Earlier in this session/;
+/** The states of a row whose task has ended. */
+const ENDED_STATES = new Set(["done", "completed", "failed", "error", "stopped", "killed", "cancelled", "canceled"]);
+
+/** Claude Code's list of background tasks (or the view of one), when it is at the bottom of the screen. */
+export function tasksDialog(screen: string): TasksDialog | undefined {
+  const lines = screenLines(screen);
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1]) end--;
+  const tail = lines.slice(Math.max(0, end - 3), end).join(" ").replace(/\s+/g, " ");
+  if (TASK_DETAILS_HINT_RE.test(tail)) return { view: "details" };
+  if (!TASK_LIST_HINT_RE.test(tail)) return undefined;
+  // The list runs from its heading ("Background") down to the hints.
+  let top = end - 1;
+  while (top >= 0 && lines[top]!.trim() !== "Background") top--;
+  if (top < 0) return undefined;
+  const body = lines.slice(top + 1, end).filter(Boolean);
+  const summary = body[0]?.trim() ?? "";
+  const rows: TaskRow[] = [];
+  let group = summary;
+  let cursorAway = false;
+  for (const line of body.slice(1)) {
+    const row = TASK_ROW_RE.exec(line);
+    if (row) {
+      rows.push({ label: row[2]!.trim(), state: row[3]!, selected: Boolean(row[1]), group });
+      continue;
+    }
+    if (TASK_EARLIER_RE.test(line)) {
+      // Rows under it (when it is opened) are tasks of earlier, ended ones.
+      group = "Earlier in this session";
+      if (/^\s*❯/.test(line)) cursorAway = true;
+      continue;
+    }
+    const heading = TASK_GROUP_RE.exec(line);
+    if (heading) group = heading[1]!;
+  }
+  return { view: "list", summary, rows, cursorAway };
+}
+
+/** Whether a row of the list is a task that still runs (and can be stopped). */
+export function taskRowActive(row: TaskRow): boolean {
+  return !ENDED_STATES.has(row.state) && !/^(Completed|Earlier in this session)$/.test(row.group);
+}
+
+/** What kind of task a row of the list is, by its group's heading (or the list's summary): undefined when it does not say. */
+export function taskRowKind(row: TaskRow): BackgroundTaskKind | undefined {
+  if (/shell/i.test(row.group)) return "shell";
+  if (/monitor/i.test(row.group)) return "monitor";
+  if (/workflow/i.test(row.group)) return "workflow";
+  if (/agent|team/i.test(row.group)) return "agent";
+  return undefined;
+}
+
+/**
+ * Whether a row of the list shows a task: its label is one of `texts` (the task's command, its title), or the start
+ * of one when the list cut it ("…"). Spaces and line breaks count as one space.
+ */
+export function taskRowShows(row: TaskRow, texts: (string | undefined)[]): boolean {
+  const norm = (t: string) => t.replace(/\s+/g, " ").trim();
+  const label = norm(row.label);
+  const cut = label.endsWith("…");
+  const head = cut ? label.slice(0, -1).trimEnd() : label;
+  if (!head) return false;
+  return texts.some((t) => t !== undefined && (cut ? norm(t).startsWith(head) : norm(t) === head));
 }
 
 /** An input waiting to be typed, and what to switch first (for this session only). */

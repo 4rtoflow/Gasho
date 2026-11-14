@@ -241,6 +241,43 @@ test("session commands are refused when invalid or when the working server is of
   assert.ok(r?.type === "command.result" && r.requestId === "d" && !r.result.ok);
 });
 
+test("session.stopTask is checked, relayed with its task, and logged with what it stops", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.15.0" });
+  hub.onDaemonMessage(d, {
+    type: "sessions",
+    sessions: [
+      {
+        sessionId: "s1",
+        cwd: "/w",
+        status: "idle",
+        rcMode: "none",
+        prLinks: [],
+        managed: true,
+        background: [{ id: "b1", kind: "shell", title: "dev server", command: "npm run dev", startedAt: 1 }],
+      },
+    ],
+  });
+  hub.onClientMessage(c, { type: "session.stopTask", requestId: "a", machine: machineId, sessionId: "s1", taskId: "" });
+  const r = c.sent.at(-1);
+  assert.ok(r?.type === "command.result" && r.requestId === "a" && r.result.error === "タスクの指定が正しくありません。");
+  const logged = () => {
+    const e = c.sent.filter((m) => m.type === "event").at(-1);
+    return e?.type === "event" ? e.event.summary : undefined;
+  };
+  hub.onClientMessage(c, { type: "session.stopTask", requestId: "b", machine: machineId, sessionId: "s1", taskId: "b1" });
+  const relayed = d.sent.at(-1);
+  assert.ok(relayed?.type === "session.stopTask" && relayed.taskId === "b1" && relayed.sessionId === "s1");
+  assert.match(logged() ?? "", /^dev server \[shell\] \(by /);
+  hub.onClientMessage(c, { type: "session.stopTask", requestId: "c", machine: machineId, sessionId: "s1" });
+  const all = d.sent.at(-1);
+  assert.ok(all?.type === "session.stopTask" && all.taskId === undefined);
+  assert.match(logged() ?? "", /^\[all\] \(by /);
+});
+
 test("git.graph.get is relayed to the working server and the graph goes back to the asking browser only", () => {
   const { hub, machineId, machineToken, browserId } = setup();
   const d = fakePeer<HubToDaemon>();

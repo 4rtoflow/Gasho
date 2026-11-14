@@ -69,6 +69,13 @@ const RENAME_TIMEOUT_MS = 45_000;
 const REMOVE_TIMEOUT_MS = 30_000;
 /** gasho-daemon stops a clone after 10 minutes, and gives it a few seconds to end. */
 const CLONE_TIMEOUT_MS = 630_000;
+/**
+ * Stopping work in the background goes through Claude Code's list of it, one task at a time, each step checked on the
+ * screen (a stop of Claude does that too while Claude only waits for its subagents).
+ */
+const STOP_TIMEOUT_MS = 60_000;
+/** Claude Code's ids of background work (a shell's "b…", a subagent's agentId). */
+const MAX_TASK_ID = 100;
 const MAX_PATH = 1024;
 const MAX_REPO = 300;
 const MAX_INPUT = 20_000;
@@ -253,6 +260,9 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
     case "session.interrupt":
     case "session.remove":
     case "session.resume":
+      return undefined;
+    case "session.stopTask":
+      if (cmd.taskId !== undefined && (typeof cmd.taskId !== "string" || !cmd.taskId || cmd.taskId.length > MAX_TASK_ID)) return "タスクの指定が正しくありません。";
       return undefined;
     case "session.history":
       if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
@@ -550,6 +560,7 @@ export class Hub {
       case "session.launch":
       case "session.input":
       case "session.interrupt":
+      case "session.stopTask":
       case "session.rename":
       case "session.fork":
       case "session.remove":
@@ -590,7 +601,8 @@ export class Hub {
     const timeout = {
       "session.launch": LAUNCH_TIMEOUT_MS,
       "session.input": INPUT_TIMEOUT_MS,
-      "session.interrupt": REQUEST_TIMEOUT_MS,
+      "session.interrupt": STOP_TIMEOUT_MS,
+      "session.stopTask": STOP_TIMEOUT_MS,
       "session.rename": RENAME_TIMEOUT_MS,
       "session.fork": FORK_TIMEOUT_MS,
       "session.remove": REMOVE_TIMEOUT_MS,
@@ -657,6 +669,12 @@ export class Hub {
         return answerSummary(cmd, this.request(machine, cmd.sessionId, cmd.permissionId));
       case "session.resume":
         return cmd.sessionId;
+      case "session.stopTask": {
+        // What was stopped, as the session showed it: it is gone once stopped.
+        if (cmd.taskId === undefined) return "[all]";
+        const task = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId)?.background?.find((x) => x.id === cmd.taskId);
+        return task ? `${task.title.slice(0, 300)} [${task.kind}]` : cmd.taskId;
+      }
       case "session.interrupt":
       case "session.history":
         return "";
