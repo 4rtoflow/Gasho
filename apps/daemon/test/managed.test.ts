@@ -64,42 +64,61 @@ test("zellij session names are safe and unique per launch", () => {
   assert.notEqual(zellijSessionName("x"), zellijSessionName("x"));
 });
 
-// A systemd-run that writes its arguments to $LOG and runs the command after "--", as `--scope` does; with $FAIL set,
-// it fails like one that finds no user manager. The zellij next to it only writes its arguments.
-const FAKE_SYSTEMD_RUN = `#!/bin/sh
-echo "systemd-run $*" >> "$LOG"
-[ -n "$FAIL" ] && exit 1
-while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
-[ $# -gt 0 ] && shift
-[ $# -gt 0 ] && exec "$@"
-exit 0
+// A systemd-run like systemd 254 and later: it writes its arguments to $LOG, then runs the command after "--" (as
+// `--scope` does), with each "$$" made a "$" unless it is given --expand-environment=no. With $OLD set, it is like an
+// older one: it knows no --expand-environment, and expands nothing. With $FAIL set, it fails like one that finds no
+// user manager. The zellij next to it only writes its arguments.
+const fakeSystemdRun = (): string => `#!${process.execPath}
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.LOG, "systemd-run " + args.join(" ") + "\\n");
+if (process.env.FAIL) process.exit(1);
+const asGiven = args.includes("--expand-environment=no");
+if (asGiven && process.env.OLD) process.exit(1);
+const command = args.slice(args.indexOf("--") + 1);
+const run = asGiven || process.env.OLD ? command : command.map((a) => a.replaceAll("$$", "$"));
+process.exit(spawnSync(run[0], run.slice(1), { stdio: "inherit" }).status ?? 1);
 `;
 
 test("sessions start in a systemd user scope of their own, so a restart of gasho-daemon's service leaves them running", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-scope-"));
   try {
     const log = path.join(dir, "log");
-    await fs.writeFile(path.join(dir, "systemd-run"), FAKE_SYSTEMD_RUN, { mode: 0o755 });
+    await fs.writeFile(path.join(dir, "systemd-run"), fakeSystemdRun(), { mode: 0o755 });
     await fs.writeFile(path.join(dir, "zellij"), `#!/bin/sh\necho "zellij $*" >> "$LOG"\n`, { mode: 0o755 });
-    const args = (s: string) => ["attach", "--create-background", s, "--", "/bin/sh", "-c", "true"];
+    // As launchArgs does, the shell records its PID with "$$", which must reach it as it is.
+    const args = (s: string) => ["attach", "--create-background", s, "--", "/bin/sh", "-c", "echo $$"];
+    const lines = async () => (await fs.readFile(log, "utf8")).trim().split("\n");
     const scoped = new Zellij({ PATH: dir, LOG: log });
     await scoped.start("gasho-x-1", args("gasho-x-1"));
     await scoped.start("gasho-x-2", args("gasho-x-2"));
-    assert.deepEqual((await fs.readFile(log, "utf8")).trim().split("\n"), [
-      // Whether user scopes can be started is checked once.
-      "systemd-run --user --scope --quiet --collect true",
-      "systemd-run --user --scope --quiet --collect --unit=gasho-x-1 -- zellij attach --create-background gasho-x-1 -- /bin/sh -c true",
-      "zellij attach --create-background gasho-x-1 -- /bin/sh -c true",
-      "systemd-run --user --scope --quiet --collect --unit=gasho-x-2 -- zellij attach --create-background gasho-x-2 -- /bin/sh -c true",
-      "zellij attach --create-background gasho-x-2 -- /bin/sh -c true",
+    assert.deepEqual(await lines(), [
+      // Checked once: user scopes can be started, and their command runs as it is given ("$$" stays "$$").
+      "systemd-run --user --scope --quiet --collect --expand-environment=no -- /bin/echo $$",
+      "systemd-run --user --scope --quiet --collect --expand-environment=no --unit=gasho-x-1 -- zellij attach --create-background gasho-x-1 -- /bin/sh -c echo $$",
+      "zellij attach --create-background gasho-x-1 -- /bin/sh -c echo $$",
+      "systemd-run --user --scope --quiet --collect --expand-environment=no --unit=gasho-x-2 -- zellij attach --create-background gasho-x-2 -- /bin/sh -c echo $$",
+      "zellij attach --create-background gasho-x-2 -- /bin/sh -c echo $$",
+    ]);
+
+    // An older systemd (before 254) knows no --expand-environment, and expands nothing: the scope starts without it.
+    await fs.rm(log);
+    await new Zellij({ PATH: dir, LOG: log, OLD: "1" }).start("gasho-x-3", args("gasho-x-3"));
+    assert.deepEqual(await lines(), [
+      "systemd-run --user --scope --quiet --collect --expand-environment=no -- /bin/echo $$",
+      "systemd-run --user --scope --quiet --collect -- /bin/echo $$",
+      "systemd-run --user --scope --quiet --collect --unit=gasho-x-3 -- zellij attach --create-background gasho-x-3 -- /bin/sh -c echo $$",
+      "zellij attach --create-background gasho-x-3 -- /bin/sh -c echo $$",
     ]);
 
     // Without systemd for the user (macOS, no user manager), zellij runs as it is.
     await fs.rm(log);
-    await new Zellij({ PATH: dir, LOG: log, FAIL: "1" }).start("gasho-x-3", args("gasho-x-3"));
-    assert.deepEqual((await fs.readFile(log, "utf8")).trim().split("\n"), [
-      "systemd-run --user --scope --quiet --collect true",
-      "zellij attach --create-background gasho-x-3 -- /bin/sh -c true",
+    await new Zellij({ PATH: dir, LOG: log, FAIL: "1" }).start("gasho-x-4", args("gasho-x-4"));
+    assert.deepEqual(await lines(), [
+      "systemd-run --user --scope --quiet --collect --expand-environment=no -- /bin/echo $$",
+      "systemd-run --user --scope --quiet --collect -- /bin/echo $$",
+      "zellij attach --create-background gasho-x-4 -- /bin/sh -c echo $$",
     ]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

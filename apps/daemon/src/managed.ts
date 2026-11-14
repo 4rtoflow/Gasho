@@ -608,10 +608,18 @@ export function launchArgs(o: {
  * `systemd-run` arguments that run a command in a systemd user scope of its own (`<unit>.scope`). Every process that a
  * service starts belongs to the service's unit, and stopping the unit stops them all (systemd's default KillMode): a
  * session that gasho-daemon's service started would end with each restart of gasho-daemon. In a scope, it goes on.
+ * `extra`: what this machine's systemd-run needs to run the command as it is given (see NO_EXPANSION).
  */
-export function scopeArgs(unit: string): string[] {
-  return ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, "--"];
+export function scopeArgs(unit: string, extra: readonly string[] = []): string[] {
+  return ["--user", "--scope", "--quiet", "--collect", ...extra, `--unit=${unit}`, "--"];
 }
+
+/**
+ * systemd 254 and later expand "$VAR" in the command that systemd-run runs, also with --scope, and make "$$" a "$":
+ * the launch's `echo $$` (launchArgs) would then record "$" instead of its PID, and no launch would find its session.
+ * `--expand-environment=no` runs the command as it is given. Older versions lack the switch, and expand nothing there.
+ */
+export const NO_EXPANSION: readonly string[] = ["--expand-environment=no"];
 
 export function isAlive(pid: number): boolean {
   try {
@@ -625,8 +633,8 @@ export function isAlive(pid: number): boolean {
 /** Thin wrapper over the zellij CLI. Every call names the session explicitly. */
 export class Zellij {
   private env: Record<string, string>;
-  /** Whether systemd-run can start user scopes on this machine (checked once; see start). */
-  private scopes: Promise<boolean> | undefined;
+  /** What systemd-run needs to start user scopes here, or undefined when it cannot (checked once; see scopeFlags). */
+  private scopes: Promise<readonly string[] | undefined> | undefined;
 
   constructor(env: Record<string, string>) {
     this.env = env;
@@ -643,21 +651,34 @@ export class Zellij {
    * outlive a restart of it. Elsewhere (macOS, no user manager), zellij is run as it is.
    */
   async start(session: string, args: string[]): Promise<void> {
-    if (!(await this.canScope())) {
+    const extra = await this.scopeFlags();
+    if (!extra) {
       await this.run(args);
       return;
     }
-    await execFileP("systemd-run", [...scopeArgs(session), "zellij", ...args], { env: this.env, timeout: 15_000 });
+    await execFileP("systemd-run", [...scopeArgs(session, extra), "zellij", ...args], { env: this.env, timeout: 15_000 });
   }
 
-  private canScope(): Promise<boolean> {
-    this.scopes ??= execFileP("systemd-run", ["--user", "--scope", "--quiet", "--collect", "true"], {
-      env: this.env,
-      timeout: 15_000,
-    }).then(
-      () => true,
-      () => false,
-    );
+  /**
+   * How systemd-run starts a user scope that runs its command as it is given, "$$" included (see NO_EXPANSION): each
+   * way is tried on a command that prints "$$", with --expand-environment=no first, then without it (systemd older
+   * than 254). Undefined when neither prints it unchanged, or when there is no user manager (macOS): sessions then
+   * start without a scope of their own.
+   */
+  private scopeFlags(): Promise<readonly string[] | undefined> {
+    this.scopes ??= (async () => {
+      for (const extra of [NO_EXPANSION, []]) {
+        const printed = await execFileP("systemd-run", ["--user", "--scope", "--quiet", "--collect", ...extra, "--", "/bin/echo", "$$"], {
+          env: this.env,
+          timeout: 15_000,
+        }).then(
+          (r) => r.stdout.trim(),
+          () => undefined,
+        );
+        if (printed === "$$") return extra;
+      }
+      return undefined;
+    })();
     return this.scopes;
   }
 
