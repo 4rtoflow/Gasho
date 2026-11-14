@@ -306,92 +306,6 @@ export interface GitGraph {
   github?: GitHubRepo;
 }
 
-/** Which list of a GitHub repository: its issues or its pull requests. */
-export type GitHubListKind = "issues" | "pulls";
-
-/** An open issue or pull request of the GitHub repository a session works in. */
-export interface GitHubItem {
-  number: number;
-  title: string;
-  url: string;
-  author?: string;
-  /** ISO 8601 */
-  createdAt: string;
-  updatedAt: string;
-  labels: { name: string; color?: string }[];
-  /** Pull requests: a draft, its branch and the branch it goes into, and the review's state. */
-  draft?: boolean;
-  head?: string;
-  base?: string;
-  review?: "approved" | "changes_requested" | "review_required";
-}
-
-/** The open issues or pull requests of a repository, newest first, as gasho-daemon read them with `gh`. */
-export interface GitHubList {
-  repo: GitHubRepo;
-  kind: GitHubListKind;
-  items: GitHubItem[];
-  /** More are open than were sent. */
-  truncated: boolean;
-}
-
-/** A comment on an issue or pull request. Bodies are GitHub Markdown. */
-export interface GitHubComment {
-  author?: string;
-  /** ISO 8601 */
-  createdAt: string;
-  body: string;
-  url?: string;
-  /** Hidden on GitHub (spam, off-topic, …); its body is not sent. */
-  minimized?: boolean;
-}
-
-/** A review of a pull request. */
-export interface GitHubReview {
-  author?: string;
-  /** ISO 8601 */
-  submittedAt: string;
-  state: "approved" | "changes_requested" | "commented" | "dismissed" | "pending";
-  body: string;
-}
-
-/** A check or status of a pull request's latest commit (CI). */
-export interface GitHubCheck {
-  name: string;
-  state: "success" | "failure" | "pending" | "skipped" | "neutral" | "cancelled";
-  url?: string;
-}
-
-/** A file a pull request changes. */
-export interface GitHubFile {
-  path: string;
-  additions: number;
-  deletions: number;
-}
-
-/** One issue or pull request with its text and conversation, as gasho-daemon read it with `gh`. */
-export interface GitHubItemDetail extends GitHubItem {
-  kind: GitHubListKind;
-  state: "open" | "closed" | "merged";
-  /** Issues closed: whether as done or as not planned. */
-  stateReason?: "completed" | "not_planned";
-  closedAt?: string;
-  mergedAt?: string;
-  assignees: string[];
-  body: string;
-  /** Oldest first; when there are many, the latest ones (`commentsLeftOut` says how many older ones were left out). */
-  comments: GitHubComment[];
-  commentsLeftOut?: number;
-  /** Pull requests only. */
-  reviews?: GitHubReview[];
-  additions?: number;
-  deletions?: number;
-  changedFiles?: number;
-  files?: GitHubFile[];
-  commits?: number;
-  checks?: GitHubCheck[];
-}
-
 /**
  * Something in a folder inside a session's folder. A symbolic link is what it points to (`link`), and is not opened
  * when it points outside the session's folder (`outside`). "other": anything else, such as a socket or a broken link.
@@ -453,6 +367,106 @@ export interface TranscriptPage {
   error?: string;
 }
 
+// ---- plugins (docs/plugins.md) ----
+
+/** What a plugin's web part may do besides reading and showing: send messages to sessions. */
+export type PluginPermission = "session.input";
+
+/** A method of a plugin's daemon part, which its web part can call. */
+export interface PluginMethodSpec {
+  /** read: only reads. write: changes something; the operations log records the call. */
+  kind: "read" | "write";
+  /** How long to wait for it, in seconds (15 by default, at most 120). */
+  timeoutSeconds?: number;
+}
+
+/** A setting of a plugin, shown on the settings screen. */
+export type PluginSettingSpec = {
+  label: string;
+  description?: string;
+  /** browser: this browser only (its localStorage). server: the same for every browser, kept by the Gasho server. */
+  scope: "browser" | "server";
+} & (
+  | { type: "boolean"; default?: boolean }
+  | { type: "number"; default?: number; min?: number; max?: number; step?: number }
+  | { type: "string"; default?: string; maxLength?: number }
+  | { type: "select"; default?: string; options: { value: string; label: string }[] }
+);
+
+/** A plugin's gasho-plugin.json. */
+export interface PluginManifest {
+  /** 2-32 of a-z, 0-9 and "-", starting with a letter; also the name of its folder. */
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  /** The version of the plugin API it is written for ("1.0"). */
+  api: string;
+  /** Its files, relative to its folder. */
+  web?: { js: string; css?: string };
+  daemon?: { js: string };
+  methods?: Record<string, PluginMethodSpec>;
+  permissions?: PluginPermission[];
+  settings?: Record<string, PluginSettingSpec>;
+}
+
+/** Where a plugin's daemon part runs: on every working server, or on those listed (machine ids). */
+export type PluginMachines = "all" | string[];
+
+/**
+ * A plugin's daemon part on one working server. running: it runs. stopped: it is not running (yet, or any more).
+ * off: the plugin is disabled, not chosen for this working server, or its gasho-daemon runs no plugins (GASHO_PLUGINS).
+ * old: its gasho-daemon is too old for plugins. failed: it failed (`error` says why). offline: the working server is not
+ * connected.
+ */
+export type PluginDaemonState = "running" | "stopped" | "off" | "old" | "failed" | "offline";
+
+/** A plugin installed on the Gasho server, as browsers see it. */
+export interface PluginInfo {
+  id: string;
+  manifest: PluginManifest;
+  /** Linked from a folder being developed (hub:plugin add --link). */
+  dev: boolean;
+  enabled: boolean;
+  machines: PluginMachines;
+  /** The version in use: the hash of its files. Absent while no version of it can be used. */
+  hash?: string;
+  /** Where its web part is served (for that version). */
+  web?: { js: string; css?: string };
+  /** The values of its settings that the Gasho server keeps (scope "server"), defaults included. */
+  values: Record<string, unknown>;
+  /** Why the plugin, or its newest files, cannot be used. */
+  error?: string;
+  /** Plugins with a daemon part: its state on each working server, by machine id. */
+  daemon?: Record<string, { state: PluginDaemonState; error?: string }>;
+}
+
+/** Managing the installed plugins from a browser (answered with plugin.result). */
+export type PluginCommand =
+  | { type: "plugin.enable"; plugin: string; enabled: boolean }
+  | { type: "plugin.machines"; plugin: string; machines: PluginMachines }
+  | { type: "plugin.setting"; plugin: string; key: string; value: unknown };
+
+/** A plugin whose daemon part gasho-daemon may have to run, as the Gasho server tells it. */
+export interface DaemonPluginEntry {
+  id: string;
+  /** The version of daemon.js to run (its hash); gasho-daemon asks for the code it does not have (plugin.code.get). */
+  hash: string;
+  /** Whether to run it on this working server (enabled, and chosen for it). */
+  run: boolean;
+  /** The values of its settings with scope "server". */
+  settings: Record<string, unknown>;
+}
+
+/** A plugin's daemon part, as gasho-daemon tells the Gasho server. */
+export interface DaemonPluginStatus {
+  id: string;
+  /** The version that runs. */
+  hash?: string;
+  state: "running" | "stopped" | "off" | "failed";
+  error?: string;
+}
+
 // gasho-daemon -> gasho-hub
 export type DaemonToHub =
   | { type: "hello"; machineId: string; token: string; daemonVersion: string }
@@ -470,38 +484,28 @@ export type DaemonToHub =
     }
   | { type: "command.result"; requestId: string; result: CommandResult }
   | { type: "git.graph"; requestId: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
-  | {
-      type: "github.list";
-      requestId: string;
-      sessionId: string;
-      repo?: string;
-      kind: GitHubListKind;
-      list?: GitHubList;
-      error?: string;
-    }
-  | {
-      type: "github.item";
-      requestId: string;
-      sessionId: string;
-      repo?: string;
-      kind: GitHubListKind;
-      number: number;
-      item?: GitHubItemDetail;
-      error?: string;
-    }
   | { type: "dir"; requestId: string; sessionId: string; path: string; dir?: DirListing; error?: string }
-  | { type: "file"; requestId: string; sessionId: string; path: string; file?: FileContent; error?: string };
+  | { type: "file"; requestId: string; sessionId: string; path: string; file?: FileContent; error?: string }
+  /** The plugin API this gasho-daemon runs plugins for ("1.0"), and its plugins' daemon parts. Sent when they change. */
+  | { type: "plugin.status"; api: string; plugins: DaemonPluginStatus[] }
+  /** The code of a plugin's daemon part that gasho-daemon does not have yet. */
+  | { type: "plugin.code.get"; plugin: string; hash: string }
+  | { type: "plugin.response"; requestId: string; result?: unknown; error?: string };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
   | { type: "welcome" }
   | { type: "transcript.get"; requestId: string; sessionId: string; before?: number; limit: number }
   | { type: "git.graph.get"; requestId: string; sessionId: string; repo?: string }
-  | { type: "github.list.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind }
-  | { type: "github.item.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
   | { type: "dir.get"; requestId: string; sessionId: string; path: string }
   | { type: "file.get"; requestId: string; sessionId: string; path: string }
-  | ({ requestId: string } & SessionCommand);
+  | ({ requestId: string } & SessionCommand)
+  /** The plugins with a daemon part: sent once connected, and whenever they change. */
+  | { type: "plugins"; plugins: DaemonPluginEntry[] }
+  /** The code of a plugin's daemon part (daemon.js), as asked for; `error` when that version is gone. */
+  | { type: "plugin.code"; plugin: string; hash: string; code?: string; error?: string }
+  /** A call of a method of a plugin's daemon part, from a browser. `sessionId`: the session it is about, if any. */
+  | { type: "plugin.request"; requestId: string; plugin: string; sessionId?: string; method: string; params?: unknown; timeoutMs: number };
 
 // gasho-hub -> browser
 export type HubToClient =
@@ -510,6 +514,8 @@ export type HubToClient =
       machines: MachineInfo[];
       notifications: GashoNotification[];
       events: MachineHookEvent[];
+      /** The installed plugins (absent from a Gasho server without plugins). */
+      plugins?: PluginInfo[];
     }
   | { type: "machine"; machine: MachineInfo }
   | { type: "machine.removed"; id: string }
@@ -520,37 +526,18 @@ export type HubToClient =
   | { type: "event"; event: MachineHookEvent }
   | { type: "command.result"; requestId: string; machine: string; result: CommandResult }
   | { type: "git.graph"; machine: string; sessionId: string; repo?: string; graph?: GitGraph; error?: string }
-  | {
-      type: "github.list";
-      machine: string;
-      sessionId: string;
-      repo?: string;
-      kind: GitHubListKind;
-      list?: GitHubList;
-      error?: string;
-    }
-  | {
-      type: "github.item";
-      machine: string;
-      sessionId: string;
-      repo?: string;
-      kind: GitHubListKind;
-      number: number;
-      item?: GitHubItemDetail;
-      error?: string;
-    }
   | { type: "dir"; machine: string; sessionId: string; path: string; dir?: DirListing; error?: string }
-  | { type: "file"; machine: string; sessionId: string; path: string; file?: FileContent; error?: string };
+  | { type: "file"; machine: string; sessionId: string; path: string; file?: FileContent; error?: string }
+  /** The installed plugins, whenever one of them changes (files, state, settings, its daemon parts). */
+  | { type: "plugins"; plugins: PluginInfo[] }
+  | { type: "plugin.response"; requestId: string; result?: unknown; error?: string }
+  | { type: "plugin.result"; requestId: string; result: CommandResult };
 
 // browser -> gasho-hub
 export type ClientToHub =
   | { type: "transcript.get"; machine: string; sessionId: string; before?: number; limit: number }
   /** `repo`: one of the session's `repos` (its path); omitted for the repository of the session's folder. */
   | { type: "git.graph.get"; machine: string; sessionId: string; repo?: string }
-  /** The open issues or pull requests of the session's GitHub repository (or of `repo` inside its folder). */
-  | { type: "github.list.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind }
-  /** One issue or pull request of that repository, with its text and conversation. */
-  | { type: "github.item.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
   /**
    * The entries of a folder inside the session's folder (gasho-daemon 0.11.0 and later). `path`: from the session's
    * folder, "/"-separated, without "." or ".." ("" for the folder itself, "src/lib").
@@ -559,7 +546,22 @@ export type ClientToHub =
   /** A file inside the session's folder ("src/app.ts"): its text, or what kind of file it is. */
   | { type: "file.get"; machine: string; sessionId: string; path: string }
   | { type: "notification.read"; ids: string[] }
-  | ({ requestId: string; machine: string } & SessionCommand);
+  | ({ requestId: string; machine: string } & SessionCommand)
+  /**
+   * Calls a method of a plugin's daemon part on a working server (answered with plugin.response). `summary`: what the
+   * operations log records for a `write` method.
+   */
+  | {
+      type: "plugin.request";
+      requestId: string;
+      plugin: string;
+      machine: string;
+      sessionId?: string;
+      method: string;
+      params?: unknown;
+      summary?: string;
+    }
+  | ({ requestId: string } & PluginCommand);
 
 /** Models a session started from Gasho can switch to, as Claude Code's /model picker lists them. */
 export type SessionModel = "default" | "opus" | "fable" | "sonnet" | "haiku";
@@ -615,6 +617,8 @@ export type SessionCommand =
       effort?: EffortLevel;
       ultracode?: boolean;
       files?: InputFile[];
+      /** Sent by a plugin (its id), for the operations log. */
+      via?: string;
     }
   | { type: "session.interrupt"; sessionId: string }
   /**

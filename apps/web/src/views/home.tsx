@@ -1,18 +1,17 @@
 // The home screen: a dashboard of tiles of several sizes (a bento grid). On a computer, four columns: the states of
 // the sessions and the instructions sent lately as number tiles, the sessions as the largest tile, the notifications,
-// the tokens used, then the latest operations, the open issues and pull requests, and the working servers. On a
+// the tokens used, then the latest operations and the working servers, with the plugins' tiles among them. On a
 // phone, the number tiles two by two and the rest one under the other. Only sessions started from Gasho are shown.
 import {
   CircleDot,
   Cpu,
-  FolderGit2,
   GitFork,
-  GitPullRequest,
   Hand,
   Layers,
   Moon,
   Pencil,
   Plus,
+  Puzzle,
   Rocket,
   Send,
   Server,
@@ -21,11 +20,9 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type {
   GashoNotification,
-  GitHubListKind,
-  GitHubRepo,
   MachineHookEvent,
   MachineInfo,
   SessionInfo,
@@ -38,10 +35,11 @@ import { NotificationStack, type NotificationItem } from "@/components/ui/notifi
 import { CHART_BLUE, StatCard, TILE, TILE_SHADOW } from "@/components/ui/stat-card";
 import { branchLabel, formatCost, relativeTime, repoLabel, sessionLabel, waitingLabel } from "@/lib/format";
 import { go } from "@/lib/route";
-import { daemonAtLeast, notificationShown, shownSessions } from "@/lib/sessions";
-import { githubKey, loadGitHubList, markRead, useAppState } from "@/lib/store";
+import { notificationShown, shownSessions } from "@/lib/sessions";
+import { markRead, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
+import { usePluginTiles, type PluginTile } from "@/plugins/parts";
 import { LaunchPanel } from "@/views/launch";
 
 interface Row {
@@ -65,8 +63,30 @@ const SNAPSHOT_EVENTS = 200;
 const SESSIONS_SHOWN = 9;
 /** Operations shown in their tile. */
 const OPERATIONS_SHOWN = 6;
-/** The open issues and pull requests on the home screen are read again when older than this. */
-const GITHUB_STALE_MS = 5 * 60_000;
+
+/** Gasho's own tiles in their order, by the ids that plugins' tiles name in `after` (docs/plugins.md, P6). */
+const TILE_IDS = ["busy", "waiting", "idle", "sent", "sessions", "notifications", "tokens", "tokenBreakdown", "operations", "machines"];
+const isTile = (id: string): boolean => TILE_IDS.includes(id);
+
+/**
+ * The order with the plugins' tiles: each after the tile it names in `after` (after the plugin tiles already put
+ * there), or at the end.
+ */
+function withPluginTiles(ids: readonly string[], tiles: readonly PluginTile[]): string[] {
+  const out = [...ids];
+  const placed = new Map<string, number>();
+  for (const t of tiles) {
+    const at = t.after ? out.indexOf(t.after) : -1;
+    if (at < 0) {
+      out.push(t.id);
+      continue;
+    }
+    const n = placed.get(t.after ?? "") ?? 0;
+    out.splice(at + 1 + n, 0, t.id);
+    placed.set(t.after ?? "", n + 1);
+  }
+  return out;
+}
 
 function openSession(machine: string, sessionId: string): void {
   go({ name: "session", machine, sessionId });
@@ -99,6 +119,25 @@ export function HomeView() {
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines));
   const sent = useMemo(() => sentTrend(events, now), [events, now]);
   const tokens = useMemo(() => tokenTrend(rows, now), [rows, now]);
+  // The plugins' tiles, each after the tile it names (see withPluginTiles).
+  const pluginTiles = usePluginTiles();
+  const order = withPluginTiles(TILE_IDS, pluginTiles);
+  const pluginById = new Map(pluginTiles.map((t) => [t.id, t]));
+  /** The plugins' tiles between Gasho's tile `id` and the next of Gasho's own. */
+  const after = (id: string) => {
+    const out: ReactNode[] = [];
+    for (let i = order.indexOf(id) + 1; i < order.length && !isTile(order[i] ?? ""); i++) {
+      const t = pluginById.get(order[i] ?? "");
+      if (t) {
+        out.push(
+          <div key={t.id} className={t.className}>
+            {t.content}
+          </div>,
+        );
+      }
+    }
+    return out;
+  };
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-4 p-4 md:p-6">
@@ -132,6 +171,7 @@ export function HomeView() {
           period={names("busy")}
           meter={{ total: online.length, color: "#10b981" }}
         />
+        {after("busy")}
         <StatCard
           label="確認待ち"
           icon={<Hand className="size-3.5" />}
@@ -140,6 +180,7 @@ export function HomeView() {
           valueClassName={count("waiting") > 0 ? "text-amber-400 dark:text-amber-400" : undefined}
           meter={{ total: online.length, color: "#f59e0b" }}
         />
+        {after("waiting")}
         <StatCard
           label="待機中"
           icon={<Moon className="size-3.5" />}
@@ -147,6 +188,7 @@ export function HomeView() {
           period={names("idle")}
           meter={{ total: online.length, color: "#737373" }}
         />
+        {after("idle")}
         <StatCard
           label="送った指示"
           icon={<Send className="size-3.5" />}
@@ -158,10 +200,12 @@ export function HomeView() {
           period="過去24時間"
           color={CHART_BLUE}
         />
+        {after("sent")}
 
         <Tile title="セッション" icon={<Layers className="size-4" />} className="col-span-2 lg:col-span-3">
           <Sessions rows={rows} now={now} onLaunch={() => setLaunching(true)} />
         </Tile>
+        {after("sessions")}
 
         <Tile className="col-span-2 lg:col-span-1 lg:row-span-2">
           <NotificationStack
@@ -181,6 +225,7 @@ export function HomeView() {
             }}
           />
         </Tile>
+        {after("notifications")}
 
         <StatCard
           label="トークン"
@@ -195,19 +240,20 @@ export function HomeView() {
           color={CHART_BLUE}
           className="col-span-2 lg:col-span-1"
         />
+        {after("tokens")}
         <Tile title="トークンの内訳（過去24時間）" icon={<Cpu className="size-4" />} className="col-span-2">
           <TokenBreakdown tokens={tokens} />
         </Tile>
+        {after("tokenBreakdown")}
 
         <Tile title="最近の操作" icon={<CircleDot className="size-4" />} className="col-span-2">
           <Operations events={events} machines={machines} now={now} />
         </Tile>
-        <Tile title="GitHub" icon={<FolderGit2 className="size-4" />} className="col-span-2 lg:col-span-1">
-          <GitHubCounts rows={rows} />
-        </Tile>
+        {after("operations")}
         <Tile title="working server" icon={<Server className="size-4" />} className="col-span-2 lg:col-span-1">
           <Machines machines={machines} now={now} />
         </Tile>
+        {after("machines")}
       </div>
     </div>
   );
@@ -457,6 +503,10 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:session.rename": Pencil,
   "Gasho:session.fork": GitFork,
   "Gasho:session.remove": Trash2,
+  "Gasho:plugin.call": Puzzle,
+  "Gasho:plugin.enable": Puzzle,
+  "Gasho:plugin.machines": Puzzle,
+  "Gasho:plugin.setting": Puzzle,
 };
 
 /**
@@ -476,8 +526,13 @@ function Operations({ events, machines, now }: { events: MachineHookEvent[]; mac
         const s = m?.sessions.find((x) => x.sessionId === e.sessionId);
         const Icon = OPERATION_ICONS[e.event] ?? Send;
         const what = operationText(e);
-        // A launch's session is not known yet, and a removed one is gone: these show the working server instead.
-        const where = s ? sessionLabel(s) : e.event === "Gasho:session.launch" || e.event === "Gasho:session.remove" ? (m?.name ?? "") : "終了したセッション";
+        // A launch's session is not known yet, a removed one is gone, and a plugin's record may have none: these show
+        // the working server instead (or "プラグイン").
+        const where = s
+          ? sessionLabel(s)
+          : !e.sessionId || e.event === "Gasho:session.launch" || e.event === "Gasho:session.remove"
+            ? (m?.name ?? (e.event.startsWith("Gasho:plugin.") ? "プラグイン" : ""))
+            : "終了したセッション";
         const body = (
           <>
             <Icon className="mt-0.5 size-3.5 shrink-0 text-neutral-500" />
@@ -512,13 +567,21 @@ function Operations({ events, machines, now }: { events: MachineHookEvent[]; mac
 /** One record in words: the instruction's text, or what was done. The device that asked is left out. */
 function operationText(e: MachineHookEvent): string {
   const summary = (e.summary ?? "").replace(/\s*\(by [^)]*\)\s*$/, "");
+  // The plugins (docs/plugins.md): "Name [on]", "Name：where", "Name：label = value", "Name：what was done".
+  if (e.event === "Gasho:plugin.enable") {
+    const on = summary.endsWith("[on]");
+    return `プラグインを${on ? "有効" : "無効"}にした：${summary.replace(/\s*\[(on|off)\]$/, "")}`;
+  }
+  if (e.event === "Gasho:plugin.machines") return `プラグインを動かす working server を変更：${summary}`;
+  if (e.event === "Gasho:plugin.setting") return `プラグインの設定を変更：${summary.replace(/ = .*$/, "")}`;
+  if (e.event === "Gasho:plugin.call") return summary;
   if (e.event === "Gasho:session.launch") return `起動：${summary.split("/").filter(Boolean).pop() ?? summary}`;
   if (e.event === "Gasho:session.interrupt") return "作業を止めた";
   // The new name, the fork's name, the removed session's name.
   if (e.event === "Gasho:session.rename") return summary ? `名前を変更：${summary}` : "名前を変えた";
   if (e.event === "Gasho:session.fork") return summary ? `フォーク：${summary}` : "フォークした";
   if (e.event === "Gasho:session.remove") return summary ? `削除：${summary}` : "セッションを削除した";
-  const text = summary.replace(/\s*\[(model|effort|ultracode|file): [^\]]*\]/g, "").trim();
+  const text = summary.replace(/\s*\[(model|effort|ultracode|file|via): [^\]]*\]/g, "").trim();
   const files = (summary.match(/\[file: /g) ?? []).length;
   return text || (files > 0 ? `ファイルを ${files} 件送った` : "指示を送った");
 }
@@ -540,84 +603,6 @@ function Machines({ machines, now }: { machines: MachineInfo[]; now: number }) {
           </div>
         </li>
       ))}
-    </ul>
-  );
-}
-
-/** A repository on GitHub that a shown session works in, with the session (and folder) whose panels show it. */
-interface RepoRef {
-  github: GitHubRepo;
-  machine: string;
-  sessionId: string;
-  repo?: string;
-}
-
-/**
- * The open issues and pull requests of each repository the sessions work in, read with gh on the working server
- * (gasho-daemon 0.7 and later). Each count opens the session's panel with the list.
- */
-function GitHubCounts({ rows }: { rows: Row[] }) {
-  const { githubLists } = useAppState();
-  const repos = useMemo(() => {
-    const seen = new Map<string, RepoRef>();
-    for (const { machine, s } of rows) {
-      if (!machine.connected || !daemonAtLeast(machine, 0, 7)) continue;
-      const here: { github: GitHubRepo; repo?: string }[] = s.repos?.length
-        ? s.repos.flatMap((r) => (r.github ? [{ github: r.github, repo: r.path }] : []))
-        : s.github
-          ? [{ github: s.github }]
-          : [];
-      for (const h of here) {
-        const key = `${h.github.owner}/${h.github.name}`.toLowerCase();
-        if (!seen.has(key)) seen.set(key, { ...h, machine: machine.id, sessionId: s.sessionId });
-      }
-    }
-    return [...seen.values()];
-  }, [rows]);
-
-  // Read each list once, and again when it is old. A list that failed is not asked again on its own.
-  useEffect(() => {
-    for (const r of repos) {
-      for (const kind of ["issues", "pulls"] as const) {
-        const g = githubLists[githubKey(r.machine, r.sessionId, kind, r.repo)];
-        if (!g || (!g.loading && g.at !== undefined && Date.now() - g.at > GITHUB_STALE_MS)) loadGitHubList(r.machine, r.sessionId, kind, r.repo);
-      }
-    }
-  }, [repos, githubLists]);
-
-  if (repos.length === 0) return <p className="text-sm text-muted-foreground">GitHub のリポジトリで作業しているセッションはありません。</p>;
-  return (
-    <ul className="space-y-3">
-      {repos.map((r) => {
-        const list = (kind: GitHubListKind) => githubLists[githubKey(r.machine, r.sessionId, kind, r.repo)];
-        const error = list("issues")?.error ?? list("pulls")?.error;
-        return (
-          <li key={`${r.github.owner}/${r.github.name}`} className="min-w-0">
-            <p className="truncate text-sm font-medium text-foreground" title={`${r.github.owner}/${r.github.name}`}>
-              {r.github.owner}/{r.github.name}
-            </p>
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              {(["issues", "pulls"] as const).map((kind) => {
-                const g = list(kind);
-                const n = g?.list ? `${g.list.items.length}${g.list.truncated ? "+" : ""}` : g?.loading ? "…" : "-";
-                return (
-                  <button
-                    key={kind}
-                    type="button"
-                    onClick={() => go({ name: "session", machine: r.machine, sessionId: r.sessionId, panel: { kind, ...(r.repo ? { repo: r.repo } : {}) } })}
-                    className="inline-flex items-center gap-1 hover:text-foreground"
-                  >
-                    {kind === "issues" ? <CircleDot className="size-3.5" /> : <GitPullRequest className="size-3.5" />}
-                    {kind === "issues" ? "Issues" : "Pull requests"}
-                    <span className="tabular-nums text-foreground">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-            {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
-          </li>
-        );
-      })}
     </ul>
   );
 }

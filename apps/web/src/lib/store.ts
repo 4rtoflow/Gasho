@@ -6,12 +6,11 @@ import type {
   DeviceInfo,
   GashoNotification,
   GitGraph,
-  GitHubItemDetail,
-  GitHubList,
-  GitHubListKind,
   HubToClient,
   MachineHookEvent,
   MachineInfo,
+  PluginCommand,
+  PluginInfo,
   SessionCommand,
   TranscriptEntry,
 } from "@gasho/protocol";
@@ -38,23 +37,6 @@ export interface GraphState {
   at?: number;
 }
 
-/** The open issues or pull requests of a session's GitHub repository. */
-export interface GitHubListState {
-  loading: boolean;
-  list?: GitHubList;
-  error?: string;
-  /** When the list was read. */
-  at?: number;
-}
-
-/** One issue or pull request with its conversation. */
-export interface GitHubItemState {
-  loading: boolean;
-  item?: GitHubItemDetail;
-  error?: string;
-  at?: number;
-}
-
 export type AuthState = "checking" | "registered" | "unregistered" | "unreachable";
 
 export interface State {
@@ -67,10 +49,8 @@ export interface State {
   transcripts: Record<string, TranscriptState>;
   /** Keyed by graphKey(machine, sessionId, repo). */
   graphs: Record<string, GraphState>;
-  /** Keyed by githubKey(machine, sessionId, kind, repo). */
-  githubLists: Record<string, GitHubListState>;
-  /** Keyed by githubItemKey(machine, sessionId, kind, number, repo). */
-  githubItems: Record<string, GitHubItemState>;
+  /** The plugins installed on the Gasho server (docs/plugins.md). */
+  plugins: PluginInfo[];
 }
 
 const PAGE_SIZE = 80;
@@ -80,13 +60,8 @@ const MAX_NOTIFICATIONS = 200;
 export const transcriptKey = (machine: string, sessionId: string): string => `${machine}\u0000${sessionId}`;
 /** A branch graph per session and, in a folder of several repositories, per repository. */
 export const graphKey = (machine: string, sessionId: string, repo?: string): string => `${machine}\u0000${sessionId}\u0000${repo ?? ""}`;
-/** A GitHub list per session, kind and, in a folder of several repositories, per repository. */
-export const githubKey = (machine: string, sessionId: string, kind: GitHubListKind, repo?: string): string =>
-  `${machine}\u0000${sessionId}\u0000${kind}\u0000${repo ?? ""}`;
-export const githubItemKey = (machine: string, sessionId: string, kind: GitHubListKind, number: number, repo?: string): string =>
-  `${machine}\u0000${sessionId}\u0000${kind}\u0000${number}\u0000${repo ?? ""}`;
 
-const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {}, githubLists: {}, githubItems: {} };
+const EMPTY: Omit<State, "auth"> = { connected: false, machines: [], notifications: [], events: [], transcripts: {}, graphs: {}, plugins: [] };
 let state: State = { auth: "checking", ...EMPTY };
 const listeners = new Set<() => void>();
 
@@ -101,14 +76,6 @@ function setTranscript(key: string, t: TranscriptState): void {
 
 function setGraph(key: string, g: GraphState): void {
   update({ graphs: { ...state.graphs, [key]: g } });
-}
-
-function setGitHubList(key: string, g: GitHubListState): void {
-  update({ githubLists: { ...state.githubLists, [key]: g } });
-}
-
-function setGitHubItem(key: string, g: GitHubItemState): void {
-  update({ githubItems: { ...state.githubItems, [key]: g } });
 }
 
 let socket: WebSocket | undefined;
@@ -147,6 +114,7 @@ function connect(): void {
   ws.onopen = () => {
     backoff = 1000;
     update({ connected: true });
+    for (const l of connectedListeners) l();
     // Reload the transcripts that are on screen; appends may have been missed while offline.
     for (const key of Object.keys(state.transcripts)) {
       const [machine, sessionId] = key.split("\u0000");
@@ -156,18 +124,6 @@ function connect(): void {
     for (const [key, g] of Object.entries(state.graphs)) {
       const [machine, sessionId, repo] = key.split("\u0000");
       if (g.loading && machine && sessionId) send({ type: "git.graph.get", machine, sessionId, repo: repo || undefined });
-    }
-    for (const [key, g] of Object.entries(state.githubLists)) {
-      const [machine, sessionId, kind, repo] = key.split("\u0000");
-      if (g.loading && machine && sessionId && (kind === "issues" || kind === "pulls")) {
-        send({ type: "github.list.get", machine, sessionId, kind, repo: repo || undefined });
-      }
-    }
-    for (const [key, g] of Object.entries(state.githubItems)) {
-      const [machine, sessionId, kind, number, repo] = key.split("\u0000");
-      if (g.loading && machine && sessionId && (kind === "issues" || kind === "pulls")) {
-        send({ type: "github.item.get", machine, sessionId, kind, number: Number(number), repo: repo || undefined });
-      }
     }
   };
   ws.onmessage = (ev) => {
@@ -188,6 +144,50 @@ function connect(): void {
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 15_000);
   };
+}
+
+/** Listeners of every message from the Gasho server (the plugins' calls listen to theirs), and of each connection. */
+const messageListeners = new Set<(m: HubToClient) => void>();
+const connectedListeners = new Set<() => void>();
+
+export function onHubMessage(l: (m: HubToClient) => void): () => void {
+  messageListeners.add(l);
+  return () => messageListeners.delete(l);
+}
+
+/** Called whenever the connection to the Gasho server is (again) open: requests sent before may have been lost. */
+export function onConnected(l: () => void): () => void {
+  connectedListeners.add(l);
+  return () => connectedListeners.delete(l);
+}
+
+/** Sends a message to the Gasho server; false when it is not connected. */
+export function sendToHub(m: ClientToHub): boolean {
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(m));
+  return true;
+}
+
+const pluginResults = new Map<string, (r: CommandResult) => void>();
+
+/** Enables or disables a plugin, chooses where its daemon part runs, or changes one of its settings. */
+export function sendPluginCommand(cmd: PluginCommand, timeoutMs = 20_000): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    const id = requestId();
+    const timer = setTimeout(() => {
+      pluginResults.delete(id);
+      resolve({ ok: false, error: "応答がありませんでした。" });
+    }, timeoutMs);
+    pluginResults.set(id, (r) => {
+      clearTimeout(timer);
+      resolve(r);
+    });
+    if (!sendToHub({ ...cmd, requestId: id })) {
+      clearTimeout(timer);
+      pluginResults.delete(id);
+      resolve({ ok: false, error: "Gasho サーバーにつながっていません。" });
+    }
+  });
 }
 
 function send(m: ClientToHub): void {
@@ -226,9 +226,17 @@ function sameEntry(a: TranscriptEntry, b: TranscriptEntry): boolean {
 }
 
 function handle(m: HubToClient): void {
+  for (const l of messageListeners) l(m);
   switch (m.type) {
+    case "plugins":
+      update({ plugins: m.plugins });
+      break;
+    case "plugin.result":
+      pluginResults.get(m.requestId)?.(m.result);
+      pluginResults.delete(m.requestId);
+      break;
     case "snapshot":
-      update({ machines: m.machines, notifications: m.notifications, events: m.events.slice(-MAX_EVENTS) });
+      update({ machines: m.machines, notifications: m.notifications, events: m.events.slice(-MAX_EVENTS), plugins: m.plugins ?? [] });
       break;
     case "machine": {
       const machines = state.machines.filter((x) => x.id !== m.machine.id);
@@ -241,9 +249,7 @@ function handle(m: HubToClient): void {
       const prefix = transcriptKey(m.id, "");
       const transcripts = Object.fromEntries(Object.entries(state.transcripts).filter(([k]) => !k.startsWith(prefix)));
       const graphs = Object.fromEntries(Object.entries(state.graphs).filter(([k]) => !k.startsWith(prefix)));
-      const githubLists = Object.fromEntries(Object.entries(state.githubLists).filter(([k]) => !k.startsWith(prefix)));
-      const githubItems = Object.fromEntries(Object.entries(state.githubItems).filter(([k]) => !k.startsWith(prefix)));
-      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs, githubLists, githubItems });
+      update({ machines: state.machines.filter((x) => x.id !== m.id), transcripts, graphs });
       break;
     }
     case "transcript.page": {
@@ -297,19 +303,6 @@ function handle(m: HubToClient): void {
       setGraph(key, m.graph ? { loading: false, graph: m.graph, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
       break;
     }
-    case "github.list": {
-      const key = githubKey(m.machine, m.sessionId, m.kind, m.repo);
-      const cur = state.githubLists[key];
-      // On an error, keep showing the list read before, with the error.
-      setGitHubList(key, m.list ? { loading: false, list: m.list, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
-      break;
-    }
-    case "github.item": {
-      const key = githubItemKey(m.machine, m.sessionId, m.kind, m.number, m.repo);
-      const cur = state.githubItems[key];
-      setGitHubItem(key, m.item ? { loading: false, item: m.item, at: Date.now() } : { ...cur, loading: false, error: m.error ?? "読み込めませんでした。" });
-      break;
-    }
   }
 }
 
@@ -324,32 +317,6 @@ export function loadGraph(machine: string, sessionId: string, repo?: string): vo
   }
   setGraph(key, { ...cur, loading: true, error: undefined });
   send({ type: "git.graph.get", machine, sessionId, repo });
-}
-
-/** Reads the open issues or pull requests of the session's GitHub repository (or of `repo` inside its folder) again. */
-export function loadGitHubList(machine: string, sessionId: string, kind: GitHubListKind, repo?: string): void {
-  const key = githubKey(machine, sessionId, kind, repo);
-  const cur = state.githubLists[key];
-  if (cur?.loading) return;
-  if (socket?.readyState !== WebSocket.OPEN) {
-    setGitHubList(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
-    return;
-  }
-  setGitHubList(key, { ...cur, loading: true, error: undefined });
-  send({ type: "github.list.get", machine, sessionId, kind, repo });
-}
-
-/** Reads one issue or pull request of the session's GitHub repository (or of `repo` inside its folder) again. */
-export function loadGitHubItem(machine: string, sessionId: string, kind: GitHubListKind, number: number, repo?: string): void {
-  const key = githubItemKey(machine, sessionId, kind, number, repo);
-  const cur = state.githubItems[key];
-  if (cur?.loading) return;
-  if (socket?.readyState !== WebSocket.OPEN) {
-    setGitHubItem(key, { ...cur, loading: false, error: "Gasho サーバーにつながっていません。" });
-    return;
-  }
-  setGitHubItem(key, { ...cur, loading: true, error: undefined });
-  send({ type: "github.item.get", machine, sessionId, kind, number, repo });
 }
 
 function requestPage(machine: string, sessionId: string, before: number | undefined): void {
@@ -378,6 +345,15 @@ export function loadTranscript(machine: string, sessionId: string, older = false
 
 export function markRead(ids: string[]): void {
   if (ids.length > 0) send({ type: "notification.read", ids });
+}
+
+/** The state now, outside React (the plugins' loader follows it). */
+export function getAppState(): State {
+  return state;
+}
+
+export function subscribeAppState(l: () => void): () => void {
+  return subscribe(l);
 }
 
 function subscribe(l: () => void): () => void {

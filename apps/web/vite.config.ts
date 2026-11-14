@@ -15,6 +15,8 @@ export default defineConfig({
     proxy: {
       "/ws": { target: hub, ws: true },
       "/api": { target: hub },
+      // The plugins' files (docs/plugins.md).
+      "/plugins": { target: hub },
     },
   },
 });

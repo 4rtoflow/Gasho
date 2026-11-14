@@ -19,7 +19,7 @@ gasho-daemon は、Claude Code を動かすマシン（working server）ごと�
 | Claude Code（`claude`）、ログイン済み | セッションを見る、起動する | 動かない |
 | セッションの端末（gasho-daemon に入っている。Linux と macOS の x64・arm64） | Gasho からセッションを起動し、指示を送る | セッションを見るだけになる |
 | git | ブランチグラフ | ブランチグラフが出ない |
-| GitHub CLI（`gh`）、ログイン済み | Issues と Pull requests のパネル、新しいセッションの「GitHub から clone」 | パネルが出ない。clone できない |
+| GitHub CLI（`gh`）、ログイン済み | GitHub プラグインの Issues と Pull requests のパネル、新しいセッションの「GitHub から clone」 | パネルに gh のエラーが出る。clone できない |
 | Claude Code の hooks | 通知（応答の完了、確認待ち、入力待ち）、Gasho からの権限の確認への回答 | 通知が来ない。権限の確認には端末か公式アプリで答える |
 
 Mac では、Homebrew で `brew install node gh` のように入れられる。Ubuntu では、Node.js は公式のバイナリかバージョン管理のツール（nvm など）、gh は公式の apt リポジトリから入れる。どれも、`which claude gh` で見つかる場所に置く。
@@ -194,7 +194,7 @@ Mac では、書き出したあと `launchctl bootout` と `launchctl bootstrap`
 | ログに `the Gasho server rejected this machine` と出る | 登録が取り消されている。3 からやり直す |
 | 「新しいセッション」で起動できない | `doctor` の端末。信頼の確認が出たら「信頼して起動する」を選んだか（gasho-daemon が 0.10.0 より前なら、フォルダーを端末の `claude` で信頼したか） |
 | 「GitHub から clone」できない | `doctor` の GitHub CLI（ログインしているか）。gh が SSH で clone する設定（`gh config get git_protocol` が ssh）なら、working server の SSH の鍵と known_hosts。gasho-daemon が 0.10.0 以上か |
-| Issues と Pull requests が出ない | `doctor` の GitHub CLI。gasho-daemon が 0.7.0 以上か |
+| Issues と Pull requests が出ない | Gasho の「プラグイン」の画面で、GitHub プラグインが入っていて有効か、その working server が「動いている」か。「gasho-daemon が古い」と出たら gasho-daemon を更新する。パネルにエラーが出るときは `doctor` の GitHub CLI |
 | セッション画面に「ファイル」が出ない | gasho-daemon が 0.11.0 以上か |
 | 通知が来ない | `doctor` の hooks。`~/.config/gasho/daemon.env` と `~/.claude/settings.json` の秘密の値が同じか |
 | 常駐させると claude や gh が見つからない | 設定ファイルの PATH。`doctor` で見つかる端末で `service print` を実行し直す |
@@ -213,3 +213,4 @@ gasho-daemon の設定は環境変数で変える。gasho-daemon のコマンド
 | `GASHO_CLAUDE_BIN` | Claude Code のコマンド | `claude` |
 | `GASHO_GH_BIN` | GitHub CLI のコマンド | `gh` |
 | `GASHO_POLL_MS` | セッションの一覧を読み直す間隔（ミリ秒） | `3000` |
+| `GASHO_PLUGINS` | `none` にすると、この working server ではプラグインの daemon の部分を動かさない | なし |

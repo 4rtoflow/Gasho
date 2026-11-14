@@ -1,0 +1,15 @@
+/* The CSS of a plugin's web part. Its own stylesheet (src/web/style.css) imports this, and the build writes web.css
+   with the Tailwind classes the plugin uses, in Gasho's theme:
+
+     @import "@gasho/plugin-sdk/plugin.css";
+     @source "../";
+
+   Tailwind's base styles (preflight) are left out: Gasho's screen has them already, and a second copy would reset
+   what Gasho styles. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "./theme.css";
+
+/* Gasho's screen is dark when <html> has the class "dark". */
+@custom-variant dark (&:is(.dark *));
