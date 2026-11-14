@@ -310,7 +310,8 @@ function Column({
         className={cn(
           "relative flex flex-col px-2 pb-2",
           compact ? "gap-1" : "gap-2",
-          wide && "min-h-0 overflow-y-auto overscroll-contain [scrollbar-width:thin]",
+          // Sideways scrolling over a column goes on to the board.
+          wide && "scrollbar-none min-h-0 overflow-x-hidden overflow-y-auto overscroll-y-contain",
         )}
       >
         {loading ? (
