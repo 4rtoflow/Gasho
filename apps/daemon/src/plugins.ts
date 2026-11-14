@@ -4,7 +4,8 @@
 // web parts come as "plugin.request" and are answered with "plugin.response". A new version is started beside the
 // old one and takes the calls once it is ready; the old one ends when its calls have (hot reload). What runs is told
 // to the Gasho server with "plugin.status", which also tells it that this gasho-daemon runs plugins at all. What the
-// daemon parts ask gh for (ctx.github) is run here, by one GitHubProxy for all of them (github.ts).
+// daemon parts ask gh for (ctx.github) is run here, by one GitHubProxy for all of them (github.ts). Their events for
+// the web parts (ctx.emit) go to the Gasho server as "plugin.event", at most once a second for each topic.
 import { fork, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -15,7 +16,7 @@ import type { GitHubProxy } from "./github.ts";
 import type { FromHost, GitHubAnswer, LocalWire, MachineWire, SessionWire, ToHost } from "./plugin-ipc.ts";
 
 /** The plugin API this gasho-daemon runs plugins of. */
-export const PLUGIN_API = "1.4";
+export const PLUGIN_API = "1.5";
 /** The process of a daemon part: next to this file (.ts when run from the repository, .js in the npm package). */
 const HOST_FILE = fileURLToPath(new URL(`./plugin-host${path.extname(fileURLToPath(import.meta.url))}`, import.meta.url));
 /** How long a new process may take to import the plugin and run its `start`. */
@@ -33,6 +34,8 @@ const BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 /** How long the Gasho server may take to hand over a daemon part's code. */
 const CODE_MS = 30_000;
+/** Events of a topic are passed on at most this often; of those in between, the last one, when the time comes. */
+const EVENT_EVERY_MS = 1000;
 
 const NOT_RUNNING = "このプラグインは、この working server では動いていません。";
 const FAILED = "処理に失敗しました。詳しくは、working server の gasho-daemon のログを見てください。";
@@ -52,6 +55,8 @@ class HostProcess {
   readonly ready: Promise<void>;
   /** Called once when the process ends. */
   onExit: (code: number | null) => void = () => undefined;
+  /** Called for each event of the daemon part (ctx.emit). */
+  onEvent: (topic: string, data: unknown, retain: boolean) => void = () => undefined;
 
   constructor(
     id: string,
@@ -98,6 +103,8 @@ class HostProcess {
           c.resolve(m.ok ? { ok: true, data: m.data } : { ok: false, error: m.error, user: m.user });
         } else if (m.t === "github") {
           void this.gh(m, github).then((a) => this.send({ t: "github.result", id: m.id, ...a }));
+        } else if (m.t === "event") {
+          if (typeof m.topic === "string" && m.topic.length > 0 && m.topic.length <= 100) this.onEvent(m.topic, m.data, m.retain === true);
         }
       });
       this.child.on("exit", (code) => {
@@ -245,11 +252,20 @@ export interface PluginRunnerOptions {
   log: (s: string) => void;
 }
 
+/** The events of one topic of a plugin: when the last was passed on, and the newest one waiting for its turn. */
+interface Topic {
+  sentAt: number;
+  waiting?: { data: unknown; retain: boolean };
+  timer?: NodeJS.Timeout;
+}
+
 export class PluginRunner {
   private opts: PluginRunnerOptions;
   private slots = new Map<string, Slot>();
   private code = new Map<string, { resolve: (code: string) => void; reject: (e: Error) => void }>();
   private lastStatus = "";
+  /** By plugin and topic ("<id>\0<topic>"). */
+  private topics = new Map<string, Topic>();
 
   constructor(opts: PluginRunnerOptions) {
     this.opts = opts;
@@ -354,6 +370,44 @@ export class PluginRunner {
     await Promise.all([...this.slots.values()].map((s) => this.halt(s)));
   }
 
+  // ---- events ----
+
+  /**
+   * An event of a daemon part: passed on to the Gasho server at once when its topic had none in the last second;
+   * otherwise it waits for the second to end, replacing any event of the topic that waits already. An old version
+   * being replaced (hot reload) tells nothing any more.
+   */
+  private event(slot: Slot, proc: HostProcess, topic: string, data: unknown, retain: boolean): void {
+    if ((slot.proc !== proc && slot.starting !== proc) || !slot.entry.run) return;
+    const key = `${slot.id}\0${topic}`;
+    const t = this.topics.get(key) ?? { sentAt: 0 };
+    this.topics.set(key, t);
+    const pass = (e: { data: unknown; retain: boolean }) => {
+      t.sentAt = Date.now();
+      this.opts.send({ type: "plugin.event", plugin: slot.id, topic, data: e.data, ...(e.retain ? { retain: true } : {}) });
+    };
+    const wait = t.sentAt + EVENT_EVERY_MS - Date.now();
+    if (!t.timer && wait <= 0) return pass({ data, retain });
+    t.waiting = { data, retain };
+    if (t.timer) return;
+    t.timer = setTimeout(() => {
+      t.timer = undefined;
+      const e = t.waiting;
+      t.waiting = undefined;
+      if (e && slot.entry.run && this.slots.get(slot.id) === slot) pass(e);
+    }, wait);
+    t.timer.unref();
+  }
+
+  /** Forgets the events of a plugin waiting for their turn (it stopped). */
+  private dropEvents(id: string): void {
+    for (const [key, t] of this.topics) {
+      if (!key.startsWith(`${id}\0`)) continue;
+      if (t.timer) clearTimeout(t.timer);
+      this.topics.delete(key);
+    }
+  }
+
   // ---- processes ----
 
   /** A process to call, once one is ready and has room; or why there is none. */
@@ -395,6 +449,8 @@ export class PluginRunner {
     if (slot.entry.hash !== hash || !slot.entry.run || slot.starting?.hash === hash) return;
     const local = { folders: this.opts.folders(), dataDir };
     const proc = new HostProcess(slot.id, hash, file, { machine: this.opts.machine(), settings: slot.entry.settings, local }, this.opts.github, this.opts.log);
+    // From its start already (what it watches, as it starts).
+    proc.onEvent = (topic, data, retain) => this.event(slot, proc, topic, data, retain);
     const before = slot.starting;
     slot.starting = proc;
     void before?.stop();
@@ -452,6 +508,7 @@ export class PluginRunner {
   private async halt(slot: Slot): Promise<void> {
     if (slot.restart) clearTimeout(slot.restart);
     slot.restart = undefined;
+    this.dropEvents(slot.id);
     slot.backoff = BACKOFF_MS;
     const procs = [slot.proc, slot.starting].filter((p): p is HostProcess => p !== undefined);
     slot.proc = undefined;

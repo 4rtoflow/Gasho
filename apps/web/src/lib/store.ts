@@ -12,6 +12,7 @@ import type {
   LatestVersions,
   MachineHookEvent,
   MachineInfo,
+  PluginCatalog,
   PluginCommand,
   PluginInfo,
   SessionCommand,
@@ -73,6 +74,8 @@ export interface State {
   files: Record<string, FileState>;
   /** The plugins installed on the Gasho server (docs/plugins.md). */
   plugins: PluginInfo[];
+  /** The catalog of GashoPlugins, as the Gasho server last read it (P10). */
+  catalog?: PluginCatalog;
   /** The latest published versions, as the Gasho server looked them up (absent when it does not). */
   latest?: LatestVersions;
 }
@@ -265,7 +268,15 @@ export function sendToHub(m: ClientToHub): boolean {
 
 const pluginResults = new Map<string, (r: CommandResult) => void>();
 
-/** Enables or disables a plugin, chooses where its daemon part runs, or changes one of its settings. */
+/** Asks the Gasho server to read the catalog of plugins again: if it is older than 10 minutes, or now (`refresh`). */
+export function requestCatalog(refresh = false): void {
+  sendToHub({ type: "plugin.catalog.get", ...(refresh ? { refresh: true } : {}) });
+}
+
+/**
+ * Adds, updates or removes a plugin, enables or disables one, chooses where its daemon part runs, or changes one of
+ * its settings.
+ */
 export function sendPluginCommand(cmd: PluginCommand, timeoutMs = 20_000): Promise<CommandResult> {
   return new Promise((resolve) => {
     const id = requestId();
@@ -330,8 +341,18 @@ function handle(m: HubToClient): void {
       pluginResults.get(m.requestId)?.(m.result);
       pluginResults.delete(m.requestId);
       break;
+    case "plugin.catalog":
+      update({ catalog: m.catalog });
+      break;
     case "snapshot":
-      update({ machines: m.machines, notifications: m.notifications, events: m.events.slice(-MAX_EVENTS), plugins: m.plugins ?? [], latest: m.latest });
+      update({
+        machines: m.machines,
+        notifications: m.notifications,
+        events: m.events.slice(-MAX_EVENTS),
+        plugins: m.plugins ?? [],
+        catalog: m.catalog,
+        latest: m.latest,
+      });
       break;
     case "latest":
       update({ latest: m.latest });

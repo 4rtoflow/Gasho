@@ -17,6 +17,7 @@ import type {
 } from "@gasho/protocol";
 import type { LatestCheck } from "./latest.ts";
 import { notificationFor } from "./notify.ts";
+import type { PluginCatalogSource } from "./catalog.ts";
 import { PluginHub } from "./plugin-hub.ts";
 import type { PluginRegistry } from "./plugins.ts";
 import type { Store } from "./store.ts";
@@ -335,7 +336,7 @@ export class Hub {
   /** The latest published versions; absent when they are not looked up. */
   private latest: LatestCheck | undefined;
 
-  constructor(store: Store, opts: { plugins?: PluginRegistry; latest?: LatestCheck } = {}) {
+  constructor(store: Store, opts: { plugins?: PluginRegistry; catalog?: PluginCatalogSource; latest?: LatestCheck } = {}) {
     this.store = store;
     this.latest = opts.latest;
     opts.latest?.subscribe((latest) => this.broadcast({ type: "latest", latest }));
@@ -352,6 +353,7 @@ export class Hub {
           this.store.addEvent(event);
           this.broadcast({ type: "event", event });
         },
+        ...(opts.catalog ? { catalog: opts.catalog } : {}),
       });
     }
   }
@@ -455,6 +457,7 @@ export class Hub {
       case "plugin.status":
       case "plugin.code.get":
       case "plugin.response":
+      case "plugin.event":
         this.plugins?.onDaemonMessage(id, peer, msg);
         break;
       case "hook": {
@@ -500,7 +503,8 @@ export class Hub {
       machines: [...this.machines.values()],
       notifications: this.store.recentNotifications(),
       events: this.store.recentEvents(),
-      ...(this.plugins ? { plugins: this.plugins.infos() } : {}),
+      ...(this.plugins ? { plugins: this.plugins.infos(), pluginEvents: this.plugins.retainedEvents() } : {}),
+      ...(this.plugins?.catalog() ? { catalog: this.plugins.catalog() } : {}),
       ...(this.latest ? { latest: this.latest.latest() } : {}),
     });
   }
@@ -570,10 +574,16 @@ export class Hub {
       case "latest.check":
         if (this.latest) void this.latest.check(true);
         break;
+      case "plugin.catalog.get":
+        this.plugins?.onClientMessage(peer, msg);
+        break;
       case "plugin.request":
       case "plugin.enable":
       case "plugin.machines":
       case "plugin.setting":
+      case "plugin.install":
+      case "plugin.update":
+      case "plugin.remove":
         if (this.plugins) this.plugins.onClientMessage(peer, msg);
         else if (msg.type === "plugin.request") peer.send({ type: "plugin.response", requestId: msg.requestId, error: "この Gasho サーバーではプラグインを使えません。" });
         else peer.send({ type: "plugin.result", requestId: msg.requestId, result: { ok: false, error: "この Gasho サーバーではプラグインを使えません。" } });

@@ -1,8 +1,12 @@
 // The Gasho server's part in plugins (docs/plugins.md): it tells browsers which plugins are installed and how they
 // stand, tells each gasho-daemon which daemon parts to run (and hands it their code), relays the calls of web parts to
 // daemon parts, and keeps which plugins are enabled, where their daemon parts run, and their settings. The plugins'
-// files come from PluginRegistry (plugins.ts); this never runs a plugin's code.
+// files come from PluginRegistry (plugins.ts); this never runs a plugin's code. It also adds, updates and removes
+// plugins for browsers, from the catalog of GashoPlugins (catalog.ts). The events of daemon parts go on to every
+// browser; the Gasho server keeps the last of each topic that asked for it (retain) for browsers that connect later.
 import { randomUUID } from "node:crypto";
+import fsp from "node:fs/promises";
+import path from "node:path";
 import type {
   ClientToHub,
   CommandResult,
@@ -13,13 +17,28 @@ import type {
   HubToDaemon,
   MachineHookEvent,
   MachineInfo,
+  PluginCatalog,
   PluginCommand,
   PluginDaemonState,
+  PluginEvent,
   PluginInfo,
   PluginMachines,
   PluginManifest,
 } from "@gasho/protocol";
-import { DEFAULT_TIMEOUT_SECONDS, PLUGIN_API, PLUGIN_API_MAJOR, settingProblem, settingValue, type PluginEntry, type PluginRegistry } from "./plugins.ts";
+import { CATALOG_MAX_AGE_MS, installRelease, type PluginCatalogSource } from "./catalog.ts";
+import {
+  apiProblem,
+  compareVersions,
+  DEFAULT_TIMEOUT_SECONDS,
+  ID_RE,
+  PLUGIN_API,
+  PLUGIN_API_MAJOR,
+  removePluginFolder,
+  settingProblem,
+  settingValue,
+  type PluginEntry,
+  type PluginRegistry,
+} from "./plugins.ts";
 import type { Store } from "./store.ts";
 
 /** The arguments of a call, at most (as JSON). */
@@ -29,6 +48,11 @@ const MAX_CODE_BYTES = 15 * 1024 * 1024;
 /** The Gasho server waits this much longer than the daemon part may take, so that gasho-daemon's own answer arrives. */
 const RELAY_MARGIN_MS = 3000;
 const MAX_MACHINES = 100;
+/** An event's topic (characters) and data (as JSON, in bytes), at most. */
+const MAX_TOPIC = 100;
+const MAX_EVENT_BYTES = 256 * 1024;
+/** Kept events (retain) of a plugin on one working server, at most: the oldest go first. */
+const MAX_RETAINED = 32;
 
 const OLD_DAEMON = "この working server の gasho-daemon は古いため、プラグインを使えません。gasho-daemon を更新してください。";
 
@@ -53,14 +77,26 @@ export interface PluginHubDeps {
   broadcast: (m: HubToClient) => void;
   /** Records an operation (operations log) and shows it to browsers. */
   audit: (e: MachineHookEvent) => void;
+  /** The catalog of GashoPlugins, which plugins are added and updated from (absent in tests that do not need it). */
+  catalog?: PluginCatalogSource;
 }
 
 type PluginRequest = Extract<ClientToHub, { type: "plugin.request" }>;
+type CatalogGet = Extract<ClientToHub, { type: "plugin.catalog.get" }>;
+type ManageCommand = Extract<PluginCommand, { type: "plugin.install" | "plugin.update" | "plugin.remove" }>;
 type PluginStatusMessage = Extract<DaemonToHub, { type: "plugin.status" }>;
+type PluginEventMessage = Extract<DaemonToHub, { type: "plugin.event" }>;
 
 /** Whether a plugin's daemon part is meant to run on a working server. */
 export function chosen(machines: PluginMachines, machine: string): boolean {
   return machines === "all" || machines.includes(machine);
+}
+
+/** Where to run a plugin's daemon part, as a browser asked: undefined when that is not right. */
+function machinesOf(m: unknown): PluginMachines | undefined {
+  if (m === "all") return "all";
+  const ok = Array.isArray(m) && m.length <= MAX_MACHINES && m.every((x) => typeof x === "string" && x.length > 0 && x.length <= 100);
+  return ok ? [...new Set(m as string[])] : undefined;
 }
 
 export class PluginHub {
@@ -69,10 +105,21 @@ export class PluginHub {
   private status = new Map<string, { api: string; plugins: Map<string, DaemonPluginStatus> }>();
   private calls = new Map<string, PendingCall>();
   private lastInfos = "";
+  /** Plugins being added, updated or removed (one thing at a time for each). */
+  private busy = new Set<string>();
+  /** The kept events (retain), by "<plugin>\0<machine>\0<topic>", with the version of the plugin that sent each. */
+  private retained = new Map<string, { event: PluginEvent; hash: string }>();
 
   constructor(deps: PluginHubDeps) {
     this.deps = deps;
     deps.registry.on("change", () => this.changed());
+    const catalog = deps.catalog;
+    catalog?.on("change", () => deps.broadcast({ type: "plugin.catalog", catalog: catalog.get() }));
+  }
+
+  /** The catalog of plugins as last read, for a browser that connects. */
+  catalog(): PluginCatalog | undefined {
+    return this.deps.catalog?.get();
   }
 
   /** The installed plugins, as browsers see them. */
@@ -80,8 +127,14 @@ export class PluginHub {
     return this.deps.registry.entries().map((e) => this.info(e));
   }
 
+  /** The kept events of daemon parts (retain), for a browser that connects. */
+  retainedEvents(): PluginEvent[] {
+    return [...this.retained.values()].map((r) => r.event);
+  }
+
   /** A plugin, its files, its state or its settings changed: browsers and gasho-daemons hear of it. */
   changed(): void {
+    this.forgetEvents();
     this.toClients();
     for (const [machine, peer] of this.deps.daemons()) peer.send({ type: "plugins", plugins: this.daemonEntries(machine) });
   }
@@ -110,9 +163,16 @@ export class PluginHub {
     this.toClients();
   }
 
-  /** plugin.status, plugin.code.get and plugin.response from a gasho-daemon. */
-  onDaemonMessage(machine: string, peer: Peer<HubToDaemon>, msg: Extract<DaemonToHub, { type: "plugin.status" | "plugin.code.get" | "plugin.response" }>): void {
+  /** plugin.status, plugin.code.get, plugin.response and plugin.event from a gasho-daemon. */
+  onDaemonMessage(
+    machine: string,
+    peer: Peer<HubToDaemon>,
+    msg: Extract<DaemonToHub, { type: "plugin.status" | "plugin.code.get" | "plugin.response" | "plugin.event" }>,
+  ): void {
     switch (msg.type) {
+      case "plugin.event":
+        this.onEvent(machine, msg);
+        return;
       case "plugin.status":
         this.onStatus(machine, msg);
         return;
@@ -131,10 +191,20 @@ export class PluginHub {
     }
   }
 
-  onClientMessage(peer: ClientPeer, msg: PluginRequest | ({ requestId: string } & PluginCommand)): void {
+  onClientMessage(peer: ClientPeer, msg: PluginRequest | ({ requestId: string } & PluginCommand) | CatalogGet): void {
+    if (msg.type === "plugin.catalog.get") {
+      // Every browser hears of the catalog read again (plugin.catalog).
+      void this.deps.catalog?.read(msg.refresh === true ? 0 : CATALOG_MAX_AGE_MS);
+      return;
+    }
     if (typeof msg.requestId !== "string" || !msg.requestId || msg.requestId.length > 100) return;
     if (msg.type === "plugin.request") {
       this.call(peer, msg);
+      return;
+    }
+    if (msg.type === "plugin.install" || msg.type === "plugin.update" || msg.type === "plugin.remove") {
+      const requestId = msg.requestId;
+      void this.manage(peer, msg).then((result) => peer.send({ type: "plugin.result", requestId, result }));
       return;
     }
     const result = this.command(peer, msg);
@@ -213,13 +283,16 @@ export class PluginHub {
 
   // ---- managing plugins ----
 
-  private command(peer: ClientPeer, cmd: PluginCommand): CommandResult {
+  private audit(peer: ClientPeer, event: string, summary: string): void {
+    this.deps.audit({ machine: "", sessionId: "", event, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` });
+  }
+
+  private command(peer: ClientPeer, cmd: Exclude<PluginCommand, ManageCommand>): CommandResult {
     const entry = typeof cmd.plugin === "string" ? this.deps.registry.get(cmd.plugin) : undefined;
     if (!entry) return { ok: false, error: "このプラグインはありません。" };
     const name = entry.revision?.manifest.name ?? entry.id;
     const state = this.state(entry.id);
-    const audit = (event: string, summary: string) =>
-      this.deps.audit({ machine: "", sessionId: "", event, at: Date.now(), summary: `${summary} (by ${peer.deviceId})` });
+    const audit = (event: string, summary: string) => this.audit(peer, event, summary);
     switch (cmd.type) {
       case "plugin.enable": {
         if (typeof cmd.enabled !== "boolean") return { ok: false, error: "有効か無効かの指定が正しくありません。" };
@@ -228,10 +301,8 @@ export class PluginHub {
         break;
       }
       case "plugin.machines": {
-        const m = cmd.machines;
-        const ok = m === "all" || (Array.isArray(m) && m.length <= MAX_MACHINES && m.every((x) => typeof x === "string" && x.length > 0 && x.length <= 100));
-        if (!ok) return { ok: false, error: "working server の指定が正しくありません。" };
-        const machines: PluginMachines = m === "all" ? "all" : [...new Set(m)];
+        const machines = machinesOf(cmd.machines);
+        if (!machines) return { ok: false, error: "working server の指定が正しくありません。" };
         this.deps.store.setPluginState(entry.id, { ...state, machines });
         const names = machines === "all" ? "すべて" : machines.map((id) => this.deps.machines().get(id)?.name ?? id).join("、") || "なし";
         audit("Gasho:plugin.machines", `${name}：${names}`);
@@ -253,6 +324,78 @@ export class PluginHub {
         return { ok: false, error: "不明な命令です。" };
     }
     this.changed();
+    return { ok: true };
+  }
+
+  /** Adds a plugin from the catalog, updates one to the catalog's version, or removes one. */
+  private async manage(peer: ClientPeer, cmd: ManageCommand): Promise<CommandResult> {
+    const id = typeof cmd.plugin === "string" && ID_RE.test(cmd.plugin) ? cmd.plugin : undefined;
+    if (!id) return { ok: false, error: "このプラグインはありません。" };
+    if (this.busy.has(id)) return { ok: false, error: "このプラグインは、ほかの操作の途中です。終わってから、もう一度試してください。" };
+    this.busy.add(id);
+    try {
+      if (cmd.type === "plugin.install") return await this.install(peer, id, cmd.machines);
+      if (cmd.type === "plugin.update") return await this.update(peer, id);
+      return await this.remove(peer, id);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      this.busy.delete(id);
+    }
+  }
+
+  private async install(peer: ClientPeer, id: string, asked: unknown): Promise<CommandResult> {
+    const catalog = this.deps.catalog;
+    if (!catalog) return { ok: false, error: "この Gasho サーバーでは、カタログからプラグインを入れられません。" };
+    const entry = catalog.find(id);
+    if (!entry) return { ok: false, error: "カタログにこのプラグインはありません。一覧を読み直してください。" };
+    if (this.deps.registry.get(id) || (await fsp.lstat(path.join(this.deps.registry.dir, id)).catch(() => undefined))) {
+      return { ok: false, error: `${entry.name} はすでに入っています。` };
+    }
+    const wrongApi = apiProblem(entry.api);
+    if (wrongApi) return { ok: false, error: wrongApi };
+    const machines = machinesOf(asked);
+    if (!machines) return { ok: false, error: "working server の指定が正しくありません。" };
+    const tgz = await catalog.fetch(entry);
+    // Before the files, so that its daemon part starts only where it was chosen to.
+    this.deps.store.setPluginState(id, { enabled: true, machines });
+    try {
+      await installRelease(this.deps.registry.dir, entry, tgz);
+    } catch (e) {
+      this.deps.store.forgetPlugin(id);
+      throw e;
+    }
+    this.audit(peer, "Gasho:plugin.install", `${entry.name} ${entry.version}`);
+    await this.deps.registry.scan();
+    return { ok: true };
+  }
+
+  private async update(peer: ClientPeer, id: string): Promise<CommandResult> {
+    const catalog = this.deps.catalog;
+    if (!catalog) return { ok: false, error: "この Gasho サーバーでは、カタログからプラグインを入れられません。" };
+    const installed = this.deps.registry.get(id);
+    if (!installed) return { ok: false, error: "このプラグインは入っていません。" };
+    if (installed.dev) return { ok: false, error: "開発中のプラグイン（リンクしたもの）は、カタログから更新しません。" };
+    const entry = catalog.find(id);
+    if (!entry) return { ok: false, error: "カタログにこのプラグインはありません。一覧を読み直してください。" };
+    const current = installed.revision?.manifest.version;
+    if (current && compareVersions(entry.version, current) <= 0) return { ok: false, error: `カタログに ${current} より新しい版はありません。` };
+    const wrongApi = apiProblem(entry.api);
+    if (wrongApi) return { ok: false, error: wrongApi };
+    const tgz = await catalog.fetch(entry);
+    await installRelease(this.deps.registry.dir, entry, tgz);
+    this.audit(peer, "Gasho:plugin.update", `${entry.name} ${current ?? "?"} → ${entry.version}`);
+    await this.deps.registry.scan();
+    return { ok: true };
+  }
+
+  private async remove(peer: ClientPeer, id: string): Promise<CommandResult> {
+    const entry = this.deps.registry.get(id);
+    const name = entry?.revision?.manifest.name ?? id;
+    if (!(await removePluginFolder(this.deps.registry.dir, id))) return { ok: false, error: "このプラグインは入っていません。" };
+    this.deps.store.forgetPlugin(id);
+    this.audit(peer, "Gasho:plugin.remove", `${name}${entry?.dev ? " [link]" : ""}`);
+    await this.deps.registry.scan();
     return { ok: true };
   }
 
@@ -281,6 +424,45 @@ export class PluginHub {
     }
     this.status.set(machine, { api: msg.api.slice(0, 20), plugins });
     this.toClients();
+  }
+
+  /**
+   * An event of a daemon part: passed on to every browser when the plugin is enabled and runs on that working server,
+   * and kept when it asks for it (retain). Others are dropped (gasho-daemon checks them already).
+   */
+  private onEvent(machine: string, msg: PluginEventMessage): void {
+    const entry = typeof msg.plugin === "string" ? this.deps.registry.get(msg.plugin) : undefined;
+    const hash = entry?.revision?.hash;
+    if (!entry || !hash || !entry.revision?.manifest.daemon) return;
+    const state = this.state(entry.id);
+    if (!state.enabled || !chosen(state.machines, machine)) return;
+    const topic = msg.topic;
+    if (typeof topic !== "string" || topic.length === 0 || topic.length > MAX_TOPIC || /[\u0000-\u001f]/.test(topic)) return;
+    const json = JSON.stringify(msg.data ?? null);
+    if (Buffer.byteLength(json) > MAX_EVENT_BYTES) return;
+    const event: PluginEvent = { plugin: entry.id, machine, topic, data: msg.data ?? null };
+    this.deps.broadcast({ type: "plugin.event", event });
+    if (msg.retain !== true) return;
+    const key = `${entry.id}\0${machine}\0${topic}`;
+    // Kept in the order they came: the oldest of the plugin on the working server is dropped first.
+    this.retained.delete(key);
+    this.retained.set(key, { event, hash });
+    const prefix = `${entry.id}\0${machine}\0`;
+    const own = [...this.retained.keys()].filter((k) => k.startsWith(prefix));
+    for (const k of own.slice(0, Math.max(0, own.length - MAX_RETAINED))) this.retained.delete(k);
+  }
+
+  /**
+   * Drops kept events that no longer stand: of a plugin removed, disabled, not run on that working server any more, or
+   * replaced by a new version (whose daemon part sends its own from `start`).
+   */
+  private forgetEvents(): void {
+    for (const [key, r] of this.retained) {
+      const entry = this.deps.registry.get(r.event.plugin);
+      const state = this.state(r.event.plugin);
+      if (entry?.revision?.hash === r.hash && state.enabled && chosen(state.machines, r.event.machine)) continue;
+      this.retained.delete(key);
+    }
   }
 
   private async sendCode(peer: Peer<HubToDaemon>, plugin: unknown, hash: unknown): Promise<void> {

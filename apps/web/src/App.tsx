@@ -11,6 +11,7 @@ import { updateTo } from "@/lib/daemon-update";
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery, useWindowWidth } from "@/lib/media";
 import { arrangeSessions, rememberSessions, useSavedOrder } from "@/lib/order";
+import { updateCount } from "@/lib/plugin-catalog";
 import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
 import { rememberWorktrees, useRememberedWorktrees } from "@/lib/remembered-worktrees";
 import {
@@ -141,7 +142,7 @@ export function App() {
   useEffect(() => {
     if (isOldGitHubLink(location.hash)) go(route, { replace: true });
   }, [route]);
-  const { auth, me, machines, notifications, connected, latest } = useAppState();
+  const { auth, me, machines, notifications, connected, plugins, catalog, latest } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
   // What was picked from a session tab's menu (rename, fork, remove); its dialog is open meanwhile.
   const [sessionAction, setSessionAction] = useState<SessionActionRequest | null>(null);
@@ -180,7 +181,8 @@ export function App() {
         { id: "home", label: "ホーム", icon: <Home />, badge: unread || undefined },
         ...pluginItems.map(({ id, label, icon, badge }) => ({ id, label, icon, badge })),
         { id: "devices", label: "端末", icon: <KeyRound />, badge: machines.some((m) => updateTo(m, latest)) ? "更新" : undefined },
-        { id: "plugins", label: "プラグイン", icon: <Puzzle /> },
+        // The plugins that the catalog has a newer version of.
+        { id: "plugins", label: "プラグイン", icon: <Puzzle />, badge: updateCount(plugins, catalog) || undefined },
         { id: "settings", label: "設定", icon: <Settings /> },
       ],
     },
@@ -271,6 +273,7 @@ export function App() {
               <WorktreeView
                 key={worktreeKey(route.machine, route.path)}
                 worktree={worktrees.find((w) => w.id === worktreeKey(route.machine, route.path))}
+                view={route.view}
                 onSessionAction={setSessionAction}
               />
             )}

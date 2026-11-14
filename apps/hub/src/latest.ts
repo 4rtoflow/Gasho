@@ -2,6 +2,8 @@
 // its token from the user's .npmrc, as `npx @4rtoflow/gasho-daemon` does). Browsers show them beside what each working
 // server runs, and offer the update (daemon.update).
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import type { LatestVersions } from "@gasho/protocol";
 
 /** The package gasho-daemon is published as (apps/daemon/src/install.ts). */
@@ -12,6 +14,13 @@ export const LATEST_INTERVAL_MS = 30 * 60_000;
 const MIN_RECHECK_MS = 15_000;
 const LOOKUP_TIMEOUT_MS = 60_000;
 const VERSION_RE = /^\d{1,9}\.\d{1,9}\.\d{1,9}$/;
+
+/** npm: GASHO_NPM_BIN, or the npm beside the Node.js that runs the Gasho server, or the one on PATH. */
+export function npmBin(env: NodeJS.ProcessEnv = process.env, node = process.execPath): string {
+  if (env.GASHO_NPM_BIN) return env.GASHO_NPM_BIN;
+  const beside = path.join(path.dirname(node), "npm");
+  return fs.existsSync(beside) ? beside : "npm";
+}
 
 /** `npm view <name> version`: the version the `latest` tag points at. */
 export function npmLatest(npm: string, name: string): Promise<string> {

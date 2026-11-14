@@ -18,7 +18,7 @@ Gasho のプラグインは、Gasho の画面の決まった場所に、項目�
 | プラグインの画面 | サイドバーの「プラグイン」から開くページ（`#/plugins`）。ホームや設定と同じく、メインの領域に出す。GashoPlugins のプラグインを追加・更新し、有効・無効を切り替え、外す |
 | 画面の部分 | ブラウザーで動く ES モジュール（`web.js`）。拡張点に部品を足す |
 | daemon の部分 | gasho-daemon が working server の子プロセスで動かす ES モジュール（`daemon.js`）。画面の部分から呼ばれて、コマンドを実行したりファイルを読んだりする |
-| 拡張点 | プラグインが部品を足せる、画面の決まった場所。サイドバー、ページ、セッションのヘッダー、セッションのパネル、設定、ホームのタイル、会話の末尾、入力欄の下の8つ |
+| 拡張点 | プラグインが部品を足せる、画面の決まった場所。サイドバー、ページ、セッションのヘッダー、セッションのパネル、設定、ホームのタイル、会話の末尾、入力欄の下、worktree のタブの9つ |
 | ホットリロード | 動いている Gasho で、プラグインを新しい版に入れ替えること。ページの読み込み直しも、Gasho サーバーと gasho-daemon の起動し直しも要らない |
 | SDK | プラグインを書くための npm パッケージ。Gasho のリポジトリの `packages/plugin-sdk/` で作り、GitHub Packages に `@4rtoflow/gasho-plugin-sdk` として公開する。プラグインのコードでは `@gasho/plugin-sdk` の名前で使う |
 
@@ -51,8 +51,9 @@ Gasho のプラグインは、Gasho の画面の決まった場所に、項目�
 | P12 | 作っているプラグインを、Gasho サーバーのコマンドで、リンクして入れる |
 | P13 | セッション画面の会話の末尾（最後の発言の下、入力欄の上）に部品を足す（API 1.2） |
 | P14 | セッション画面で、入力欄の下の行（キーの案内と文字数の行）に部品を足す（API 1.4） |
+| P15 | worktree のセッションのタブの行に、タブを足す。押すと、セッションと同じ場所にプラグインの画面を出す（API 1.5） |
 
-P6 は、いまの GitHub の機能がホームにタイルを持っているので足した。P8 は GitHub では使わないが、working server の様子を監視するプラグインのために用意する。P13 は、エージェントが作業しているあいだ、その様子を会話に出すプラグインのために、API 1.2 で足した。P14 は、セッションの Context Window の使用率と、Claude.ai のプランで決まっている使用量の上限を出すプラグインのために、API 1.4 で足した。
+P6 は、いまの GitHub の機能がホームにタイルを持っているので足した。P8 は GitHub では使わないが、working server の様子を監視するプラグインのために、API 1.5 で足した。P13 は、エージェントが作業しているあいだ、その様子を会話に出すプラグインのために、API 1.2 で足した。P14 は、セッションの Context Window の使用率と、Claude.ai のプランで決まっている使用量の上限を出すプラグインのために、API 1.4 で足した。P15 は、worktree の Issue と Pull request を、セッションと並んだタブで開くプラグイン（GashoPlugins の github-allmighty）のために、API 1.5 で足した。
 
 ## 構成
 
@@ -145,7 +146,7 @@ GitHub プラグインの場合は、次のようになる。
 | `id` | 英小文字で始まり、英小文字・数字・`-` からなる2〜32文字。GashoPlugins のディレクトリの名前と同じにする。URL、保存のキー、操作のログに使う |
 | `name`、`description` | 画面に出す名前（40文字まで）と説明 |
 | `version` | プラグインの版（1.2.0 の形）。GashoPlugins に新しい版を出すときに上げる。プラグインの画面は、カタログの版が入れた版より新しいときに「更新」を出す。ホットリロードで入れ替えるかは、版ではなく中身のハッシュで判断する |
-| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した。1.4 で、入力欄の下（P14、`composerFooter`）、SDK の `Popover`、`SessionInfo` の `context` と `limits` を足し、プラグイン専用のフォルダーで動く Claude Code をセッションとして扱わないようにした |
+| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した。1.2 で、会話の末尾（P13、`conversationEnd`）と `useSessionActivity` を足した。1.3 で、daemon の部分の `ctx.github` を足した。1.4 で、入力欄の下（P14、`composerFooter`）、SDK の `Popover`、`SessionInfo` の `context` と `limits` を足し、プラグイン専用のフォルダーで動く Claude Code をセッションとして扱わないようにした。1.5 で、daemon の部分の `ctx.emit` と画面の部分の `useEvent`（P8）、worktree のタブ（P15、`worktreeTabs`・`worktreeViews`）、`useNavigation` の `worktreeHref`・`openWorktreeView` を足した |
 | `web`、`daemon` | 画面の部分と daemon の部分のファイル。少なくともどちらか1つは要る |
 | `methods` | 画面の部分から呼べる、daemon の部分のメソッド。`kind` は、読むだけのもの（`read`）か、何かを変えるもの（`write`）か。`write` の呼び出しは操作のログに残す。`timeoutSeconds` は待つ時間で、既定は15秒、長くても120秒まで |
 | `permissions` | 読む・出す以外に、画面の部分がすること。`session.input`（セッションに発言を送る）と `session.launch`（セッションを起動する。API 1.1） |
@@ -155,11 +156,11 @@ GitHub プラグインの場合は、次のようになる。
 
 ### 画面のどこに出るか
 
-セッション画面では、サイドバーの項目（P1）、ヘッダーの項目（P3）、パネル（P4）、会話の末尾の部品（P13）、入力欄の下の部品（P14）が次の場所に出る。サイドバーの「プラグイン」は Gasho の項目で、プラグインの画面（P9）を開く。
+セッション画面では、サイドバーの項目（P1）、ヘッダーの項目（P3）、パネル（P4）、会話の末尾の部品（P13）、入力欄の下の部品（P14）、worktree のタブ（P15）が次の場所に出る。サイドバーの「プラグイン」は Gasho の項目で、プラグインの画面（P9）を開く。
 
 ```
 ┌────────────────┬───────────────────────────────────┬─────────────────┐
-│ Gasho          │ * gasho-plugin  * api  ＋         │ Issues        x │
+│ Gasho          │ * gasho-plugin  * api ＋ #30 ◀P15 │ Issues        x │
 │                ├───────────────────────────────────┤ 4rtoflow/Gasho  │
 │ ホーム         │ gasho-plugin               作業中 │                 │
 │ リポジトリ ◀P1 │ Gasho main  Issues PRs ファイル   ├─────────────────┤
@@ -178,6 +179,7 @@ P1 サイドバーの項目 ─▶ P2 のページを開く（#/p/<ID>/<ペー�
 P3 ヘッダーの項目   ─▶ P4 のパネルを右に開く（スマホでは画面全体）
 P13 会話の末尾      ─▶ 最後の発言の下に出し、会話と一緒にスクロールする
 P14 入力欄の下      ─▶ 入力欄の下の行で、文字数の左に出す（スマホでも出す）
+P15 worktree のタブ ─▶ タブの下に、セッションの代わりにプラグインの画面を出す
 ```
 
 ホームのタイル（P6）と、設定画面のプラグインの区切り（P5）は、次の場所に出る。
@@ -377,6 +379,48 @@ Gasho から起動したセッションの `SessionInfo` には、Claude Code �
 
 `limits` は、Claude Code が API の返答のヘッダーから読む値で、モデルごとの週の上限（Fable など）は入らない。モデルごとの週の上限は、Claude Code の `/usage` が、Claude.ai の使用量のエンドポイントから読んでいる。プラグインで出すときは、daemon の部分で Claude Code を動かして読む（「プラグインが動かす Claude Code」）。
 
+### worktree のタブ（P15）
+
+タブは、セッション画面の上の、worktree のセッションが並ぶタブの行に足す（API 1.5）。セッションのタブと「＋」の後ろに、区切りの線を挟んで並べる。押すと、タブの下の、セッションを出している場所に、プラグインの画面を出す。セッションを開いているときも、セッションの無い worktree の画面でも、同じタブを出す。
+
+```tsx
+worktreeTabs: [{ id: "issue", useTabs: useIssueTab }],
+worktreeViews: { issue: IssueView },
+```
+
+```tsx
+// ブランチ名の番号の Issue（feat/17-… なら #17）を、タブにする。番号の無いブランチと GitHub にないリポジトリには出さない
+function useIssueTab({ worktree, daemon }: WorktreeContext): WorktreeTab[] {
+  const number = /^[a-z]+\/(\d+)-/.exec(worktree.branch ?? "")?.[1];
+  if (!daemon.ready || !worktree.github || !number) return [];
+  return [{ label: `#${number}`, icon: CircleDot, view: "issue", params: { number } }];
+}
+```
+
+`worktreeTabs` の項目は、`useTabs` で、worktree ごとのタブの一覧を返す。`useTabs` は React のフックで、タブの行を描くたびに呼ぶ。返したタブだけを出し、空の一覧を返した worktree には、そのプラグインのタブを出さない。中で `useRequest` を使えば、daemon の部分から読んだ結果でタブの数や名前を変えられる。手で worktree に足した Issue を、1件ずつタブにするときに使う。
+
+`useTabs` は、working server（`machine`）、worktree（`worktree`）、このプラグインの daemon の部分をその working server で使えるか（`daemon`）を受け取る。タブは、名前（`label`）、アイコン（`icon`）、ポインターを乗せたときの説明（`title`）、開く画面（`view`）とその引数（`params`）、バッジ（`badge`）を持つ。並ぶ位置は、項目の `order`（既定は500）の順で、同じ数ならプラグインの順、同じ項目の中では返した順にする。
+
+押すと、`worktreeViews` の `view` の画面を出す。開いている画面と `view` が同じで、タブに書いた引数がすべて URL の引数と同じタブを、選んだ状態で出す。画面の URL は `#/w/<working server の ID>/<worktree のフォルダー>/p/<プラグインの ID>/<画面の ID>` で、引数はクエリにする（`#/w/mac/%2FUsers%2Fme%2Fapp/p/github-allmighty/issue?number=17`）。フォルダーは、`/` を含めて1つの区切りにする。URL は worktree ごとなので、同じ worktree のどのセッションのタブから開いても、同じ画面になる。
+
+画面の部品は、working server（`machine`）、worktree（`worktree`）、引数（`params`）を受け取る。`worktree` は、サイドバーの worktree の一覧の1行と同じもので、次のものを持つ。
+
+| 名前 | 中身 |
+|---|---|
+| `path` | worktree の最上位のフォルダー。リポジトリの外のフォルダーのセッションでは、そのフォルダー |
+| `branch` | いまのブランチ。HEAD が detached のとき、リポジトリの外、worktree を調べない前の版の gasho-daemon では、ない |
+| `repo` | リポジトリのフォルダー（main の worktree のフォルダーで、同じリポジトリの worktree はどれも同じ）。リポジトリの外では、ない |
+| `github` | GitHub のリポジトリ。GitHub にないときは、ない |
+| `sessions` | その worktree の Gasho のセッション。タブと同じ順 |
+
+セッションが無くなってサイドバーに残した worktree では、`sessions` が空で、`branch` と `github` は、最後にセッションがあったときのものになる。
+
+画面から daemon の部分のメソッドを呼ぶときは、セッションを指さなくてよい。GitHub の Issue や Pull request を読むだけなら、`worktree.github` と `worktree.branch` を引数で渡し、daemon の部分が `ctx.github.read` に `--repo` で渡す。worktree のフォルダーで git などを動かすときは、`worktree.sessions` のセッションを指して呼ぶ（daemon の部分の `ctx.session` になる）か、daemon の部分が `ctx.folders()` でフォルダーを確かめる。ブラウザーから来たパスを信用しないのは、ほかの呼び出しと同じである。
+
+画面のあいだを移るときは、`useNavigation` の `openWorktreeView(画面, 引数)` を使う。セッションの中（ヘッダーの項目やパネル）から呼ぶと、そのセッションの worktree の画面を開く。ホームのタイルのように worktree の外からは、`at` に working server の ID と worktree のフォルダーを渡す。
+
+プラグインがまだ読み込まれていないあいだは、画面の場所に「読み込み中…」を出す。無効か、ないか、読み込めなかったときと、`view` の画面がないときは、そのことを出す。`useTabs` がエラーになったときは、そのプラグインのタブを出さず、プラグインの画面にエラーを出す。
+
 ## 画面の部分から使えるもの
 
 画面の部分は、Gasho の状態と操作を、SDK のフックと関数で使う。プラグインが SDK だけを使うようにするのは、Gasho の中を変えても、プラグインが壊れないようにするためである。
@@ -388,10 +432,10 @@ Gasho から起動したセッションの `SessionInfo` には、Claude Code �
 | `useDaemonReady(machine)` | その working server で、このプラグインの daemon の部分が動いているか。動いていないときは、その理由 |
 | `useRequest(呼び出し, 指定)` | daemon の部分のメソッドを呼び、結果を覚えておく（P7） |
 | `useCall()` | daemon の部分のメソッドを1回呼ぶ関数を返す。`write` のメソッドに使う。`summary` に書いたことは、操作のログに残る |
-| `useEvent(topic, { machine })` | daemon の部分から届いたイベントの、最後のデータ（P8、第2段階） |
+| `useEvent(topic, { machine })` | daemon の部分がその working server から送ったイベントの、最後のデータ。まだ届いていなければ `undefined`（P8、API 1.5） |
 | `useSetting(key)` | 設定の値と、値を変える関数（P5） |
 | `usePluginState(key, 初期値)` | ページを開いているあいだ Gasho が覚えておく値。ホットリロードで部品を作り直しても残り、ページを読み込み直すと消える |
-| `useNavigation()` | このプラグインのページとパネルを開く・閉じる・戻る。ホームのタイルのようにセッションの外からは、セッションを指定してパネルを開く。`<a href>` に入れる URL も作る。`openSession(machine, sessionId)` と `sessionHref(…)` で、Gasho のセッションの画面に移る（API 1.1） |
+| `useNavigation()` | このプラグインのページとパネルを開く・閉じる・戻る。ホームのタイルのようにセッションの外からは、セッションを指定してパネルを開く。`<a href>` に入れる URL も作る。`openSession(machine, sessionId)` と `sessionHref(…)` で、Gasho のセッションの画面に移る（API 1.1）。`openWorktreeView(画面, 引数, at)` と `worktreeHref(…)` で、worktree のタブの画面を開く（API 1.5、P15） |
 | `useSendInput()` | セッションに発言を送る関数を返す。引数は `{ machine, sessionId, text }`。`permissions` に `session.input` が要る。入力欄から送ったときと同じく、会話の末尾にすぐ出し、操作のログに残す |
 | `useLaunchSession()` | working server のフォルダーでセッションを起動する関数を返す（API 1.1）。引数は `{ machine, cwd, name, trust }`。`permissions` に `session.launch` が要る。「新しいセッション」と同じく起動し、操作のログに残す。Claude Code がフォルダーを信頼するかを聞いたときは起動せず、`needsTrust` を返す。利用者に確かめてから `trust: true` で呼び直す |
 | `useSessionActivity(machine, sessionId)` | セッションがいまの作業を始めた時刻（`turnStartedAt`）と、動いているツール（`tool`）（API 1.2、P13） |
@@ -500,7 +544,7 @@ export default defineDaemonPlugin({
 | `ctx.signal` | 待つ時間を過ぎたときと、子プロセスを止めるときに、中断を知らせる AbortSignal |
 | `ctx.exec(コマンド, 引数, 指定)` | コマンドを、シェルを通さず、制御端末なしで実行する。gh と git が入力を求めて止まらないよう、`GH_PROMPT_DISABLED=1` と `GIT_TERMINAL_PROMPT=0` を付け、待つ時間と出力の大きさに上限を付ける。待つ時間を過ぎたら、プロセスグループに SIGTERM を送る |
 | `ctx.github` | working server の gh を、gasho-daemon に実行してもらう。`read(引数, 指定)` で読み、`write(引数, { repo })` で GitHub を変える。gh は `ctx.exec` ではなく、これで動かす（「GitHub を読む・変える」、API 1.3） |
-| `ctx.emit(topic, data, 指定)` | 画面にイベントを送る（P8） |
+| `ctx.emit(topic, data, 指定)` | 画面にイベントを送る。`start` からも送れる（P8、API 1.5） |
 | `ctx.log(…)` | gasho-daemon のログに、プラグインの ID を付けて書く |
 
 引数はブラウザーから来るので、daemon の部分が自分で確かめる。`PluginError` で投げたメッセージは、そのまま画面に出す。ほかのエラーは、画面には「処理に失敗しました」とだけ出し、中身は gasho-daemon のログに書く。
@@ -544,11 +588,25 @@ daemon の部分をどの working server で動かすかは、プラグインを
 
 プラグインに対応した gasho-daemon は、対応するプラグインの API の版を、Gasho サーバーに知らせる。古い gasho-daemon の working server では、daemon の部分を使えない。Gasho サーバーは、そこへの呼び出しに「この working server の gasho-daemon は古いため、プラグインを使えません。gasho-daemon を更新してください。」と返す。画面の部分には、`daemon.ready` が false で届く。
 
-### イベント（P8）
+### イベント（P8、API 1.5）
 
 daemon の部分は、`ctx.emit(topic, data)` で、画面にイベントを送れる。Gasho サーバーは、イベントをすべてのブラウザーに送る。画面の部分は、`useEvent(topic, { machine })` で、その working server から届いた最後のデータを読む。`retain: true` を付けたイベントは、Gasho サーバーが、プラグイン・working server・topic ごとに最後のものを覚えておき、あとからつないだブラウザーにも送る。長い処理の進み具合や、監視しているものの状態を、ブラウザーから一定の間隔で呼び出さなくても画面に出せるようにするためのものである。
 
-data は 256KB までにし、同じ topic のイベントは1秒に1回までにする。それより多く送ったときは、gasho-daemon が、最後のものだけを1秒たってから送る。
+```ts
+// daemon の部分：監視しているものの状態。あとからつないだブラウザーにも届くように retain を付ける
+ctx.emit("state", { running: 3 }, { retain: true });
+
+// 画面の部分：その working server から届いた最後のデータ（まだ届いていなければ undefined）
+const state = useEvent<{ running: number }>("state", { machine: machine.id });
+```
+
+- topic は、100文字までの文字列にする。制御文字は使えない。data は JSON にできる値にし、JSON にして 256KB までにする。どちらかが正しくないと、`ctx.emit` が `PluginError` を投げ、イベントは送らない
+- 同じ topic のイベントは、gasho-daemon が Gasho サーバーに1秒に1回まで送る。1秒のあいだに続けて送ったものは、最後のものだけを、前のイベントから1秒たったときに送る。topic が違えば待たない
+- `start` からも送れる。ホットリロードで新しい版に入れ替えるあいだは、新しい版のイベントだけを送り、入れ替わる古い版のイベントは送らない。プラグインが止まると、まだ送っていないイベントは捨てる
+- Gasho サーバーは、そのプラグインが有効で、その working server で daemon の部分を動かすことになっているときだけ、イベントを受け取る
+- Gasho サーバーは、`retain` のイベントを、プラグインと working server ごとに、新しいほうから32の topic まで覚える。覚えたイベントは、プラグインを無効にしたとき、外したとき、その working server で動かさなくなったとき、新しい版に入れ替わったときに消す。working server との接続が切れても消さない。新しい版の daemon の部分は、`start` で状態を送り直す
+- 画面は、プラグイン・working server・topic ごとに、最後のイベントだけを覚える。Gasho サーバーにつなぎ直すと、Gasho サーバーが覚えている `retain` のイベントから始め直す。プラグインを無効にしたとき、外したとき、新しい版に入れ替わったときは、そのプラグインのイベントを忘れる
+- イベントは、すべてのブラウザーに同じものを送る。開いているパネルごとに違うものや、1秒に何度も届けたいもの（コマンドの出力など）は、呼び出し（P7）で読む
 
 ## プラグインの画面（P9）
 
@@ -591,7 +649,7 @@ data は 256KB までにし、同じ topic のイベントは1秒に1回まで�
 GashoPlugins にあるもの
 ┌────────────────────────────────────────────────────────────────────┐
 │ plugin-b  0.1.0  plugin-b の説明                            [追加] │
-│ plugin-c  0.2.0  この Gasho では使えない（API 1.5 が要る）         │
+│ plugin-c  0.2.0  この Gasho では使えない（API 1.6 が要る）         │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -617,7 +675,7 @@ GashoPlugins にあるもの
 └────────────────────────────────────────────────────┘
 ```
 
-「外す」は、確かめてから、プラグインのファイルと、Gasho サーバーに保存した設定を消す。ブラウザーに覚えた設定（`scope: "browser"`）は、それぞれのブラウザーに残る。開発中のプラグイン（P12 でリンクしたもの）は、カタログから更新しない。外すと、リンクだけを消す。
+「外す」は、確かめてから、プラグインのファイルと、Gasho サーバーに保存した設定を消す。配るために写しておいた版（`~/.cache/gasho/hub-plugins/<ID>/`）も消す。ブラウザーに覚えた設定（`scope: "browser"`）は、それぞれのブラウザーに残る。開発中のプラグイン（P12 でリンクしたもの）は、カタログから更新しない。外すと、リンクだけを消す。
 
 サイドバーの「プラグイン」には、更新できるプラグインの数をバッジで出す。追加、更新、外す、有効・無効の切り替えは、操作のログに残す。どれも、ホットリロードで、開いている画面と gasho-daemon にすぐ反映する。
 
@@ -676,7 +734,9 @@ GashoPlugins の GitHub Actions は、main に push されたとき、`gasho-plu
 
 ### Gasho サーバーが読む
 
-Gasho サーバーは、`GASHO_PLUGIN_REPO`（既定は `4rtoflow/GashoPlugins`）のリポジトリから、`gh release download catalog --pattern catalog.json` でカタログを読む。gh は、Gasho サーバーのマシンでログインしておく。gh は `GASHO_GH_BIN` で変えられる（gasho-daemon と同じ）。カタログを読むのは、プラグインの画面を開いたとき（前に読んでから10分たっていれば）、「再読み込み」を押したとき、6時間ごとである。読めなかったときは、前に読んだカタログを出し、理由を添える。
+Gasho サーバーは、`GASHO_PLUGIN_REPO`（既定は `4rtoflow/GashoPlugins`）のリポジトリから、`gh release download catalog --pattern catalog.json` でカタログを読む。gh は、Gasho サーバーのマシンでログインしておく。gh は `GASHO_GH_BIN` で変えられる（gasho-daemon と同じ）。カタログを読むのは、Gasho サーバーを起動したとき、プラグインの画面を開いたとき（前に読んでから10分たっていれば）、「再読み込み」を押したとき、6時間ごとである。読めなかったときは、前に読んだカタログを出し、理由を添える。読めなかったあとは、1分たっていれば、プラグインの画面を開いたときに読み直す。読んだカタログは、開いているすべての画面に送る。サイドバーの「プラグイン」のバッジは、これを見て数える。
+
+カタログの項目のうち、形の正しくないもの（`id` や `version` の形、`sha256` が64桁の16進数でないものなど）は出さず、Gasho サーバーのログに書く。`release` と `file` は、`<ID>-v<版>` と `<ID>-<版>.tgz` でなければならない。gh に渡す名前を、GashoPlugins の GitHub Actions が作る形に限るためである。
 
 プラグインを追加・更新するときは、Gasho サーバーが次の順に入れる。
 
@@ -686,6 +746,8 @@ Gasho サーバーは、`GASHO_PLUGIN_REPO`（既定は `4rtoflow/GashoPlugins`�
 4. 展開した `gasho-plugin.json` の ID と版が、カタログと同じかを確かめる
 5. `~/.local/share/gasho/plugins/<ID>/` を、展開したものに入れ替える。入れ替えるまでは前の版を残すので、途中の状態のプラグインを読み込むことはない
 6. ホットリロードと同じ手順で、画面と gasho-daemon に反映する
+
+展開するのは、`~/.local/share/gasho/plugins/` の中の、名前が「.」で始まるフォルダーである。Gasho サーバーは、そうした名前をプラグインとして読まない。同じディスクの中なので、5の入れ替えはフォルダーの名前の変更で済む。追加のときは、ファイルを置く前に、有効にすることと daemon の部分を動かす working server を保存する。daemon の部分が、選んでいない working server で一度でも動き出さないようにするためである。どこかで失敗したときは、保存したものを消し、展開したものも消す。同じプラグインの追加・更新・外すは、1つずつ行う。
 
 更新は自動ではしない。カタログの版が入れた版より新しいときに、プラグインの画面に「更新」を出し、利用者が押したときに入れ替える。
 
@@ -813,7 +875,7 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 
 プラグインの CSS は、そのプラグインの部品の中にだけ当てる。プラグインのクラスは、Gasho のクラスと同じ Tailwind CSS の層に入り、Gasho の CSS より後にあるので、そのまま足すと Gasho の要素にも当たる。たとえば、プラグインの `.flex` が、Gasho のヘッダーの `md:hidden` を上書きし、広い画面でもスマホ用のヘッダーが出る。ほかのプラグインの部品にも同じことが起きる。そこで画面は、`web.css` のスタイルの規則を、部品を包む要素（`data-gasho-plugin="<ID>"`）の中だけに当たるように書き換えてから足す。テーマの変数（`theme` の層）、`@property`、`@keyframes` は、ページ全体に当てる。
 
-- 当たるのは、ページ、セッションのパネル、ホームのタイル、設定、会話の末尾、入力欄の下の部品と、SDK の `Popover` の中。セッションのヘッダーとサイドバーの項目は Gasho が描くので、プラグインの CSS は当たらない
+- 当たるのは、ページ、セッションのパネル、ホームのタイル、設定、会話の末尾、入力欄の下の部品、worktree のタブの画面と、SDK の `Popover` の中。セッションのヘッダー、サイドバーの項目、worktree のタブは Gasho が描くので、プラグインの CSS は当たらない
 - 部品の外（`document.body` など）に要素を出すときは、`data-gasho-plugin="<ID>"` を付けた要素で包む。SDK の `Popover` は、中身をこの要素で包んでページの末尾に出すので、プラグインの CSS が当たる
 
 次のときは、プラグインの画面にそのプラグインを「読み込めない」と理由つきで出し、Gasho のほかの部分はそのまま動かす。
@@ -842,6 +904,7 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 | Gasho サーバー → ブラウザー | `plugin.response` | requestId、結果かエラー |
 | Gasho サーバー → ブラウザー | `snapshot` の `plugins`、`plugins` | 入れたプラグインの一覧。状態、ハッシュ、ファイルの URL、設定の項目と値、working server ごとの daemon の部分の状態。一覧が変わるたびに送る |
 | Gasho サーバー → ブラウザー | `plugin.event` | プラグイン、working server、topic、data |
+| Gasho サーバー → ブラウザー | `snapshot` の `pluginEvents` | Gasho サーバーが覚えている `retain` のイベント |
 | Gasho サーバー → gasho-daemon | `plugins` | 有効なプラグインの ID、`daemon.js` のハッシュ、設定の値、この working server で動かすか。つないだときと、変わったときに送る |
 | Gasho サーバー → gasho-daemon | `plugin.request` | requestId、プラグイン、セッション、メソッド、引数、`write` のメソッドか（`ctx.github.write` を使えるか） |
 | Gasho サーバー → gasho-daemon | `plugin.code` | `daemon.js` の中身。gasho-daemon が求めたときに送る |

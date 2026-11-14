@@ -675,6 +675,9 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:plugin.enable": Puzzle,
   "Gasho:plugin.machines": Puzzle,
   "Gasho:plugin.setting": Puzzle,
+  "Gasho:plugin.install": Puzzle,
+  "Gasho:plugin.update": Puzzle,
+  "Gasho:plugin.remove": Puzzle,
   "Gasho:daemon.update": CircleArrowUp,
 };
 
@@ -744,6 +747,10 @@ function operationText(e: MachineHookEvent): string {
   }
   if (e.event === "Gasho:plugin.machines") return `プラグインを動かす working server を変更：${summary}`;
   if (e.event === "Gasho:plugin.setting") return `プラグインの設定を変更：${summary.replace(/ = .*$/, "")}`;
+  // "Name 1.2.0", "Name 1.2.0 → 1.3.0", "Name" ("Name [link]" for one being developed).
+  if (e.event === "Gasho:plugin.install") return `プラグインを追加：${summary}`;
+  if (e.event === "Gasho:plugin.update") return `プラグインを更新：${summary}`;
+  if (e.event === "Gasho:plugin.remove") return `プラグインを外した：${summary.replace(/\s*\[link\]$/, "")}`;
   if (e.event === "Gasho:plugin.call") return summary;
   // "0.15.0 → 0.16.0": the version it ran and the one asked for.
   if (e.event === "Gasho:daemon.update") return `gasho-daemon を更新：${summary}`;
