@@ -121,6 +121,61 @@ export interface ConversationEndItem {
   component: ComponentType<ConversationEndProps>;
 }
 
+/** A worktree of a working server, for the tabs a plugin adds to it and the screens they open (P15). Plugin API 1.5. */
+export interface WorktreeInfo {
+  /** Its top folder on the working server. For sessions in a folder outside a repository, that folder. */
+  path: string;
+  /** The branch checked out. Absent when HEAD is detached, outside a repository, and from an older gasho-daemon. */
+  branch?: string;
+  /** The folder of its repository: of the main worktree, which all the repository's worktrees share. Absent outside one. */
+  repo?: string;
+  /** Its repository on GitHub, if it is there. */
+  github?: GitHubRepo;
+  /**
+   * Gasho's sessions in it, in the order of their tabs. None for a worktree the sidebar keeps once its sessions are gone,
+   * and for a worktree of a registered repository that has none.
+   */
+  sessions: SessionInfo[];
+}
+
+/** A worktree, for the tabs a plugin adds to it (P15). */
+export interface WorktreeContext {
+  machine: MachineInfo;
+  worktree: WorktreeInfo;
+  /** This plugin's daemon part on the worktree's working server. */
+  daemon: DaemonReadiness;
+}
+
+/** A tab beside a worktree's sessions (P15). Pressing it opens the plugin's `worktreeViews[view]` with `params` there. */
+export interface WorktreeTab {
+  label: string;
+  icon?: Icon;
+  /** Shown on hover (by default the label). */
+  title?: string;
+  view: string;
+  params?: Params;
+  /** A number or a short text beside the label. */
+  badge?: string | number;
+}
+
+/**
+ * What adds tabs to the worktrees (P15). They go after the sessions' tabs and their "＋". Plugin API 1.5.
+ * `useTabs` is a React hook, called whenever a worktree's tabs are drawn: the tabs for that worktree (none, one or several).
+ */
+export interface WorktreeTabItem {
+  id: string;
+  /** Where its tabs go among the plugins' tabs: a smaller one comes first. By default 500. */
+  order?: number;
+  useTabs: (ctx: WorktreeContext) => WorktreeTab[] | undefined;
+}
+
+/** A screen a worktree's tab opens, below the tabs, where a session shows (P15): #/w/<machine>/<folder>/p/<plugin>/<view>?<params>. */
+export interface WorktreeViewProps {
+  machine: MachineInfo;
+  worktree: WorktreeInfo;
+  params: Params;
+}
+
 /** A part in the line under a session's chat box (P14), and the session it is drawn for. */
 export interface ComposerFooterProps {
   machine: MachineInfo;
@@ -152,6 +207,10 @@ export interface PluginDefinition {
   settings?: ComponentType;
   /** Parts at the end of a session's conversation (P13). Plugin API 1.2. */
   conversationEnd?: ConversationEndItem[];
+  /** Tabs beside a worktree's sessions (P15). Plugin API 1.5. */
+  worktreeTabs?: WorktreeTabItem[];
+  /** The screens the worktree's tabs open (P15). Plugin API 1.5. */
+  worktreeViews?: Record<string, ComponentType<WorktreeViewProps>>;
   /** Parts in the line under a session's chat box (P14). Plugin API 1.4. */
   composerFooter?: ComposerFooterItem[];
 }
@@ -204,6 +263,13 @@ export interface Navigation {
   sessionHref(machine: string, sessionId: string): string;
   /** Opens Gasho's screen of a session (plugin API 1.1). */
   openSession(machine: string, sessionId: string): void;
+  /**
+   * A screen of the plugin's worktree tabs (P15): in the worktree on screen (or the worktree of the session on screen),
+   * or in `at` (its working server and top folder). Plugin API 1.5.
+   */
+  worktreeHref(view: string, params?: Params, at?: { machine: string; path: string }): string;
+  /** Opens a screen of the plugin's worktree tabs, as worktreeHref (a new entry of the browser's history). Plugin API 1.5. */
+  openWorktreeView(view: string, params?: Params, at?: { machine: string; path: string }): void;
 }
 
 /**
@@ -288,6 +354,12 @@ export interface GashoSdk {
   useLaunchSession(): (input: { machine: string; cwd: string; name?: string; trust?: boolean }) => Promise<LaunchResult>;
   /** What a session is working on: since when, and with which tool (plugin API 1.2). */
   useSessionActivity(machine: string, sessionId: string): SessionActivity;
+  /**
+   * The data of the last event of a topic that this plugin's daemon part sent from a working server (ctx.emit, plugin
+   * API 1.5); undefined until one came. Events kept by the Gasho server (retain) come when the page connects. A new
+   * version of the plugin starts without the events of the one before.
+   */
+  useEvent<T = unknown>(topic: string, options: { machine: string }): T | undefined;
   /** The current time, renewed every `intervalMs` (30 s by default). */
   useNow(intervalMs?: number): number;
   /** The GitHub repositories of a session: its folder's, or those of the repositories inside it. */
@@ -328,6 +400,7 @@ export declare const useNavigation: GashoSdk["useNavigation"];
 export declare const useSendInput: GashoSdk["useSendInput"];
 export declare const useLaunchSession: GashoSdk["useLaunchSession"];
 export declare const useSessionActivity: GashoSdk["useSessionActivity"];
+export declare const useEvent: GashoSdk["useEvent"];
 export declare const useNow: GashoSdk["useNow"];
 export declare const githubRepos: GashoSdk["githubRepos"];
 export declare const panelRepo: GashoSdk["panelRepo"];

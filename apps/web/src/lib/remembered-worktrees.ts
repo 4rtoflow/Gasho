@@ -17,7 +17,9 @@ function valid(x: unknown): x is RememberedWorktree {
     typeof r.label === "string" &&
     typeof r.subfolders === "boolean" &&
     (r.repo === undefined || typeof r.repo === "string") &&
-    (r.repoPath === undefined || typeof r.repoPath === "string")
+    (r.branch === undefined || typeof r.branch === "string") &&
+    (r.repoFolder === undefined || typeof r.repoFolder === "string") &&
+    (r.github === undefined || (typeof r.github?.owner === "string" && typeof r.github.name === "string" && typeof r.github.url === "string"))
   );
 }
 

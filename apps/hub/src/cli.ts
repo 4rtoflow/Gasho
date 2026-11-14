@@ -1,11 +1,11 @@
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { dbFileOf, loadConfig, pluginsDirOf } from "./config.ts";
+import { ghRunner, PluginCatalogSource } from "./catalog.ts";
 import { Hub } from "./hub.ts";
 import { buildAllowList } from "./netallow.ts";
-import { PluginRegistry, readPluginFolder } from "./plugins.ts";
+import { PluginRegistry, readPluginFolder, removePluginFolder, swapPluginFolder } from "./plugins.ts";
 import { createServer } from "./server.ts";
 import { Store } from "./store.ts";
 
@@ -18,7 +18,8 @@ const usage = `usage:
   node src/cli.ts plugin add --link <folder>   install it as a link, for a plugin being developed (hot reload)
   node src/cli.ts plugin list                  list the installed plugins
   node src/cli.ts plugin remove <id>           remove a plugin, and the settings the Gasho server keeps for it
-The running Gasho server picks up added, changed and removed plugins at once (GASHO_PLUGINS_DIR).`;
+The running Gasho server picks up added, changed and removed plugins at once (GASHO_PLUGINS_DIR). The plugins of
+GashoPlugins (GASHO_PLUGIN_REPO) are added from the plugins screen instead.`;
 
 function lanAddresses(): string[] {
   return Object.values(os.networkInterfaces())
@@ -38,18 +39,25 @@ async function start(): Promise<void> {
     log: (s) => console.log(`${new Date().toISOString()} [gasho-hub] ${s}`),
   });
   await plugins.start().catch((e: unknown) => console.error(`[gasho-hub] cannot read the plugins in ${cfg.pluginsDir}`, e));
-  const hub = new Hub(store, { plugins });
+  const catalog = new PluginCatalogSource({
+    repo: cfg.pluginRepo,
+    gh: ghRunner(cfg.ghBin),
+    log: (s) => console.log(`${new Date().toISOString()} [gasho-hub] ${s}`),
+  });
+  catalog.start();
+  const hub = new Hub(store, { plugins, catalog });
   const server = createServer({ hub, store, webDist: cfg.webDist, allow: buildAllowList(cfg.allowNets), plugins });
   server.listen(cfg.port, cfg.host, () => {
     const log = (s: string) => console.log(`${new Date().toISOString()} [gasho-hub] ${s}`);
     log(`listening on ${cfg.host}:${cfg.port} (db: ${cfg.dbFile})`);
     log(`allowed networks: ${cfg.allowNets.join(", ")}`);
-    log(`plugins: ${cfg.pluginsDir}`);
+    log(`plugins: ${cfg.pluginsDir} (catalog: ${cfg.pluginRepo})`);
     if (cfg.host === "0.0.0.0") for (const a of lanAddresses()) log(`open http://${a}:${cfg.port} from the LAN`);
     if (store.listDevices().length === 0) log('no devices are registered yet; run "npm run hub:pair" to get a code');
   });
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {
+      catalog.stop();
       plugins.close();
       server.close();
       store.close();
@@ -81,10 +89,7 @@ async function plugin(argv: string[]): Promise<void> {
     await fsp.rm(tmp, { recursive: true, force: true });
     if (link) await fsp.symlink(await fsp.realpath(from), tmp);
     else await fsp.cp(from, tmp, { recursive: true, dereference: true });
-    const old = path.join(dir, `.${id}-old-${process.pid}`);
-    if (fs.existsSync(target) || (await fsp.lstat(target).catch(() => undefined))) await fsp.rename(target, old);
-    await fsp.rename(tmp, target);
-    await fsp.rm(old, { recursive: true, force: true });
+    await swapPluginFolder(dir, id, tmp);
     console.log(`${link ? "linked" : "installed"} ${name} ${version} (${id}) in ${target}${link ? ` -> ${await fsp.realpath(from)}` : ""}`);
     return;
   }
@@ -104,9 +109,7 @@ async function plugin(argv: string[]): Promise<void> {
   if (sub === "remove") {
     const id = rest[0];
     if (!id || id.includes("/") || id.startsWith(".")) return fail(usage);
-    const target = path.join(dir, id);
-    if (!(await fsp.lstat(target).catch(() => undefined))) return fail(`no plugin ${id} in ${dir}`);
-    await fsp.rm(target, { recursive: true, force: true });
+    if (!(await removePluginFolder(dir, id))) return fail(`no plugin ${id} in ${dir}`);
     const store = new Store(dbFileOf());
     store.forgetPlugin(id);
     store.close();

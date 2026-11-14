@@ -677,6 +677,9 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:plugin.enable": Puzzle,
   "Gasho:plugin.machines": Puzzle,
   "Gasho:plugin.setting": Puzzle,
+  "Gasho:plugin.install": Puzzle,
+  "Gasho:plugin.update": Puzzle,
+  "Gasho:plugin.remove": Puzzle,
 };
 
 /**
@@ -745,6 +748,10 @@ function operationText(e: MachineHookEvent): string {
   }
   if (e.event === "Gasho:plugin.machines") return `プラグインを動かす working server を変更：${summary}`;
   if (e.event === "Gasho:plugin.setting") return `プラグインの設定を変更：${summary.replace(/ = .*$/, "")}`;
+  // "Name 1.2.0", "Name 1.2.0 → 1.3.0", "Name" ("Name [link]" for one being developed).
+  if (e.event === "Gasho:plugin.install") return `プラグインを追加：${summary}`;
+  if (e.event === "Gasho:plugin.update") return `プラグインを更新：${summary}`;
+  if (e.event === "Gasho:plugin.remove") return `プラグインを外した：${summary.replace(/\s*\[link\]$/, "")}`;
   if (e.event === "Gasho:plugin.call") return summary;
   // The folder's last name; "[trust]" when Claude Code was told to trust it.
   if (e.event === "Gasho:session.launch" || e.event === "Gasho:folder.create") {

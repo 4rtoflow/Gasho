@@ -51,6 +51,13 @@ test("a worktree is named by its branch, else its folder, and its repository by 
       ["notes", undefined],
     ],
   );
+  // What plugins get of a worktree (docs/plugins.md, P15), also once its sessions are gone and the sidebar keeps it.
+  const [gasho, , notes] = list;
+  assert.ok(gasho && notes);
+  assert.deepEqual([gasho.branch, gasho.repoFolder, gasho.github], ["main", "/w/gasho", github]);
+  assert.deepEqual([notes.branch, notes.repoFolder, notes.github], [undefined, undefined, undefined]);
+  const [kept] = worktreesByLastUse([machine("mac", [])], [rememberedOf(gasho)]);
+  assert.deepEqual([kept?.branch, kept?.repoFolder, kept?.github], ["main", "/w/gasho", github]);
 });
 
 test("remembered worktrees without sessions come last, once each; the tab after a removed one is the next, else the one before", () => {
@@ -79,6 +86,7 @@ test("a registered repository's other worktrees follow those with sessions, and 
     repos: [
       {
         path: "/src/app",
+        github: { owner: "o", name: "app", url: "https://github.com/o/app" },
         worktrees: [
           // Switched since the session's worktree was read.
           { path: "/src/app", branch: "feat/y" },
@@ -90,13 +98,22 @@ test("a registered repository's other worktrees follow those with sessions, and 
   };
   const remembered = [
     // Removed with git since: the repository's list no longer has it.
-    { machine: "mac", path: "/src/app-old", label: "feat/old", repo: "app", repoPath: "/src/app", subfolders: true },
-    { machine: "mac", path: "/lib", label: "main", repo: "lib", repoPath: "/lib", subfolders: true },
+    { machine: "mac", path: "/src/app-old", label: "feat/old", repo: "app", repoFolder: "/src/app", subfolders: true },
+    { machine: "mac", path: "/lib", label: "main", repo: "lib", repoFolder: "/lib", subfolders: true },
   ];
   const list = worktreesByLastUse([mac], remembered);
   assert.deepEqual(
     list.map((w) => `${w.label} ${w.sessions.length}${w.registered ? " registered" : ""}`),
     ["notes 1", "feat/y 1 registered", "feat/x 0 registered", "app-detached 0 registered", "main 0"],
+  );
+  // What plugins get of them (docs/plugins.md, P15) comes from git's list too.
+  assert.deepEqual(
+    list.slice(1, 4).map((w) => [w.branch, w.repoFolder, w.github?.name]),
+    [
+      ["feat/y", "/src/app", undefined],
+      ["feat/x", "/src/app", "app"],
+      [undefined, "/src/app", "app"],
+    ],
   );
   assert.deepEqual(
     repoChoices(list).map((r) => [r.key, r.name]),
