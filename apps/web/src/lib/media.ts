@@ -23,6 +23,17 @@ export function useMediaQuery(query: string): boolean {
   );
 }
 
+/** The window's width in px. */
+export function useWindowWidth(): number {
+  return useSyncExternalStore(
+    (l) => {
+      window.addEventListener("resize", l);
+      return () => window.removeEventListener("resize", l);
+    },
+    () => window.innerWidth,
+  );
+}
+
 /** Whether the screen is a computer's right now (outside React). */
 export function isDesktop(): boolean {
   return matches(DESKTOP);
