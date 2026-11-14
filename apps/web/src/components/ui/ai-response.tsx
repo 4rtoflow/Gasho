@@ -435,7 +435,7 @@ const Shimmer: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     <motion.span
       className="bg-clip-text text-transparent"
       style={{
-        backgroundImage: "linear-gradient(90deg, rgb(115 115 115) 35%, rgb(212 212 212) 50%, rgb(115 115 115) 65%)",
+        backgroundImage: "linear-gradient(90deg, var(--color-neutral-500, rgb(115 115 115)) 35%, var(--color-neutral-300, rgb(212 212 212)) 50%, var(--color-neutral-500, rgb(115 115 115)) 65%)",
         backgroundSize: "250% 100%",
       }}
       animate={reduce ? undefined : { backgroundPosition: ["120% 0", "-120% 0"] }}
@@ -871,7 +871,7 @@ export const AIResponse: React.FC<AIResponseProps> = ({
         aria-label="AI response"
         aria-busy={status === "streaming" || status === "generating"}
         className={cx(
-          "w-full rounded-[20px] bg-white p-4 text-neutral-700 antialiased dark:bg-[#0b0b0c] dark:text-neutral-300 sm:p-6",
+          "w-full rounded-[20px] bg-white p-4 text-neutral-700 antialiased dark:bg-background dark:text-neutral-300 sm:p-6",
           hair,
           className,
         )}

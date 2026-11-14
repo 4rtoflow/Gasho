@@ -562,7 +562,7 @@ export function DataTable<T extends { id: Id }>({
     <div
       role="row"
       className={cx(
-        "sticky top-0 z-10 grid items-center border-b bg-white/90 text-[12px] font-medium backdrop-blur dark:bg-[#0b0b0c]/90",
+        "sticky top-0 z-10 grid items-center border-b bg-white/90 text-[12px] font-medium backdrop-blur dark:bg-background/90",
         hairline,
         scrolled && "shadow-[0_8px_16px_-12px_rgba(0,0,0,0.25)]",
       )}
@@ -642,7 +642,7 @@ export function DataTable<T extends { id: Id }>({
           {...common}
           {...interactive}
           className={cx(
-            "rounded-2xl bg-white p-4 dark:bg-[#0b0b0c]",
+            "rounded-2xl bg-white p-4 dark:bg-background",
             ring,
             isSel && "bg-neutral-50 ring-neutral-900/25 dark:bg-white/[0.04] dark:ring-white/25",
             onRowClick && cx("cursor-pointer", focus),
@@ -682,7 +682,7 @@ export function DataTable<T extends { id: Id }>({
         {...common}
         {...interactive}
         className={cx(
-          "grid items-center border-b bg-white transition-colors duration-150 last:border-b-0 dark:bg-[#0b0b0c]",
+          "grid items-center border-b bg-white transition-colors duration-150 last:border-b-0 dark:bg-background",
           hairline,
           rowMin,
           isSel ? "bg-neutral-50 dark:bg-white/[0.045]" : "[@media(hover:hover)]:hover:bg-neutral-50/70 dark:[@media(hover:hover)]:hover:bg-white/[0.025]",
@@ -743,7 +743,7 @@ export function DataTable<T extends { id: Id }>({
       </div>
 
       <div
-        className={cx(!cards && "overflow-hidden rounded-2xl bg-white dark:bg-[#0b0b0c]", !cards && ring)}
+        className={cx(!cards && "overflow-hidden rounded-2xl bg-white dark:bg-background", !cards && ring)}
         style={!cards ? { boxShadow: "0 1px 2px rgba(0,0,0,0.04), 0 24px 48px -32px rgba(0,0,0,0.2)" } : undefined}
       >
         {cards && header}

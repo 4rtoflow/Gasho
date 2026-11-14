@@ -45,7 +45,7 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
       case 'warning':
         return <AlertCircle className="w-4 h-4 text-amber-400" />;
       default:
-        return <Info className="w-4 h-4 text-[#ECECEC]" />;
+        return <Info className="w-4 h-4 text-neutral-200" />;
     }
   };
 
@@ -54,8 +54,8 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
   return (
     <div className={cn('flex flex-col gap-3 w-full select-none', className)}>
       <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-2 text-xs font-medium text-[#A1A1A1]">
-          <Bell className="w-3.5 h-3.5 text-[#525252]" />
+        <div className="flex items-center gap-2 text-xs font-medium text-neutral-400">
+          <Bell className="w-3.5 h-3.5 text-neutral-600" />
           <span>
             {title}（{notifications.length}）
           </span>
@@ -63,7 +63,7 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
         {notifications.length > 1 && (
           <button
             onClick={() => setIsExpanded(!isExpanded)}
-            className="text-[11px] text-[#6B6B6B] hover:text-[#A1A1A1] transition-colors cursor-pointer"
+            className="text-[11px] text-neutral-500 hover:text-neutral-400 transition-colors cursor-pointer"
           >
             {isExpanded ? '重ねる' : 'すべて表示'}
           </button>
@@ -80,7 +80,7 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
               key="empty"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="p-6 text-center rounded-xl border border-[#1F1F1F] bg-[#0E0E0E] text-xs text-[#6B6B6B]"
+              className="p-6 text-center rounded-xl border border-neutral-800 bg-surface text-xs text-neutral-500"
             >
               {emptyText}
             </motion.div>
@@ -115,7 +115,7 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
                     right: 0,
                     marginBottom: isExpanded ? 8 : 0,
                   }}
-                  className="rounded-xl border border-[#1F1F1F] bg-[#0E0E0E] p-3.5 shadow-md cursor-grab active:cursor-grabbing hover:border-[#4A4A4A] transition-colors"
+                  className="rounded-xl border border-neutral-800 bg-surface p-3.5 shadow-md cursor-grab active:cursor-grabbing hover:border-neutral-700 transition-colors"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div
@@ -126,11 +126,11 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
                       <div className="mt-0.5 shrink-0">{getIcon(item.type)}</div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <h4 className="text-xs font-semibold text-[#FAFAFA] truncate">{item.title}</h4>
-                          <span className="text-[10px] text-[#6B6B6B] shrink-0">{item.time}</span>
+                          <h4 className="text-xs font-semibold text-neutral-50 truncate">{item.title}</h4>
+                          <span className="text-[10px] text-neutral-500 shrink-0">{item.time}</span>
                         </div>
                         {item.description && (
-                          <p className="text-[11px] text-[#A1A1A1] mt-0.5 leading-snug line-clamp-2 break-all">
+                          <p className="text-[11px] text-neutral-400 mt-0.5 leading-snug line-clamp-2 break-all">
                             {item.description}
                           </p>
                         )}
@@ -139,7 +139,7 @@ export const NotificationStack: React.FC<NotificationStackProps> = ({
                     {onDismiss && (
                       <button
                         onClick={() => onDismiss(item.id)}
-                        className="text-[#525252] hover:text-[#FAFAFA] p-0.5 rounded transition-colors cursor-pointer shrink-0"
+                        className="text-neutral-600 hover:text-neutral-50 p-0.5 rounded transition-colors cursor-pointer shrink-0"
                         aria-label="既読にする"
                       >
                         <X className="w-3.5 h-3.5" />

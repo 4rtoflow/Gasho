@@ -77,7 +77,7 @@ export function EffortPicker({
           collisionPadding={12}
           // Named by its title (Radix would name it after the button).
           aria-labelledby={titleId}
-          className="z-[100] w-60 rounded-2xl bg-[#161617] p-1.5 text-sm shadow-xl ring-1 ring-white/[0.1]"
+          className="z-[100] w-60 rounded-2xl bg-popover p-1.5 text-sm shadow-xl ring-1 ring-white/[0.1]"
         >
           <DropdownMenu.Label id={titleId} className="px-2.5 pt-1 pb-1.5 text-xs text-neutral-500">
             Effort

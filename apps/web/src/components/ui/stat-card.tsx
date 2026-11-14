@@ -28,7 +28,7 @@ const pctText = (x: number) => `${Math.abs(x) >= 10 ? Math.round(x) : x.toFixed(
 
 /** The surface of every tile on the home screen (the same as the Stat Card's). */
 export const TILE =
-  "min-w-0 rounded-2xl bg-white text-neutral-700 ring-1 ring-black/[0.07] dark:bg-[#0b0b0c] dark:text-neutral-300 dark:ring-white/[0.07]";
+  "min-w-0 rounded-2xl bg-white text-neutral-700 ring-1 ring-black/[0.07] dark:bg-background dark:text-neutral-300 dark:ring-white/[0.07]";
 export const TILE_SHADOW = "0 1px 2px rgba(0,0,0,0.04), 0 18px 36px -28px rgba(0,0,0,0.2)";
 const focus = "outline-none focus-visible:ring-2 focus-visible:ring-neutral-400/70 dark:focus-visible:ring-white/40";
 
@@ -319,12 +319,12 @@ export function StatCard({
             />
             {/* the latest point */}
             <g style={{ opacity: active === null ? 1 : 0, transition: "opacity .15s" }}>
-              <circle cx={last[0]} cy={last[1]} r={4} fill={color} className="stroke-white dark:stroke-[#0b0b0c]" strokeWidth={2} />
+              <circle cx={last[0]} cy={last[1]} r={4} fill={color} className="stroke-white dark:stroke-background" strokeWidth={2} />
             </g>
             {/* the scrubber */}
             <motion.g initial={false} animate={{ opacity: active === null ? 0 : 1 }} transition={{ duration: 0.12 }}>
               <motion.line y1={0} y2={H} x1={curX} x2={curX} className="stroke-black/15 dark:stroke-white/20" />
-              <motion.circle cx={curX} cy={curY} r={4.5} fill={color} className="stroke-white dark:stroke-[#0b0b0c]" strokeWidth={2} />
+              <motion.circle cx={curX} cy={curY} r={4.5} fill={color} className="stroke-white dark:stroke-background" strokeWidth={2} />
             </motion.g>
           </svg>
         </div>
