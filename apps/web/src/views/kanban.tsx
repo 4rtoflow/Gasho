@@ -584,8 +584,9 @@ function CompactCard({ row, now, where, onNotice }: { row: PlacedCard; now: numb
 }
 
 /**
- * The full card. Pressing it anywhere but its links and buttons opens the card's menu: a button covers the card under
- * its content, and only the links and buttons of the content take the pointer.
+ * The full card. Pressing it anywhere but its session buttons opens the card's menu: a button covers the card under
+ * its content, and only the session buttons of the content take the pointer. The pull request opens from the menu
+ * only, so a press meant for the menu does not leave for GitHub.
  */
 function Card({ row, now, where, onNotice }: { row: PlacedCard; now: number; where: Where; onNotice: (n: Notice) => void }) {
   const { machine, card } = row;
@@ -616,14 +617,7 @@ function Card({ row, now, where, onNotice }: { row: PlacedCard; now: number; whe
           )}
         </div>
         {card.pr ? (
-          <a
-            href={card.pr.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="pointer-events-auto -mt-1 line-clamp-2 text-xs break-words text-neutral-600 transition-colors hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-200"
-          >
-            {card.title}
-          </a>
+          <p className="-mt-1 line-clamp-2 text-xs break-words text-neutral-600 dark:text-neutral-400">{card.title}</p>
         ) : (
           <p className="-mt-1 truncate font-mono text-[11px] text-neutral-500">{card.title}</p>
         )}
@@ -668,12 +662,7 @@ function Chips({ machine, card, where, children }: { machine: MachineInfo; card:
           {card.repo.split("/").pop()}
         </span>
       )}
-      {pr && (
-        <a href={pr.url} target="_blank" rel="noopener noreferrer" className={cn(CHIP, "pointer-events-auto hover:text-neutral-900 dark:hover:text-neutral-200")}>
-          PR #{pr.number}
-          <ExternalLink className="size-3" />
-        </a>
-      )}
+      {pr && <span className={CHIP}>PR #{pr.number}</span>}
       {card.issue !== undefined && <span className={CHIP}>Issue #{card.issue}</span>}
       {!card.path && <span className={cn(CHIP, "bg-transparent ring-1 ring-black/[0.1] ring-inset dark:bg-transparent dark:ring-white/[0.1]")}>worktree なし</span>}
       {others.map((status) => {
