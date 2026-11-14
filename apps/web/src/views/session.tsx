@@ -27,7 +27,7 @@ import { rememberOpened, worktreeId } from "@/lib/sessions";
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
-import { PluginHeaderItems } from "@/plugins/parts";
+import { PluginConversationEnd, PluginHeaderItems } from "@/plugins/parts";
 
 /**
  * `panel`: the panel open beside the session (a computer), if any; its link in the header shows as open.
@@ -212,6 +212,7 @@ export function SessionView({
           pending={pending}
           onLoadOlder={() => loadTranscript(machine, sessionId, true)}
           footer={<Composer machine={m} session={s} entries={t?.total ?? 0} />}
+          end={<PluginConversationEnd machine={m} session={s} />}
         />
       </div>
     </div>

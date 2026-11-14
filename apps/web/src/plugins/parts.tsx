@@ -1,9 +1,9 @@
 // Where the plugins' parts go on Gasho's screen (docs/plugins.md): sidebar items and their badges (P1), pages (P2),
-// session header items (P3), session panels (P4), settings (P5) and home tiles (P6). Every part is drawn in the scope
-// of its plugin (the SDK's hooks find it there) and inside an error boundary of its own, so that a plugin that throws
-// shows an error in its place while the rest of Gasho goes on.
+// session header items (P3), session panels (P4), settings (P5), home tiles (P6) and the end of a session's
+// conversation (P13). Every part is drawn in the scope of its plugin (the SDK's hooks find it there) and inside an error
+// boundary of its own, so that a plugin that throws shows an error in its place while the rest of Gasho goes on.
 import { Component, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { OpenPanel, Params, SessionContext, SessionHeaderItem, TileSize } from "@gasho/plugin-sdk";
+import type { ConversationEndItem, OpenPanel, Params, PluginDefinition, SessionContext, SessionHeaderItem, TileSize } from "@gasho/plugin-sdk";
 import type { MachineInfo, PluginInfo, PluginSettingSpec, SessionInfo } from "@gasho/protocol";
 import { SidePanel } from "@/components/side-panel";
 import { go, hrefOf, type SessionPanel } from "@/lib/route";
@@ -160,6 +160,17 @@ export function PluginPanelView({ machine, sessionId, panel, docked, onClose }: 
 
 const DEFAULT_ORDER = 500;
 
+/**
+ * The plugins' items of an extension point whose `order` is in [from, to): by their order, then in the plugins' order,
+ * then as each plugin wrote them.
+ */
+function ordered<T extends { order?: number }>(parts: PluginPart[], pick: (def: PluginDefinition) => T[] | undefined, from = -Infinity, to = Infinity) {
+  return parts
+    .flatMap((part, p) => (pick(part.def) ?? []).map((item, i) => ({ part, item, rank: [item.order ?? DEFAULT_ORDER, p, i] as const })))
+    .filter(({ rank }) => rank[0] >= from && rank[0] < to)
+    .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2]);
+}
+
 /** The header items of the plugins whose `order` is in [from, to), for a place in the header's row. */
 export function PluginHeaderItems({
   machine,
@@ -175,10 +186,7 @@ export function PluginHeaderItems({
   to: number;
 }) {
   const { parts } = usePluginRegistry();
-  const items = parts
-    .flatMap((part, p) => (part.def.sessionHeader ?? []).map((item, i) => ({ part, item, rank: [item.order ?? DEFAULT_ORDER, p, i] as const })))
-    .filter(({ rank }) => rank[0] >= from && rank[0] < to)
-    .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2]);
+  const items = ordered(parts, (def) => def.sessionHeader, from, to);
   return (
     <>
       {items.map(({ part, item }) => (
@@ -250,6 +258,36 @@ function HeaderButton({ part, item, ctx, panel }: { part: PluginPart; item: Sess
       </button>
       {error && <span className="text-red-400">{error}</span>}
     </>
+  );
+}
+
+// ---- the end of a session's conversation (P13) ----
+
+/** The plugins' parts at the end of a session's conversation, below its newest entry. */
+export function PluginConversationEnd({ machine, session }: { machine: MachineInfo; session: SessionInfo }) {
+  const { parts } = usePluginRegistry();
+  return (
+    <>
+      {ordered(parts, (def) => def.conversationEnd).map(({ part, item }) => (
+        // A `when` that throws leaves the part out, as a header item's does.
+        <Part key={`${part.info.id}.${item.id}`} part={part} fallback={null}>
+          <ConversationEndPart part={part} item={item} machine={machine} session={session} />
+        </Part>
+      ))}
+    </>
+  );
+}
+
+function ConversationEndPart({ part, item, machine, session }: { part: PluginPart; item: ConversationEndItem; machine: MachineInfo; session: SessionInfo }) {
+  const ctx: SessionContext = { machine, session, daemon: readiness(part.info, machine.id) };
+  if (item.when && !item.when(ctx)) return null;
+  const Shown = item.component;
+  return (
+    <SessionScopeContext.Provider value={ctx}>
+      <Part part={part}>
+        <Shown machine={machine} session={session} />
+      </Part>
+    </SessionScopeContext.Provider>
   );
 }
 

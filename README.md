@@ -161,7 +161,19 @@ npm test
 npm run typecheck
 ```
 
-プラグインの SDK（`@4rtoflow/gasho-plugin-sdk`）は、`packages/plugin-sdk/package.json` の `version` を版にして、`plugin-sdk-v<版>` のタグを push すると、GitHub Actions（`.github/workflows/publish-plugin-sdk.yml`）が GitHub Packages に公開する。手元で中身を確かめるときは `npm run pack -w @gasho/plugin-sdk` で `packages/plugin-sdk/dist/package` に作る。
+### 公開
+
+gasho-daemon（`@4rtoflow/gasho-daemon`）とプラグインの SDK（`@4rtoflow/gasho-plugin-sdk`）は、GitHub Actions（`.github/workflows/release.yml`）が GitHub Packages に公開する。15分ごとに main を見て、前に公開してから中身が変わったパッケージだけを公開する。
+
+版は x.y.z の形にする。
+
+- x は変えない。gasho-daemon は 0、SDK はプラグインの API のメジャーと同じ 1
+- 機能を足したときは y を上げ、z を 0 に戻す。前に公開してからマージした PR に `enhancement` のラベルが付いているとき、またはプラグインの API の版（`PLUGIN_API`）が変わったときを、機能の追加とする
+- それ以外は直しとして、z を上げる
+
+機能を足す PR には `enhancement` のラベルを付ける。PR では版を変えない。公開するときに、GitHub Actions が新しい版を `apps/daemon/src/daemon.ts` の `DAEMON_VERSION` と `packages/plugin-sdk/package.json` に書いて main にコミットし、そのコミットに `daemon-v<版>`・`plugin-sdk-v<版>` のタグを付けてから公開する。タグを付けたあとで公開に失敗したときは、次の回にそのタグから公開し直す。
+
+15分を待たずに公開するときは、`gh workflow run release.yml` で動かす。次に何が公開されるかは、最新の main を checkout して `node scripts/release.ts plan` を実行すると見られる（何も変えない）。パッケージの中身を確かめるときは、`npm run pack -w @gasho/daemon`、`npm run pack -w @gasho/plugin-sdk` で、それぞれの `dist/package` に作る。
 
 ## 環境変数
 

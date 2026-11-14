@@ -7,8 +7,8 @@
     "apps/*"
   ],
   "scripts": {
-    "typecheck": "tsc -p packages/protocol && tsc -p packages/plugin-sdk && tsc -p apps/daemon && tsc -p apps/hub && npm run typecheck -w @gasho/web",
-    "test": "node --test --disable-warning=ExperimentalWarning \"apps/*/test/*.test.ts\"",
+    "typecheck": "tsc -p packages/protocol && tsc -p packages/plugin-sdk && tsc -p apps/daemon && tsc -p apps/hub && tsc -p scripts && npm run typecheck -w @gasho/web",
+    "test": "node --test --disable-warning=ExperimentalWarning \"apps/*/test/*.test.ts\" \"scripts/*.test.ts\"",
     "hub": "npm run start -w @gasho/hub",
     "hub:pair": "npm run pair -w @gasho/hub",
     "hub:devices": "npm run devices -w @gasho/hub",
