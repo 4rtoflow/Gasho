@@ -278,20 +278,26 @@ function PendingView({ message: p }: { message: PendingMessage }) {
   );
 }
 
-/** `pending`: messages sent from here that the conversation does not show yet; they come after its entries. */
+/**
+ * `pending`: messages sent from here that the conversation does not show yet; they come after its entries. `end`: what
+ * comes after them (the plugins' parts at the end of the conversation, P13); it takes no room while it shows nothing.
+ */
 export function Transcript({
   state,
   pending,
   onLoadOlder,
   footer,
+  end,
 }: {
   state: TranscriptState | undefined;
   pending?: PendingMessage[];
   onLoadOlder: () => void;
   footer?: ReactNode;
+  end?: ReactNode;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const footerBox = useRef<HTMLDivElement>(null);
+  const endBox = useRef<HTMLDivElement>(null);
   const reduceMotion = useReducedMotion();
   const [following, setFollowing] = useState(true);
   const prev = useRef<{ first?: string; count: number; height: number }>({ count: 0, height: 0 });
@@ -338,18 +344,20 @@ export function Transcript({
     prevPending.current = pendingCount;
   }, [pendingCount]);
 
-  // The chat box grows with its text and status line. While at the bottom, keep the newest entry above it.
+  // The chat box grows with its text and status line, and what comes at the end of the conversation comes and goes.
+  // While at the bottom, keep the newest entry, and what comes after it, above the chat box.
   const hasFooter = footer !== undefined;
+  const hasEnd = end !== undefined;
   useEffect(() => {
     const el = scroller.current;
-    const box = footerBox.current;
-    if (!el || !box) return;
+    const boxes = [footerBox.current, endBox.current].filter((box) => box !== null);
+    if (!el || boxes.length === 0) return;
     const observer = new ResizeObserver(() => {
       if (atBottom.current) el.scrollTop = el.scrollHeight;
     });
-    observer.observe(box);
+    for (const box of boxes) observer.observe(box);
     return () => observer.disconnect();
-  }, [hasFooter]);
+  }, [hasFooter, hasEnd]);
 
   return (
     <div
@@ -395,6 +403,11 @@ export function Transcript({
           {pending?.map((p) => (
             <PendingView key={p.id} message={p} />
           ))}
+          {hasEnd && (
+            <div ref={endBox} className="flex flex-col gap-4 empty:hidden">
+              {end}
+            </div>
+          )}
         </div>
         {hasFooter && (
           <div
