@@ -1,6 +1,6 @@
 {
   "name": "@gasho/plugin-sdk",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Gasho のプラグインを書くための SDK：型、Gasho の部品、ビルドのコマンド（gasho-plugin build）",
   "private": true,
   "type": "module",
