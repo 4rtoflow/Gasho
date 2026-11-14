@@ -11,11 +11,12 @@ import type {
   MachineHookEvent,
   MachineInfo,
   PairingCode,
+  PluginMachines,
   SessionInfo,
 } from "@gasho/protocol";
 import { hashSecret, newPairingCode, newToken, normalizeCode, PAIRING_CODE_TTL_MS, sameHash } from "./auth.ts";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const EVENT_TTL_MS = 7 * 24 * 3600_000;
 const NOTIFICATION_TTL_MS = 30 * 24 * 3600_000;
 
@@ -49,6 +50,25 @@ export class Store {
   private migrate(): void {
     const version = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version);
     if (version >= SCHEMA_VERSION) return;
+    if (version < 2) this.migrateTo2();
+    // Version 3 adds the plugins: whether each is enabled, where its daemon part runs, and its settings.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS plugins (
+        id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL,
+        machines TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS plugin_settings (
+        plugin TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (plugin, key)
+      );
+      PRAGMA user_version = 3;
+    `);
+  }
+
+  private migrateTo2(): void {
     // Version 1 keyed machines (and the events and notifications that point at them) by host name.
     // Nothing from it can be mapped to registered machines, so it is dropped.
     this.db.exec(`
@@ -90,7 +110,7 @@ export class Store {
         data TEXT NOT NULL
       );
       CREATE INDEX notifications_at ON notifications(at);
-      PRAGMA user_version = ${SCHEMA_VERSION};
+      PRAGMA user_version = 2;
     `);
   }
 
@@ -198,6 +218,59 @@ export class Store {
       daemonVersion: r.daemon_version == null ? undefined : String(r.daemon_version),
       sessions: r.sessions == null ? [] : (JSON.parse(String(r.sessions)) as SessionInfo[]),
     }));
+  }
+
+  // ---- plugins ----
+
+  /** Whether a plugin is enabled and where its daemon part runs; undefined for one never changed (enabled, everywhere). */
+  pluginState(id: string): { enabled: boolean; machines: PluginMachines } | undefined {
+    const r = this.db.prepare("SELECT enabled, machines FROM plugins WHERE id = ?").get(id) as Row | undefined;
+    if (!r) return undefined;
+    let machines: PluginMachines = "all";
+    try {
+      const m = JSON.parse(String(r.machines)) as unknown;
+      if (Array.isArray(m) && m.every((x) => typeof x === "string")) machines = m;
+    } catch {
+      // "all"
+    }
+    return { enabled: Number(r.enabled) === 1, machines };
+  }
+
+  setPluginState(id: string, state: { enabled: boolean; machines: PluginMachines }): void {
+    this.db
+      .prepare(
+        `INSERT INTO plugins (id, enabled, machines) VALUES (?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, machines = excluded.machines`,
+      )
+      .run(id, state.enabled ? 1 : 0, JSON.stringify(state.machines));
+  }
+
+  /** The settings of a plugin that the Gasho server keeps (scope "server"), as saved. */
+  pluginSettings(id: string): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const r of this.db.prepare("SELECT key, value FROM plugin_settings WHERE plugin = ?").all(id) as Row[]) {
+      try {
+        out[String(r.key)] = JSON.parse(String(r.value)) as unknown;
+      } catch {
+        // left out: the default applies
+      }
+    }
+    return out;
+  }
+
+  setPluginSetting(id: string, key: string, value: unknown): void {
+    this.db
+      .prepare(
+        `INSERT INTO plugin_settings (plugin, key, value) VALUES (?, ?, ?)
+         ON CONFLICT(plugin, key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(id, key, JSON.stringify(value));
+  }
+
+  /** Forgets a removed plugin: its state and its settings. */
+  forgetPlugin(id: string): void {
+    this.db.prepare("DELETE FROM plugins WHERE id = ?").run(id);
+    this.db.prepare("DELETE FROM plugin_settings WHERE plugin = ?").run(id);
   }
 
   // ---- events and notifications ----

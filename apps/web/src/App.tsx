@@ -1,22 +1,23 @@
-import { Home, KeyRound, Plus } from "lucide-react";
-import { useState, type ReactElement } from "react";
+import { Home, KeyRound, Plus, Puzzle } from "lucide-react";
+import { useEffect, useState, type ReactElement } from "react";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { SessionActionDialog, SessionContextMenu, type SessionActionRequest } from "@/components/session-menu";
 import { StatusDot } from "@/components/status-badge";
 import { Sidebar, SidebarTrigger, useSidebar, type SidebarSection } from "@/components/ui/sidebar";
 import { sessionLabel } from "@/lib/format";
 import { DESKTOP, useMediaQuery } from "@/lib/media";
-import { go, useRoute, type SessionPanel } from "@/lib/route";
+import { go, isOldGitHubLink, useRoute, type SessionPanel } from "@/lib/route";
 import { notificationShown, sessionsByLastUse } from "@/lib/sessions";
 import { useAppState } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { PluginBadgeProbes, PluginPageView, PluginPanelView, usePluginBadges } from "@/plugins/parts";
+import { usePluginRegistry } from "@/plugins/registry";
 import { DevicesView } from "@/views/devices";
-import { GitHubItemPanel } from "@/views/github-item";
-import { GitHubListPanel } from "@/views/github-list";
 import { GraphPanel } from "@/views/graph";
 import { HomeView } from "@/views/home";
 import { LaunchDialog } from "@/views/launch";
 import { PairView } from "@/views/pair";
+import { PluginsView } from "@/views/plugins";
 import { SessionView } from "@/views/session";
 
 const SEP = "\u001f";
@@ -40,22 +41,8 @@ function Brand() {
 function PanelView({ machine, sessionId, panel, docked }: { machine: string; sessionId: string; panel: SessionPanel; docked: boolean }) {
   // Back to the session, replacing the panel in the history.
   const close = () => go({ name: "session", machine, sessionId }, { replace: true });
-  if (panel.kind === "graph") return <GraphPanel machine={machine} sessionId={sessionId} repo={panel.repo} docked={docked} onClose={close} />;
-  if (panel.number !== undefined) {
-    return (
-      <GitHubItemPanel
-        key={`${panel.kind}/${panel.number}`}
-        machine={machine}
-        sessionId={sessionId}
-        kind={panel.kind}
-        number={panel.number}
-        repo={panel.repo}
-        docked={docked}
-        onClose={close}
-      />
-    );
-  }
-  return <GitHubListPanel machine={machine} sessionId={sessionId} kind={panel.kind} repo={panel.repo} docked={docked} onClose={close} />;
+  if (panel.kind === "plugin") return <PluginPanelView machine={machine} sessionId={sessionId} panel={panel} docked={docked} onClose={close} />;
+  return <GraphPanel machine={machine} sessionId={sessionId} repo={panel.repo} docked={docked} onClose={close} />;
 }
 
 function Connection({ connected, deviceName }: { connected: boolean; deviceName?: string }) {
@@ -82,6 +69,10 @@ function Centered({ children }: { children: React.ReactNode }) {
 
 export function App() {
   const route = useRoute();
+  // A link from before the GitHub plugin (…/issues, …/pull/<n>) opens the plugin's panel; the address bar gets its URL.
+  useEffect(() => {
+    if (isOldGitHubLink(location.hash)) go(route, { replace: true });
+  }, [route]);
   const { auth, me, machines, notifications, connected } = useAppState();
   const [mobileOpen, setMobileOpen] = useState(false);
   // What was picked from a session's menu in the sidebar (rename, fork, remove); its dialog is open meanwhile.
@@ -89,6 +80,9 @@ export function App() {
   // The dialog that starts a new session, opened from the "＋" of the sidebar's session list.
   const [launchOpen, setLaunchOpen] = useState(false);
   const desktop = useMediaQuery(DESKTOP);
+  // The plugins' web parts (docs/plugins.md): their sidebar items and the badges their hooks give.
+  const { parts } = usePluginRegistry();
+  const badges = usePluginBadges();
 
   if (auth === "checking") return <Centered>読み込み中…</Centered>;
   if (auth === "unreachable") return <Centered>Gasho サーバーにつながりません。再試行しています…</Centered>;
@@ -97,11 +91,21 @@ export function App() {
   const unread = notifications.filter((n) => !n.read && notificationShown(n, machines)).length;
   // The sessions of all working servers in one list, the one used last first.
   const sessions = sessionsByLastUse(machines);
+  // The plugins' sidebar items: between ホーム and 端末, in the plugins' order. Each opens a page of its plugin.
+  const pluginItems = parts.flatMap(({ info, def }) =>
+    (def.sidebar ?? []).map((item) => {
+      const Icon = item.icon;
+      const id = `plugin:${info.id}:${item.id}`;
+      return { id, label: item.label, icon: <Icon />, badge: badges.get(id), plugin: info.id, page: item.page };
+    }),
+  );
   const sections: SidebarSection[] = [
     {
       items: [
         { id: "home", label: "ホーム", icon: <Home />, badge: unread || undefined },
+        ...pluginItems.map(({ id, label, icon, badge }) => ({ id, label, icon, badge })),
         { id: "devices", label: "端末", icon: <KeyRound /> },
+        { id: "plugins", label: "プラグイン", icon: <Puzzle /> },
       ],
     },
     {
@@ -122,7 +126,12 @@ export function App() {
       })),
     },
   ];
-  const activeId = route.name === "session" ? [route.machine, route.sessionId].join(SEP) : route.name;
+  const activeId =
+    route.name === "session"
+      ? [route.machine, route.sessionId].join(SEP)
+      : route.name === "plugin"
+        ? (pluginItems.find((i) => i.plugin === route.plugin && i.page.id === route.page)?.id ?? "")
+        : route.name;
   const panel = route.name === "session" ? route.panel : undefined;
 
   return (
@@ -131,7 +140,9 @@ export function App() {
         sections={sections}
         activeId={activeId}
         onActiveChange={(id) => {
-          if (id === "home" || id === "devices") return go({ name: id });
+          if (id === "home" || id === "devices" || id === "plugins") return go({ name: id });
+          const item = pluginItems.find((i) => i.id === id);
+          if (item) return go({ name: "plugin", plugin: item.plugin, page: item.page.id, params: item.page.params ?? {} });
           const [machine, sessionId] = id.split(SEP);
           if (machine && sessionId) go({ name: "session", machine, sessionId });
         }}
@@ -157,6 +168,8 @@ export function App() {
           <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
             {route.name === "home" && <HomeView />}
             {route.name === "devices" && <DevicesView />}
+            {route.name === "plugins" && <PluginsView />}
+            {route.name === "plugin" && <PluginPageView plugin={route.plugin} page={route.page} params={route.params} />}
             {route.name === "session" && (desktop || !panel) && (
               <SessionView key={`${route.machine}/${route.sessionId}`} machine={route.machine} sessionId={route.sessionId} panel={panel} />
             )}
@@ -171,6 +184,7 @@ export function App() {
           )}
         </div>
       </div>
+      <PluginBadgeProbes />
       <SessionActionDialog request={sessionAction} onClose={() => setSessionAction(null)} onNavigate={() => setMobileOpen(false)} />
       <LaunchDialog open={launchOpen} onClose={() => setLaunchOpen(false)} onLaunched={() => setMobileOpen(false)} />
     </div>

@@ -9,6 +9,14 @@ export interface HubConfig {
   allowNets: string[];
   dbFile: string;
   webDist: string;
+  /** The installed plugins, one folder (or link) each (docs/plugins.md). */
+  pluginsDir: string;
+  /** The checked versions of the plugins, served from here. */
+  pluginCacheDir: string;
+}
+
+export function pluginsDirOf(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GASHO_PLUGINS_DIR ?? path.join(os.homedir(), ".local", "share", "gasho", "plugins");
 }
 
 export function dbFileOf(env: NodeJS.ProcessEnv = process.env): string {
@@ -24,5 +32,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
     allowNets: parseNets(env.GASHO_ALLOW_NETS),
     dbFile: dbFileOf(env),
     webDist: env.GASHO_WEB_DIST ?? path.resolve(here, "../../web/dist"),
+    pluginsDir: pluginsDirOf(env),
+    pluginCacheDir: env.GASHO_PLUGIN_CACHE ?? path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "gasho", "hub-plugins"),
   };
 }

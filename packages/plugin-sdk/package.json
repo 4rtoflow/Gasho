@@ -1,0 +1,23 @@
+{
+  "name": "@gasho/plugin-sdk",
+  "version": "1.0.0",
+  "description": "Gasho のプラグインを書くための SDK：型、Gasho の部品、ビルドのコマンド（gasho-plugin build）",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pack": "node scripts/pack.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./daemon": "./src/daemon.ts",
+    "./exports": "./src/exports.js",
+    "./theme.css": "./theme.css",
+    "./plugin.css": "./plugin.css"
+  },
+  "bin": {
+    "gasho-plugin": "./bin/gasho-plugin.mjs"
+  },
+  "dependencies": {
+    "@gasho/protocol": "*"
+  }
+}

@@ -1,5 +1,5 @@
-import { ArrowLeft, CircleDot, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { CommandResult, InputFeature, MachineInfo, SessionInfo, SessionModel } from "@gasho/protocol";
 import { RepoPicker } from "@/components/repo-picker";
 import { EffortPicker, UltracodeToggle } from "@/components/session-controls";
@@ -21,10 +21,10 @@ import { promptDraft, usePicks } from "@/lib/drafts";
 import { addPending, noneWaiting, pendingShown, removePending, settlePending, usePending } from "@/lib/pending";
 import { go, type SessionPanel } from "@/lib/route";
 import { closeSessionHeaderOnPhone, useSessionHeaderShown } from "@/lib/session-header";
-import { daemonAtLeast } from "@/lib/sessions";
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
+import { PluginHeaderItems } from "@/plugins/parts";
 
 /** `panel`: the panel open beside the session (a computer), if any; its link in the header shows as open. */
 export function SessionView({ machine, sessionId, panel }: { machine: string; sessionId: string; panel?: SessionPanel }) {
@@ -100,7 +100,11 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {/* The plugins' items go between Gasho's own by their order (docs/plugins.md): waiting 0, repository 100,
+                branch 200, files 400, pull request links 800, last activity 900, cost 1000. */}
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={-Infinity} to={0} />
             {s.status === "waiting" && <span className="text-amber-400">{waitingLabel(s.waitingFor) ?? "確認待ち"}</span>}
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={0} to={100} />
             {several ? (
               <>
                 <RepoPicker repos={several} />
@@ -124,6 +128,7 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
             ) : (
               <span>{repoText}</span>
             )}
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={100} to={200} />
             {!several && branch && (
               <span className="inline-flex items-center gap-1">
                 <GitBranch className="size-3.5" />
@@ -150,27 +155,8 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
                 )}
               </span>
             )}
-            {/* gasho-daemon 0.7 reads the issues and pull requests. */}
-            {(github || several?.some((r) => r.github)) && daemonAtLeast(m, 0, 7) && (
-              <>
-                <PanelLink
-                  icon={<CircleDot className="size-3.5" />}
-                  open={panel?.kind === "issues"}
-                  title="このリポジトリの Issue を開く"
-                  onClick={() => open({ kind: "issues", ...(only ? { repo: only.path } : {}) })}
-                >
-                  Issues
-                </PanelLink>
-                <PanelLink
-                  icon={<GitPullRequest className="size-3.5" />}
-                  open={panel?.kind === "pulls"}
-                  title="このリポジトリの Pull request を開く"
-                  onClick={() => open({ kind: "pulls", ...(only ? { repo: only.path } : {}) })}
-                >
-                  Pull requests
-                </PanelLink>
-              </>
-            )}
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={200} to={400} />
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={400} to={800} />
             {s.prLinks.map((p) => (
               <a
                 key={p.url}
@@ -183,8 +169,11 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
                 <GitPullRequest className="size-3.5" />#{p.number}
               </a>
             ))}
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={800} to={900} />
             <span>最終更新 {relativeTime(s.lastActivityAt, now)}</span>
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={900} to={1000} />
             {cost && <span>費用 {cost}</span>}
+            <PluginHeaderItems machine={m} session={s} panel={panel} from={1000} to={Infinity} />
           </div>
         </header>
       ) : (
@@ -470,34 +459,6 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
         </p>
       )}
     </div>
-  );
-}
-
-/** A text in the session's header that opens one of its panels. */
-function PanelLink({
-  icon,
-  open,
-  title,
-  onClick,
-  children,
-}: {
-  icon: ReactNode;
-  open: boolean;
-  title: string;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-pressed={open}
-      className={cn("inline-flex items-center gap-1 underline-offset-2 hover:text-foreground hover:underline", open && "text-foreground")}
-    >
-      {icon}
-      {children}
-    </button>
   );
 }
 

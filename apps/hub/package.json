@@ -7,7 +7,8 @@
     "start": "node --disable-warning=ExperimentalWarning src/cli.ts start",
     "dev": "node --watch --disable-warning=ExperimentalWarning src/cli.ts start",
     "pair": "node --disable-warning=ExperimentalWarning src/cli.ts pair",
-    "devices": "node --disable-warning=ExperimentalWarning src/cli.ts devices"
+    "devices": "node --disable-warning=ExperimentalWarning src/cli.ts devices",
+    "plugin": "node --disable-warning=ExperimentalWarning src/cli.ts plugin"
   },
   "dependencies": {
     "@gasho/protocol": "*",

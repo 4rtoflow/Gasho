@@ -113,7 +113,7 @@ node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル�
 - 会話の中のツールの呼び出し（コマンドの実行など）は、その結果と一緒に1つの折りたたみにまとめて出す
 - Bash の呼び出しが続くところは、全部を1つの折りたたみにまとめる。閉じたままでも、実行した回数、最後に実行したコマンド、エラーになった回数がわかる。開くと、コマンドごとの折りたたみが並ぶ
 - ヘッダーのブランチ名を押すと、ブランチグラフを開く。PC ではセッションの右にパネルとして並べ、スマホでは画面全体に出す。セッションのリポジトリのブランチと、全ブランチの新しいほうから300件のコミットを、枝分かれとマージの線で表示する
-- ブランチ名と最終更新のあいだの「Issues」「Pull requests」を押すと、リポジトリの開いている Issue と Pull request の一覧を、同じようにパネルで開く。一覧の項目を押すと、GitHub へは移らずに、本文とコメント（Pull request ではレビュー、チェック、変更したファイルも）を Gasho の中で読める。GitHub のページは、パネルの「GitHub」から開く。working server の GitHub CLI（gh）で読むので、working server で `gh auth login` を済ませておく。gh のログインを使うので、Gasho は GitHub のトークンを扱わない。その working server の gasho-daemon が 0.7.0 以上のときだけ出る。項目を Gasho の中で読むには 0.8.0 以上が要る（それより前のものでは、項目を押すと GitHub で開く）
+- GitHub プラグインを入れると（「プラグイン」の節）、ブランチ名と最終更新のあいだに「Issues」「Pull requests」が出る。押すと、リポジトリの開いている Issue と Pull request の一覧を、同じようにパネルで開く。一覧の項目を押すと、GitHub へは移らずに、本文とコメント（Pull request ではレビュー、チェック、変更したファイルも）を Gasho の中で読める。GitHub のページは、パネルの「GitHub」から開く。working server の GitHub CLI（gh）で読むので、working server で `gh auth login` を済ませておく。gh のログインを使うので、Gasho は GitHub のトークンを扱わない。プラグインに対応した gasho-daemon の working server でだけ出る
 - ブランチの一覧には、ローカルのブランチ（push していないコミットの数など）と、リモートにだけあるブランチ（雲のアイコン）を並べる。見出しを押すと、一覧を折りたためる
 - コミットの件名は省略せずに出す。長い件名は、その行を横にスクロールして読む（スクロールバーは出さない）
 - ブランチ名の右のアイコンは、GitHub のそのブランチのページを開く
@@ -128,6 +128,21 @@ npm run hub:devices                              # 一覧
 node apps/hub/src/cli.ts revoke <端末の ID>      # 取り消し（30秒以内に接続が切れる）
 ```
 
+### プラグイン
+
+Gasho の画面と gasho-daemon には、プラグインで機能を足せる。仕組みは [docs/plugins.md](docs/plugins.md) にまとめた。プラグインは [GashoPlugins](https://github.com/4rtoflow/GashoPlugins) に置く。GitHub の Issues と Pull requests のパネル、ホームの GitHub のタイルも、GitHub プラグイン（`github`）になった。
+
+いまは、Gasho サーバーでコマンドを実行して入れる。GashoPlugins から画面で選んで入れる機能は、次の段階で作る。
+
+```bash
+npm run hub:plugin -- add ~/repos/GashoPlugins/github/dist          # ビルドしたプラグインを入れる
+npm run hub:plugin -- add --link ~/repos/GashoPlugins/github/dist   # 作っているあいだ。ビルドするたびに画面と gasho-daemon が入れ替わる
+npm run hub:plugin -- list
+npm run hub:plugin -- remove github
+```
+
+入れたプラグインは、サイドバーの「プラグイン」の画面に出る。そこで有効・無効を切り替え、daemon の部分（working server で動く部分）を動かす working server を選ぶ。入れ直したり有効にしたりしても、Gasho サーバーと gasho-daemon を起動し直さなくてよい。daemon の部分は、プラグインに対応した gasho-daemon でだけ動く。古い gasho-daemon の working server では、プラグインの画面に「gasho-daemon が古い」と出る。
+
 ### 外から使う（必要なとき）
 
 Gasho サーバーは LAN の中だけで使う前提にしている。外から使うときは Tailscale を導入する。
@@ -139,10 +154,12 @@ Gasho サーバーは LAN の中だけで使う前提にしている。外から
 ### 開発
 
 ```bash
-npm run web:dev    # Vite。/ws と /api は Gasho サーバー（127.0.0.1:7740）に中継する
+npm run web:dev    # Vite。/ws、/api、/plugins は Gasho サーバー（127.0.0.1:7740）に中継する
 npm test
 npm run typecheck
 ```
+
+プラグインの SDK（`@4rtoflow/gasho-plugin-sdk`）は、`packages/plugin-sdk/package.json` の `version` を版にして、`plugin-sdk-v<版>` のタグを push すると、GitHub Actions（`.github/workflows/publish-plugin-sdk.yml`）が GitHub Packages に公開する。手元で中身を確かめるときは `npm run pack -w @gasho/plugin-sdk` で `packages/plugin-sdk/dist/package` に作る。
 
 ## 環境変数
 
@@ -152,6 +169,8 @@ npm run typecheck
 | `GASHO_ALLOW_NETS` | hub | `lan`（このマシンと LAN のプライベートアドレス）。CIDR と `lan`・`tailscale` をカンマで並べる |
 | `GASHO_DB` | hub | `~/.local/share/gasho/hub.db` |
 | `GASHO_WEB_DIST` | hub | `apps/web/dist` |
+| `GASHO_PLUGINS_DIR` | hub | `~/.local/share/gasho/plugins`（入れたプラグイン） |
+| `GASHO_PLUGIN_CACHE` | hub | `~/.cache/gasho/hub-plugins`（配るプラグインの版ごとの写し） |
 | `GASHO_DAEMON_CONFIG` | daemon | `~/.config/gasho/daemon.json` |
 | `GASHO_HUB_URL` | daemon | 登録した Gasho サーバーから決める |
 | `GASHO_HOOK_PORT` | daemon | `7741` |
@@ -159,6 +178,7 @@ npm run typecheck
 | `GASHO_CLAUDE_DIR` / `GASHO_CLAUDE_BIN` | daemon | `~/.claude` / `claude` |
 | `GASHO_GH_BIN` | daemon | `gh` |
 | `GASHO_POLL_MS` | daemon | `3000` |
+| `GASHO_PLUGINS` | daemon | なし。`none` にすると、この working server ではプラグインの daemon の部分を動かさない |
 
 gasho-daemon の変数は、`~/.config/gasho/daemon.env` に `名前=値` の形で書いておくこともできる。gasho-daemon のコマンドは、起動するときにこのファイルを読む。端末で設定した値のほうが優先される。
 

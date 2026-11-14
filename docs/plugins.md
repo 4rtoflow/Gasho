@@ -103,7 +103,8 @@ GashoPlugins/               https://github.com/4rtoflow/GashoPlugins
 │  ├─ gasho-plugin.json     ID、名前、版、API の版、メソッド、設定
 │  ├─ src/web/index.tsx     画面の部分（definePlugin）
 │  ├─ src/daemon/index.ts   daemon の部分（defineDaemonPlugin）
-│  ├─ vite.config.ts        @gasho/plugin-sdk/vite の設定を使う
+│  ├─ src/web/style.css     @gasho/plugin-sdk/plugin.css を読み込む
+│  ├─ package.json          build は gasho-plugin build、dev は gasho-plugin build --watch
 │  └─ dist/                 ビルドしたもの（リリースの tgz の中身）
 │     ├─ gasho-plugin.json
 │     ├─ web.js             ブラウザーで動く（react と SDK は入れない）
@@ -112,9 +113,9 @@ GashoPlugins/               https://github.com/4rtoflow/GashoPlugins
 └─ <ほかのプラグイン>/      同じ形で並べる
 ```
 
-プラグインは、GashoPlugins の直下に、ID と同じ名前のディレクトリとして置く。ソースは TypeScript と React で書き、SDK のビルドの設定（Vite）で `dist/` にする。`web.js` と `daemon.js` は、使う npm パッケージを中に含めた1つのファイルにする。ただし、`web.js` には `react` などの共有するモジュールを入れない（「画面での読み込み」）。gasho-daemon は、node_modules なしで `daemon.js` を動かす。
+プラグインは、GashoPlugins の直下に、ID と同じ名前のディレクトリとして置く。ソースは TypeScript と React で書き、SDK のビルドのコマンド `gasho-plugin build` で `dist/` にする。このコマンドは、中で Vite を使う。`web.js` と `daemon.js` は、使う npm パッケージを中に含めた1つのファイルにする。ただし、`web.js` には `react` などの共有するモジュールを入れない（「画面での読み込み」）。gasho-daemon は、node_modules なしで `daemon.js` を動かす。
 
-GashoPlugins はワークスペースにして、SDK を `"@gasho/plugin-sdk": "npm:@4rtoflow/gasho-plugin-sdk@^1"` の別名で入れる。SDK は、画面の部分が使う `@gasho/plugin-sdk`、daemon の部分が使う `@gasho/plugin-sdk/daemon`、ビルドの設定の `@gasho/plugin-sdk/vite`、テーマの `@gasho/plugin-sdk/theme.css` からなる。SDK のメジャーは、プラグインの API のメジャーと同じにする。
+GashoPlugins はワークスペースにして、SDK を `"@gasho/plugin-sdk": "npm:@4rtoflow/gasho-plugin-sdk@^1"` の別名で入れる。SDK は、画面の部分が使う `@gasho/plugin-sdk`、daemon の部分が使う `@gasho/plugin-sdk/daemon`、スタイルの `@gasho/plugin-sdk/plugin.css`、ビルドのコマンド `gasho-plugin` からなる。`plugin.css` は、Tailwind CSS のクラスを、Gasho と同じテーマの色と大きさで使えるようにする。SDK のメジャーは、プラグインの API のメジャーと同じにする。
 
 ### gasho-plugin.json
 
@@ -330,7 +331,7 @@ sidebar: [{ id: "repos", label: "リポジトリ", icon: FolderGit2, page: { id:
 
 `tall: true` を付けると、PC では、通知のタイルと同じく2行分の高さにする。置く場所は、`after` に、そのあとに置くタイルの ID を書く。ID は、Gasho のタイルの ID か、`<プラグインの ID>.<タイルの ID>` である。書かないときは最後に置く。タイルは、ほかのタイルと同じくつまみで並べ替えられ、並びはブラウザーごとに覚える。覚えた並びにないタイルは、既定の並びで前にあるタイルのあとに入れる。これはいまのホームの決まりと同じである。
 
-タイルの中身は、プラグインの部品が描く。枠には、SDK の `Tile`（見出しとアイコン）か `StatCard`（数とグラフ）を使う。
+タイルの中身は、プラグインの部品が描く。枠には、SDK の `Tile`（見出しとアイコン）を使う。数とグラフを出す `StatCard` は、使うプラグインが出てきたら SDK に足す。
 
 ## 画面の部分から使えるもの
 
@@ -340,24 +341,27 @@ sidebar: [{ id: "repos", label: "リポジトリ", icon: FolderGit2, page: { id:
 |---|---|
 | `useMachines()` | working server とセッションの一覧。Gasho の画面と同じもので、読むだけ |
 | `useSessionContext()` | ヘッダーの項目とパネルの中で、そのセッション、working server、daemon の部分を使えるか |
+| `useDaemonReady(machine)` | その working server で、このプラグインの daemon の部分が動いているか。動いていないときは、その理由 |
 | `useRequest(呼び出し, 指定)` | daemon の部分のメソッドを呼び、結果を覚えておく（P7） |
-| `call(呼び出し)` | daemon の部分のメソッドを1回呼ぶ。`write` のメソッドに使う |
-| `useEvent(topic, { machine })` | daemon の部分から届いたイベントの、最後のデータ（P8） |
+| `useCall()` | daemon の部分のメソッドを1回呼ぶ関数を返す。`write` のメソッドに使う。`summary` に書いたことは、操作のログに残る |
+| `useEvent(topic, { machine })` | daemon の部分から届いたイベントの、最後のデータ（P8、第2段階） |
 | `useSetting(key)` | 設定の値と、値を変える関数（P5） |
 | `usePluginState(key, 初期値)` | ページを開いているあいだ Gasho が覚えておく値。ホットリロードで部品を作り直しても残り、ページを読み込み直すと消える |
 | `useNavigation()` | このプラグインのページとパネルを開く・閉じる・戻る。ホームのタイルのようにセッションの外からは、セッションを指定してパネルを開く。`<a href>` に入れる URL も作る |
-| `sendInput({ machine, sessionId, text })` | セッションに発言を送る。`permissions` に `session.input` が要る。入力欄から送ったときと同じく、会話の末尾にすぐ出し、操作のログに残す |
+| `useSendInput()` | セッションに発言を送る関数を返す。引数は `{ machine, sessionId, text }`。`permissions` に `session.input` が要る。入力欄から送ったときと同じく、会話の末尾にすぐ出し、操作のログに残す |
 | `useNow(ミリ秒)` | 一定の間隔で変わる現在の時刻。「3分前」の表示を更新するために使う |
 | `githubRepos(session)` | セッションのフォルダーか、その中のリポジトリのうち、GitHub にあるもの |
+| `panelRepo(session, repo, fit)` | セッションのフォルダーの中のリポジトリのうち `fit` に合うものと、パネルで選んでいるもの（`repo`、なければ最初のもの） |
+| `relativeTime(時刻, 現在)`、`cn(...)` | 「3分前」の文字列と、Gasho と同じクラス名のつなぎ方 |
 
 部品は、次のものを使える。
 
 | 名前 | 中身 |
 |---|---|
 | `Page`、`Panel` | ページとパネルの枠 |
-| `PanelButton` | パネルの見出しの右に置く小さいボタン（再読み込み、GitHub で開く） |
+| `PANEL_BUTTON` | パネルの見出しの右に置く小さいボタン（再読み込み、GitHub で開く）のクラス名 |
 | `RepoTabs` | セッションのフォルダーの中のリポジトリを切り替えるタブ |
-| `Tile`、`StatCard` | ホームのタイルの枠と、数を出すタイル |
+| `Tile` | ホームのタイルの枠 |
 | `Markdown` | 会話と同じ Markdown の表示。HTML は出さず、画像は読み込まずにリンクにする |
 | `RelativeTime` | 「3分前」の表示。ポインターを乗せると時刻を出す |
 
@@ -365,7 +369,7 @@ sidebar: [{ id: "repos", label: "リポジトリ", icon: FolderGit2, page: { id:
 
 ## daemon の部分
 
-プラグインに対応する gasho-daemon は、0.12.0 を想定している。
+プラグインに対応する gasho-daemon の版の番号は、公開するときに決める。Gasho サーバーは、版の番号ではなく、gasho-daemon が `plugin.status` を送ってくるかどうかで、プラグインに対応しているかを見分ける。
 
 ### 画面からの呼び出し（P7）
 
@@ -453,9 +457,9 @@ export default defineDaemonPlugin({
 
 daemon の部分は、プラグインごとの子プロセス（`node daemon.js`）で動かす。gasho-daemon とは、Node.js の IPC でやりとりする。子プロセスにするのは、2つの理由による。1つは、プラグインのエラーや重い処理で、gasho-daemon ごと止まらないようにするためである。gasho-daemon は、セッションの端末とのやりとりと hooks の受け取りを、止めずに続ける必要がある。もう1つは、ホットリロードで、新しい版のプロセスに入れ替えられるようにするためである。
 
-子プロセスは、最初の呼び出しで起動し、`start` があるときはすぐに起動する。落ちたときは、1秒から倍ずつ延ばして最大60秒待ってから起動し直す。10分間に5回落ちたら起動し直すのをやめ、プラグインの画面に「失敗」と出す。プラグインを更新するか、有効にし直すまで、その状態のままにする。子プロセスの出力は、gasho-daemon のログに書く。子プロセスは、セッションの端末とは違ってスコープの外に出さず、gasho-daemon のサービスの中で動かすので、gasho-daemon と一緒に止まる。
+子プロセスは、プラグインが有効で、その working server で動かすことになったときに起動する。落ちたときは、1秒から倍ずつ延ばして最大60秒待ってから起動し直す。10分間に5回落ちたら起動し直すのをやめ、プラグインの画面に「失敗」と出す。プラグインを更新するか、有効にし直すまで、その状態のままにする。子プロセスの出力は、gasho-daemon のログに書く。子プロセスは、セッションの端末とは違ってスコープの外に出さず、gasho-daemon のサービスの中で動かすので、gasho-daemon と一緒に止まる。
 
-Gasho サーバーは、`daemon.js` を、gasho-daemon に WebSocket で渡す。working server ごとにプラグインを入れなくてよく、画面の部分と daemon の部分の版もずれない。GitHub プラグインを直したときも、gasho-daemon の新しい版を公開しなくてよい。gasho-daemon は、受け取ったファイルを `~/.cache/gasho/daemon-plugins/<ID>/<ハッシュ>/daemon.js` に置き、Gasho サーバーが知らせたハッシュと同じときだけ動かす。
+Gasho サーバーは、`daemon.js` を、gasho-daemon に WebSocket で渡す。working server ごとにプラグインを入れなくてよく、画面の部分と daemon の部分の版もずれない。GitHub プラグインを直したときも、gasho-daemon の新しい版を公開しなくてよい。gasho-daemon は、受け取ったファイルを `~/.cache/gasho/daemon-plugins/<ID>/<ハッシュ>/daemon.mjs` に置き、Gasho サーバーが知らせたハッシュと同じときだけ動かす。拡張子を `.mjs` にするのは、そばに package.json がなくても、Node.js が ES モジュールとして読むようにするためである。
 
 daemon の部分をどの working server で動かすかは、プラグインを追加するときに選ぶ（P9）。「すべて」を選ぶと、あとから登録した working server でも動かす。「選んだものだけ」を選ぶと、選んだ working server でだけ動かす。既定は「すべて」で、あとからプラグインの画面で変えられる。変えたことは、操作のログに残す。gasho-daemon を `GASHO_PLUGINS=none` で動かすと、その working server では、どのプラグインの daemon の部分も動かさない。
 
@@ -708,7 +712,7 @@ daemon の部分を動かしている gasho-daemon は、新しいハッシュ�
 
 ```bash
 npm run hub:plugin -- add --link ~/repos/GashoPlugins/github/dist   # 最初に1回。コピーせずにリンクを置く
-cd ~/repos/GashoPlugins && npm run dev -w github                    # vite build --watch。保存するたびに dist/ を書き直す
+cd ~/repos/GashoPlugins && npm run dev -w github                    # gasho-plugin build --watch。保存するたびに dist/ を書き直す
 npm run hub:plugin -- list
 npm run hub:plugin -- remove github                                 # 外す（リンクのときはリンクだけを消す）
 ```
@@ -723,9 +727,9 @@ npm run hub:plugin -- remove github                                 # 外す（�
 
 画面は、有効なプラグインの `web.js` を `import()` で、`web.css` を `<link>` で読み込む。Gasho の画面は、プラグインの読み込みを待たずに出し、プラグインの部品は、読み込めたものから出す。プラグインのページやパネルの URL を開いたときは、読み込みが終わるまで「読み込み中…」を出し、15秒たっても読み込めなければ、読み込めないことを出す。Vite の開発サーバー（`npm run web:dev`）は、`/ws` と `/api` と同じく、`/plugins` も Gasho サーバーに中継する。
 
-`web.js` には、`react`、`react-dom`、`react/jsx-runtime`、`@gasho/plugin-sdk` を入れず、Gasho が持っているものを使う。React が1つのページに2つあるとフックが動かず、SDK のフックは Gasho の状態を読む必要があるからである。Gasho は、プラグインを読み込む前に、これらを1つのオブジェクトにまとめて `globalThis` に置く。SDK のビルドの設定は、プラグインのコードにあるこれらの import を、そのオブジェクトから読む小さなモジュールに置き換える。アイコンなど、ほかのパッケージは `web.js` の中に入れる。
+`web.js` には、`react`、`react-dom`、`react/jsx-runtime`、`@gasho/plugin-sdk` を入れず、Gasho が持っているものを使う。React が1つのページに2つあるとフックが動かず、SDK のフックは Gasho の状態を読む必要があるからである。Gasho は、プラグインを読み込む前に、これらを1つのオブジェクトにまとめて `globalThis` に置く。SDK のビルドのコマンドは、プラグインのコードにあるこれらの import を、そのオブジェクトから読む小さなモジュールに置き換える。アイコンなど、ほかのパッケージは `web.js` の中に入れる。
 
-Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスしか入っていない。そのため、プラグインは自分の CSS（`web.css`）を持つ。SDK のビルドの設定は、プラグインのコードから、Gasho と同じテーマで CSS を作る。テーマは、`bg-surface-raised` や `text-muted-foreground` などの色と、角の丸みである。ブラウザーの既定のスタイルを打ち消す部分（preflight）は、Gasho の CSS がすでに持っているので入れない。テーマは SDK の `theme.css` に置き、Gasho 自身の `index.css` もこのファイルを読み込んで、両方の色をそろえる。
+Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスしか入っていない。そのため、プラグインは自分の CSS（`web.css`）を持つ。プラグインの CSS は SDK の `plugin.css` を読み込み、SDK のビルドのコマンドが、プラグインのコードから、Gasho と同じテーマで CSS を作る。テーマは、`bg-surface-raised` や `text-muted-foreground` などの色と、角の丸みである。ブラウザーの既定のスタイルを打ち消す部分（preflight）は、Gasho の CSS がすでに持っているので入れない。テーマは SDK の `theme.css` に置き、Gasho 自身の `index.css` もこのファイルを読み込んで、両方の色をそろえる。
 
 次のときは、プラグインの画面にそのプラグインを「読み込めない」と理由つきで出し、Gasho のほかの部分はそのまま動かす。
 
@@ -761,7 +765,7 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 | gasho-daemon → Gasho サーバー | `plugin.code.get` | 持っていない `daemon.js` の ID とハッシュ |
 | gasho-daemon → Gasho サーバー | `plugin.event` | プラグイン、topic、data、retain |
 
-`sendInput` は、いまの `session.input` に、送ったプラグインの ID（`via`）を足して送る。Gasho サーバーは、操作のログの「(by <端末>)」に、プラグインの ID も添える。
+`useSendInput` の関数は、いまの `session.input` に、送ったプラグインの ID（`via`）を足して送る。Gasho サーバーは、操作のログの「(by <端末>)」に、プラグインの ID も添える。
 
 ## 安全
 
@@ -778,7 +782,7 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 - プラグインのファイルは、登録したブラウザーにだけ配る
 - daemon の部分は、gasho-daemon と同じ OS のユーザーで動き、そのユーザーのファイルを読み書きし、コマンドを実行できる。daemon の部分は、選んだ working server でだけ動かす
 - gasho-daemon は、daemon の部分に、自分が見ているセッションのフォルダーと、その中で見つけたリポジトリのフォルダーだけを渡す。引数はブラウザーから来るので、daemon の部分が確かめる
-- 次のことは、端末とプラグインの ID とともに操作のログに残す。プラグインを追加・更新・外したこと、有効・無効にしたこと、daemon の部分を動かす working server を変えたこと、`scope: "server"` の設定を変えたこと、`write` のメソッドを呼んだこと、`sendInput` で発言を送ったことである。`read` の呼び出しは残さない
+- 次のことは、端末とプラグインの ID とともに操作のログに残す。プラグインを追加・更新・外したこと、有効・無効にしたこと、daemon の部分を動かす working server を変えたこと、`scope: "server"` の設定を変えたこと、`write` のメソッドを呼んだこと、`useSendInput` で発言を送ったことである。`read` の呼び出しは残さない
 - GitHub のコメントのように外から来た文は、SDK の `Markdown` で出す。会話と同じく、HTML は出さず、画像は読み込まない
 - Gasho は、プラグインのための秘密の値（トークンなど）を保存しない。外のサービスにログインが要るプラグインは、gh と同じく、working server の CLI のログインを使う
 
@@ -809,7 +813,7 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 
 - Issue と Pull request のパネルを開いているあいだ、一定の間隔で読み直す設定（P5）。仕様の H1〜H3 にある「60秒ごとに取得し、間隔は設定で変えられるようにする」にあたる
 - Actions の実行の一覧（H3）と、仕様の画面の表にある「リポジトリ」の画面（P1、P2）
-- Issue の内容を、そのセッションへの発言として Claude に渡すボタン（P3、`sendInput`）
+- Issue の内容を、そのセッションへの発言として Claude に渡すボタン（P3、`useSendInput`）
 
 ## 実装の順序
 
@@ -824,7 +828,7 @@ Gasho の CSS（Tailwind CSS）には、Gasho のコードが使うクラスし�
 └──────────────────────────────────┘     └─────────────────────────────┘
 ```
 
-1. 動かす仕組みと GitHub：Gasho サーバーのプラグインの一覧・監視・配布・中継、画面での読み込みとホットリロード、拡張点（P1〜P7）、gasho-daemon の子プロセスでの実行と入れ替え、P12 のコマンドを作る。プラグインの画面は、入れたものの一覧、有効・無効、daemon の部分を動かす working server の変更までを作る。SDK は GitHub Packages に公開する。GashoPlugins を作って GitHub を移し、P12 のコマンドで入れる。プラグインに対応した gasho-daemon（0.12.0）を出す
+1. 動かす仕組みと GitHub：Gasho サーバーのプラグインの一覧・監視・配布・中継、画面での読み込みとホットリロード、拡張点（P1〜P7）、gasho-daemon の子プロセスでの実行と入れ替え、P12 のコマンドを作る。プラグインの画面は、入れたものの一覧、有効・無効、daemon の部分を動かす working server の変更までを作る。SDK は GitHub Packages に公開する。GashoPlugins を作って GitHub を移し、P12 のコマンドで入れる。プラグインに対応した gasho-daemon を出す
 2. カタログから入れる：GashoPlugins の GitHub Actions で、プラグインのリリースと `catalog.json` を作る。Gasho サーバーがカタログを読み、プラグインの画面で追加・更新・外すをできるようにする。P8（イベント）と、ほかのプラグインを作る
 
 1では、カタログがなくても、コマンドで入れた GitHub プラグインで、拡張点とホットリロードを確かめられる。2で、GashoPlugins のプラグインを、画面から選んで入れられるようにする。

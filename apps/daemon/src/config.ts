@@ -10,13 +10,17 @@ export interface DaemonConfig {
   hookSecret: string | undefined;
   claudeDir: string;
   claudeBin: string;
-  /** The GitHub CLI, used with its own login to list a repository's issues and pull requests. */
+  /** The GitHub CLI, used with its own login to clone a repository for a new session (folders.ts). */
   ghBin: string;
   pollIntervalMs: number;
   /** Where the daemon keeps its own files (managed sessions); next to the registration. */
   stateDir: string;
   /** Files sent with inputs, one folder per session; Claude reads them from here. */
   attachmentsDir: string;
+  /** The code of the plugins' daemon parts, as the Gasho server handed it over (docs/plugins.md). */
+  pluginCacheDir: string;
+  /** False when GASHO_PLUGINS=none: no plugin's daemon part runs on this working server. */
+  runPlugins: boolean;
 }
 
 export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.env): DaemonConfig {
@@ -32,5 +36,7 @@ export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.
     pollIntervalMs: Number(env.GASHO_POLL_MS ?? 3000),
     stateDir: path.dirname(credentialsPath(env)),
     attachmentsDir: path.join(env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "gasho", "attachments"),
+    pluginCacheDir: path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "gasho", "daemon-plugins"),
+    runPlugins: env.GASHO_PLUGINS !== "none",
   };
 }

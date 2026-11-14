@@ -13,6 +13,7 @@ import type { ClientToHub, DaemonToHub, DeviceKind, PairRequest, PairResponse } 
 import { clearDeviceCookie, deviceCookie, parseDeviceCookie, RateLimiter } from "./auth.ts";
 import { CLOSE_UNAUTHORIZED, type ClientPeer, type DaemonPeer, type Hub } from "./hub.ts";
 import { isAllowed, normalizeAddress } from "./netallow.ts";
+import type { PluginRegistry } from "./plugins.ts";
 import type { DeviceRecord, Store } from "./store.ts";
 
 const MIME: Record<string, string> = {
@@ -26,6 +27,10 @@ const MIME: Record<string, string> = {
   ".webmanifest": "application/manifest+json",
   ".woff2": "font/woff2",
   ".txt": "text/plain; charset=utf-8",
+  ".map": "application/json",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".jpg": "image/jpeg",
+  ".webp": "image/webp",
 };
 
 const HEARTBEAT_MS = 30_000;
@@ -36,6 +41,8 @@ export interface ServerOptions {
   store: Store;
   webDist: string;
   allow: BlockList;
+  /** The installed plugins, whose files are served under /plugins/ (docs/plugins.md). */
+  plugins?: PluginRegistry;
 }
 
 class HttpError extends Error {
@@ -126,7 +133,7 @@ function cleanName(v: unknown): string {
 }
 
 export function createServer(opts: ServerOptions): http.Server {
-  const { hub, store, webDist, allow } = opts;
+  const { hub, store, webDist, allow, plugins } = opts;
   const pairLimiter = new RateLimiter(10, 10 * 60_000);
   const deniedLogged = new Set<string>();
 
@@ -220,6 +227,32 @@ export function createServer(opts: ServerOptions): http.Server {
       return;
     }
     const url = new URL(req.url ?? "/", "http://localhost");
+    // A plugin's files: /plugins/<id>/<hash>/<file>, to registered browsers only. The hash is the version, so a file
+    // never changes under its URL.
+    if (url.pathname.startsWith("/plugins/")) {
+      if (!browserDevice(req)) {
+        res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }).end("this browser is not registered");
+        return;
+      }
+      let file: string | undefined;
+      try {
+        const [id = "", hash = "", ...rest] = url.pathname.slice("/plugins/".length).split("/").map(decodeURIComponent);
+        file = plugins?.filePath(id, hash, rest.join("/"));
+      } catch {
+        file = undefined;
+      }
+      if (!file) {
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("not found");
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
+        "cache-control": "private, max-age=31536000, immutable",
+        "x-content-type-options": "nosniff",
+      });
+      fs.createReadStream(file).pipe(res);
+      return;
+    }
     if (!url.pathname.startsWith("/api/")) {
       serveStatic(webDist, url, res);
       return;

@@ -6,7 +6,6 @@ import type {
   CommandResult,
   DaemonToHub,
   DeviceInfo,
-  GitHubListKind,
   HubToClient,
   HubToDaemon,
   InputFeature,
@@ -16,6 +15,8 @@ import type {
   SessionCommand,
 } from "@gasho/protocol";
 import { notificationFor } from "./notify.ts";
+import { PluginHub } from "./plugin-hub.ts";
+import type { PluginRegistry } from "./plugins.ts";
 import type { Store } from "./store.ts";
 
 export interface Peer<T> {
@@ -34,29 +35,22 @@ export const CLOSE_REPLACED = 4002;
 export const CLOSE_UNAUTHORIZED = 4401;
 
 /**
- * A browser's request that a working server answers: a transcript page, a branch graph, a GitHub list or item, or a
- * folder or file inside the session's folder.
+ * A browser's request that a working server answers: a transcript page, a branch graph, or a folder or file inside the
+ * session's folder. (Plugins' requests are relayed by PluginHub.)
  */
 interface PendingRequest {
-  kind: "transcript" | "graph" | "github" | "githubItem" | "dir" | "file";
+  kind: "transcript" | "graph" | "dir" | "file";
   client: ClientPeer;
   machine: string;
   sessionId: string;
-  /** graph, github: the repository inside the session's folder, if one was asked for. */
+  /** graph: the repository inside the session's folder, if one was asked for. */
   repo?: string;
-  /** github, githubItem: issues or pull requests. */
-  list?: GitHubListKind;
-  /** githubItem: the issue's or pull request's number. */
-  number?: number;
   /** dir, file: where, from the session's folder. */
   path?: string;
   timer: NodeJS.Timeout;
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
-/** gasho-daemon asks GitHub with `gh`, which can take a while. */
-const GITHUB_TIMEOUT_MS = 25_000;
-const GITHUB_LISTS = new Set<GitHubListKind>(["issues", "pulls"]);
 const LAUNCH_TIMEOUT_MS = 45_000;
 /**
  * An input may wait for Claude Code to switch the model, the effort level and ultracode before it is typed, each
@@ -231,6 +225,7 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       if (cmd.model !== undefined && !MODELS.has(cmd.model)) return "モデルの指定が正しくありません。";
       if (cmd.effort !== undefined && !EFFORTS.has(cmd.effort)) return "Effort の指定が正しくありません。";
       if (cmd.ultracode !== undefined && typeof cmd.ultracode !== "boolean") return "Ultracode の指定が正しくありません。";
+      if (cmd.via !== undefined && (typeof cmd.via !== "string" || !/^[a-z][a-z0-9-]{1,31}$/.test(cmd.via))) return "送ったプラグインの指定が正しくありません。";
       // These change Claude Code's defaults for every new session; the chat box switches them for this session.
       if (/^\s*\/model(?=\s|$)/i.test(cmd.text)) {
         return "モデルは、入力欄のモデルの選択で切り替えてください。/model で切り替えると、これから始めるすべてのセッションの既定のモデルも変わります。";
@@ -292,10 +287,26 @@ export class Hub {
   private clients = new Set<ClientPeer>();
   private pending = new Map<string, PendingRequest>();
   private commands = new Map<string, PendingCommand>();
+  /** The plugins (docs/plugins.md); absent when the Gasho server was started without a plugins folder (tests). */
+  private plugins: PluginHub | undefined;
 
-  constructor(store: Store) {
+  constructor(store: Store, opts: { plugins?: PluginRegistry } = {}) {
     this.store = store;
     for (const m of store.loadMachines()) this.machines.set(m.id, m);
+    if (opts.plugins) {
+      this.plugins = new PluginHub({
+        store,
+        registry: opts.plugins,
+        machines: () => this.machines,
+        daemon: (machine) => this.daemons.get(machine),
+        daemons: () => this.daemons.entries(),
+        broadcast: (m) => this.broadcast(m),
+        audit: (event) => {
+          this.store.addEvent(event);
+          this.broadcast({ type: "event", event });
+        },
+      });
+    }
   }
 
   // ---- daemons ----
@@ -320,6 +331,8 @@ export class Hub {
       this.store.touchDevice(device.id);
       peer.send({ type: "welcome" });
       this.broadcast({ type: "machine", machine: m });
+      this.plugins?.onDaemonReady(device.id, peer);
+      this.plugins?.toClients();
       return;
     }
     const id = peer.machineId;
@@ -376,31 +389,6 @@ export class Hub {
         req.client.send({ type: "git.graph", machine: id, sessionId: msg.sessionId, repo: req.repo, graph: msg.graph, error: msg.error });
         break;
       }
-      case "github.list": {
-        const req = this.pending.get(msg.requestId);
-        if (!req || req.kind !== "github" || !req.list) break;
-        clearTimeout(req.timer);
-        this.pending.delete(msg.requestId);
-        req.client.send({ type: "github.list", machine: id, sessionId: req.sessionId, repo: req.repo, kind: req.list, list: msg.list, error: msg.error });
-        break;
-      }
-      case "github.item": {
-        const req = this.pending.get(msg.requestId);
-        if (!req || req.kind !== "githubItem" || !req.list || req.number === undefined) break;
-        clearTimeout(req.timer);
-        this.pending.delete(msg.requestId);
-        req.client.send({
-          type: "github.item",
-          machine: id,
-          sessionId: req.sessionId,
-          repo: req.repo,
-          kind: req.list,
-          number: req.number,
-          item: msg.item,
-          error: msg.error,
-        });
-        break;
-      }
       case "dir":
       case "file": {
         const req = this.pending.get(msg.requestId);
@@ -413,6 +401,11 @@ export class Hub {
         else req.client.send({ type: "file", ...where, file: msg.file, error: msg.error });
         break;
       }
+      case "plugin.status":
+      case "plugin.code.get":
+      case "plugin.response":
+        this.plugins?.onDaemonMessage(id, peer, msg);
+        break;
       case "hook": {
         const event: MachineHookEvent = { ...msg.event, machine: id };
         this.store.addEvent(event);
@@ -443,6 +436,7 @@ export class Hub {
     }
     this.failPending((req) => req.machine === id, "machine disconnected");
     this.failCommands((c) => c.machine === id, "working server との接続が切れました。");
+    this.plugins?.onDaemonClose(id);
   }
 
   // ---- browsers ----
@@ -455,6 +449,7 @@ export class Hub {
       machines: [...this.machines.values()],
       notifications: this.store.recentNotifications(),
       events: this.store.recentEvents(),
+      ...(this.plugins ? { plugins: this.plugins.infos() } : {}),
     });
   }
 
@@ -496,48 +491,6 @@ export class Hub {
         daemon.send({ type: "git.graph.get", requestId, sessionId: msg.sessionId, repo });
         break;
       }
-      case "github.list.get": {
-        const daemon = this.daemons.get(msg.machine);
-        const repo = msg.repo;
-        if (!GITHUB_LISTS.has(msg.kind)) return;
-        const reply = { type: "github.list" as const, machine: msg.machine, sessionId: msg.sessionId, repo, kind: msg.kind };
-        if (repo !== undefined && (typeof repo !== "string" || repo.length === 0 || repo.length > 500)) {
-          peer.send({ ...reply, error: "リポジトリの指定が正しくありません。" });
-          return;
-        }
-        if (!daemon) {
-          peer.send({ ...reply, error: "この working server はオフラインです。" });
-          return;
-        }
-        const requestId = randomUUID();
-        const timer = setTimeout(() => {
-          if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
-        }, GITHUB_TIMEOUT_MS).unref();
-        this.pending.set(requestId, { kind: "github", list: msg.kind, client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
-        daemon.send({ type: "github.list.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind });
-        break;
-      }
-      case "github.item.get": {
-        const daemon = this.daemons.get(msg.machine);
-        const { repo, number } = msg;
-        if (!GITHUB_LISTS.has(msg.kind) || !Number.isInteger(number) || number < 1 || number > 1e9) return;
-        const reply = { type: "github.item" as const, machine: msg.machine, sessionId: msg.sessionId, repo, kind: msg.kind, number };
-        if (repo !== undefined && (typeof repo !== "string" || repo.length === 0 || repo.length > 500)) {
-          peer.send({ ...reply, error: "リポジトリの指定が正しくありません。" });
-          return;
-        }
-        if (!daemon) {
-          peer.send({ ...reply, error: "この working server はオフラインです。" });
-          return;
-        }
-        const requestId = randomUUID();
-        const timer = setTimeout(() => {
-          if (this.pending.delete(requestId)) peer.send({ ...reply, error: "working server から応答がありません。" });
-        }, GITHUB_TIMEOUT_MS).unref();
-        this.pending.set(requestId, { kind: "githubItem", list: msg.kind, number, client: peer, machine: msg.machine, sessionId: msg.sessionId, repo, timer });
-        daemon.send({ type: "github.item.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind, number });
-        break;
-      }
       case "dir.get":
       case "file.get": {
         const kind = msg.type === "dir.get" ? "dir" : "file";
@@ -561,6 +514,14 @@ export class Hub {
       case "notification.read":
         this.store.markRead(msg.ids);
         this.broadcast({ type: "notification.read", ids: msg.ids });
+        break;
+      case "plugin.request":
+      case "plugin.enable":
+      case "plugin.machines":
+      case "plugin.setting":
+        if (this.plugins) this.plugins.onClientMessage(peer, msg);
+        else if (msg.type === "plugin.request") peer.send({ type: "plugin.response", requestId: msg.requestId, error: "この Gasho サーバーではプラグインを使えません。" });
+        else peer.send({ type: "plugin.result", requestId: msg.requestId, result: { ok: false, error: "この Gasho サーバーではプラグインを使えません。" } });
         break;
       case "session.launch":
       case "session.input":
@@ -635,6 +596,7 @@ export class Hub {
           cmd.effort && `[effort: ${cmd.effort}]`,
           cmd.ultracode !== undefined && `[ultracode: ${cmd.ultracode ? "on" : "off"}]`,
           ...(cmd.files ?? []).map((f) => `[file: ${f.name.slice(0, 100)}, ${Math.ceil(base64Bytes(f.data) / 1024)}KB]`),
+          cmd.via && `[via: ${cmd.via}]`,
         ]
           .filter(Boolean)
           .join(" ");
@@ -711,6 +673,7 @@ export class Hub {
 
   onClientClose(peer: ClientPeer): void {
     this.clients.delete(peer);
+    this.plugins?.onClientClose(peer);
     for (const [id, c] of this.commands) {
       if (c.client !== peer) continue;
       clearTimeout(c.timer);
@@ -767,6 +730,7 @@ export class Hub {
       if (this.machines.delete(id)) {
         this.failPending((req) => req.machine === id, "machine was removed");
         this.broadcast({ type: "machine.removed", id });
+        this.plugins?.onDaemonClose(id);
       }
     }
   }
@@ -788,11 +752,7 @@ export class Hub {
       clearTimeout(req.timer);
       this.pending.delete(id);
       if (req.kind === "graph") req.client.send({ type: "git.graph", machine: req.machine, sessionId: req.sessionId, repo: req.repo, error });
-      else if (req.kind === "github" && req.list) {
-        req.client.send({ type: "github.list", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, error });
-      } else if (req.kind === "githubItem" && req.list && req.number !== undefined) {
-        req.client.send({ type: "github.item", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, number: req.number, error });
-      } else if ((req.kind === "dir" || req.kind === "file") && req.path !== undefined) {
+      else if ((req.kind === "dir" || req.kind === "file") && req.path !== undefined) {
         req.client.send({ type: req.kind, machine: req.machine, sessionId: req.sessionId, path: req.path, error });
       } else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
     }

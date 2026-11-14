@@ -21,7 +21,6 @@ import type { DaemonConfig } from "./config.ts";
 import { listDir, readFileAt, writeFileAt } from "./files.ts";
 import { cloneRepo, createFolder } from "./folders.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
-import { ghError, listGitHub, viewGitHub } from "./github.ts";
 import { TokenCounter } from "./tokens.ts";
 import { startHookServer, summarizeHook } from "./hooks.ts";
 import { HubClient } from "./hub-client.ts";
@@ -71,9 +70,11 @@ import {
 import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
 import { SessionTerminals, Terminals } from "./terminal.ts";
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
+import type { SessionWire } from "./plugin-ipc.ts";
+import { PluginRunner } from "./plugins.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.11.1";
+export const DAEMON_VERSION = "0.12.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -187,6 +188,8 @@ export class Daemon {
   private latePicker = new Map<string, number>();
   /** The user's messages Claude Code recorded lately, per session: to tell whether an Enter it took late went through. */
   private prompts = new Map<string, { at: number; text: string }[]>();
+  /** The daemon parts of plugins (docs/plugins.md). */
+  private plugins: PluginRunner;
 
   /** How long the prompt box may take to let go of a text after Enter (see typeInput). */
   private enterWaitMs: number;
@@ -196,6 +199,14 @@ export class Daemon {
     this.enterWaitMs = opts.enterWaitMs ?? ENTER_WAIT_MS;
     this.terminals = new SessionTerminals(new Terminals({ stateDir: cfg.stateDir, env: cleanEnv() }), new Zellij(cleanEnv()));
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
+    this.plugins = new PluginRunner({
+      cacheDir: cfg.pluginCacheDir,
+      send: (m) => this.hub.send(m),
+      machine: () => ({ id: cfg.machineId, name: os.hostname() }),
+      session: (id) => this.pluginSession(id),
+      enabled: cfg.runPlugins,
+      log: (s) => log(s),
+    });
     this.hub = new HubClient({
       url: cfg.hubUrl,
       hello: () => ({ type: "hello", machineId: cfg.machineId, token: cfg.token, daemonVersion: DAEMON_VERSION }),
@@ -203,6 +214,8 @@ export class Daemon {
         this.lastSent = "";
         this.emitSessions();
         this.emitCapabilities();
+        // Also tells the Gasho server that this gasho-daemon runs plugins.
+        this.plugins.status(true);
       },
       onMessage: (m) => void this.onHubMessage(m),
       onRejected: (reason) => {
@@ -401,6 +414,26 @@ export class Daemon {
     const repo = await githubRepoOf(cwd);
     this.github.set(cwd, { at: Date.now(), repo });
     return repo;
+  }
+
+  /**
+   * The session a plugin's call names, as this daemon tracks it: its folder, and the repositories found inside it. A
+   * plugin never gets a folder the browser named, only these (see PluginRunner).
+   */
+  private async pluginSession(sessionId: string): Promise<SessionWire | undefined> {
+    const t = this.tracked.get(sessionId);
+    if (!t) return undefined;
+    const name = this.managed.get(sessionId)?.name ?? t.info.name;
+    const repos = (await this.reposOf(t.info.cwd)) ?? [];
+    return {
+      sessionId,
+      cwd: t.info.cwd,
+      ...(name ? { name } : {}),
+      managed: Boolean(this.managed.get(sessionId)),
+      ...(t.info.github ? { github: t.info.github } : {}),
+      ...(t.info.gitBranch ? { gitBranch: t.info.gitBranch } : {}),
+      repos: repos.map((r) => ({ path: r.path, ...(r.github ? { github: r.github } : {}), ...(r.branch ? { branch: r.branch } : {}) })),
+    };
   }
 
   /** Repositories inside a folder that is not itself in one (see nestedRepos). */
@@ -696,14 +729,18 @@ export class Daemon {
 
   private async onHubMessage(m: HubToDaemon): Promise<void> {
     switch (m.type) {
+      case "plugins":
+        this.plugins.update(m.plugins);
+        return;
+      case "plugin.code":
+        this.plugins.onCode(m);
+        return;
+      case "plugin.request":
+        return this.plugins.request(m);
       case "transcript.get":
         return this.sendTranscriptPage(m);
       case "git.graph.get":
         return this.sendGitGraph(m);
-      case "github.list.get":
-        return this.sendGitHubList(m);
-      case "github.item.get":
-        return this.sendGitHubItem(m);
       case "dir.get":
         return this.sendDir(m);
       case "file.get":
@@ -821,48 +858,6 @@ export class Daemon {
         ? "このフォルダーは Git のリポジトリではありません。"
         : `Git の情報を読めませんでした：${text.split("\n")[0]}`;
       this.hub.send({ ...reply, error });
-    }
-  }
-
-  /** The open issues or pull requests of the GitHub repository the session works in, read with `gh`. */
-  private async sendGitHubList(m: Extract<HubToDaemon, { type: "github.list.get" }>): Promise<void> {
-    const reply = { type: "github.list" as const, requestId: m.requestId, sessionId: m.sessionId, repo: m.repo, kind: m.kind };
-    const where = await this.repoDir(m.sessionId, m.repo);
-    if ("error" in where) {
-      this.hub.send({ ...reply, error: where.error });
-      return;
-    }
-    const github = await this.githubOf(where.dir);
-    if (!github) {
-      this.hub.send({ ...reply, error: "このリポジトリは GitHub にありません（origin が GitHub のリポジトリではありません）。" });
-      return;
-    }
-    try {
-      this.hub.send({ ...reply, list: await listGitHub(this.cfg.ghBin, github, m.kind) });
-    } catch (e) {
-      log(`gh could not list ${m.kind} of ${github.owner}/${github.name}`, e);
-      this.hub.send({ ...reply, error: ghError(e) });
-    }
-  }
-
-  /** One issue or pull request of the GitHub repository the session works in, with its conversation, read with `gh`. */
-  private async sendGitHubItem(m: Extract<HubToDaemon, { type: "github.item.get" }>): Promise<void> {
-    const reply = { type: "github.item" as const, requestId: m.requestId, sessionId: m.sessionId, repo: m.repo, kind: m.kind, number: m.number };
-    const where = await this.repoDir(m.sessionId, m.repo);
-    if ("error" in where) {
-      this.hub.send({ ...reply, error: where.error });
-      return;
-    }
-    const github = await this.githubOf(where.dir);
-    if (!github) {
-      this.hub.send({ ...reply, error: "このリポジトリは GitHub にありません（origin が GitHub のリポジトリではありません）。" });
-      return;
-    }
-    try {
-      this.hub.send({ ...reply, item: await viewGitHub(this.cfg.ghBin, github, m.kind, m.number) });
-    } catch (e) {
-      log(`gh could not read ${m.kind} #${m.number} of ${github.owner}/${github.name}`, e);
-      this.hub.send({ ...reply, error: ghError(e) });
     }
   }
 
