@@ -260,6 +260,32 @@ export function surveyOpen(screen: string): boolean {
   return /How is Claude doing this session\?/.test(above[0] ?? "") && /\b0:\s*Dismiss\b/.test(above[1] ?? "");
 }
 
+/**
+ * Claude Code's offer to set up auto mode, drawn right above the prompt box while the box stays shown ("Teach auto
+ * mode about your environment?" / "1. Yes 2. Not now 3. Don't show again" / "Enter to confirm · Esc to cancel"). It
+ * takes the keys while it is shown: a paste does not reach the box. Esc answers it like "Not now".
+ */
+export function autoModeOfferOpen(screen: string): boolean {
+  const lines = screenLines(screen);
+  const box = promptBox(lines);
+  if (!box) return false;
+  const above = lines.slice(0, box.top).filter((l) => l.trim());
+  if (!/Enter to confirm · Esc to cancel/.test(above.at(-1) ?? "")) return false;
+  // The offer's own lines: up to the rule drawn above it.
+  const ruleAt = above.findLastIndex((l) => /^─{8,}/.test(l));
+  return above.slice(ruleAt + 1).some((l) => /Teach auto mode about your environment\?/.test(l));
+}
+
+/**
+ * The key that closes what is drawn right above the prompt box and takes the keys while the box is still shown: "0"
+ * for the feedback survey, Esc for the offer to set up auto mode. Undefined when neither is shown.
+ */
+export function noticeKey(screen: string): "0" | "Esc" | undefined {
+  if (surveyOpen(screen)) return "0";
+  if (autoModeOfferOpen(screen)) return "Esc";
+  return undefined;
+}
+
 /** The lines of Claude Code's prompt box. Undefined when the screen does not show the prompt box. */
 export function promptBoxLines(screen: string): string[] | undefined {
   const lines = screenLines(screen);

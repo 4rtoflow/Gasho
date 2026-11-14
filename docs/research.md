@@ -100,6 +100,7 @@ zellij を操作するときは、`--session` で対象を必ず指定する。r
 - スラッシュコマンドは、`<command-name>` の付いたユーザーの発言と、出力の `<local-command-stdout>` として残る。選択画面を Esc で閉じたときのように、system の記録（subtype が `local_command`）として残ることもある
 - 使ったモデルは、ターンの初めの `attachment` の記録（type が `model`）と、返答の `message.model` に残る
 - まれに満足度のアンケート（`How is Claude doing this session?` と `1: Bad 2: Fine 3: Good 0: Dismiss`）が出る。モデルを切り替えた直後に出たとき、続けて貼り付けた発言が入力欄に入らず、送られなかった
+- Claude Code 2.1.325 では、auto モードのセッションで「Teach auto mode about your environment?」（`1. Yes` `2. Not now` `3. Don't show again`、`Enter to confirm · Esc to cancel`）が入力欄のすぐ上に出ることがある。入力欄は消えないが、キーはこの確認が受け取り、貼り付けた発言は入力欄に入らない。Esc で閉じると入力欄に戻る（2026-11-14 に live の2つのセッションで確認）
 - Node の組み込みの WebSocket は、14MB のメッセージを受け取れた
 
 ## 検証5：Effort と Ultracode
