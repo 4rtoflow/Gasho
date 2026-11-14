@@ -502,10 +502,14 @@ test("a session's name must be one line of 1 to 60 characters; a fork may leave 
   assert.match(validateCommand({ type: "session.remove", sessionId: 7 } as never) ?? "", /セッションの指定/);
 });
 
-test("the kanban's repositories are kept per working server, sent to its daemon now and after every hello, and a bad list is ignored", () => {
+test("the kanban's repositories are kept per working server, sent to its daemon (0.11.0 or later) now and after every hello, and a bad list is ignored", () => {
   const { hub, machineId, machineToken, store } = setup();
+  // 0.10.0 was published without the kanban.
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  assert.equal(old.sent.some((m) => m.type === "kanban.watch"), false);
   const d = fakePeer<HubToDaemon>();
-  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
   assert.deepEqual(d.sent.at(-1), { type: "kanban.watch", paths: [] });
   const c = fakePeer<HubToClient>("b");
   hub.onClientConnect(c);
@@ -517,6 +521,98 @@ test("the kanban's repositories are kept per working server, sent to its daemon 
   // After the Gasho server restarts, the daemon gets the same repositories when it says hello again.
   const again = new Hub(store);
   const d2 = fakePeer<HubToDaemon>();
-  again.onDaemonMessage(d2, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  again.onDaemonMessage(d2, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
   assert.deepEqual(d2.sent.at(-1), { type: "kanban.watch", paths: ["/home/rg/repos/Gasho"] });
+});
+
+test("a folder to make and a repository to clone are checked before they reach the working server", () => {
+  const v = (cmd: unknown) => validateCommand(cmd as never);
+  assert.equal(v({ type: "folder.create", parent: "/home/rg/repos", name: "ws" }), undefined);
+  assert.match(v({ type: "folder.create", parent: "repos", name: "ws" }) ?? "", /絶対パス/);
+  assert.match(v({ type: "folder.create", parent: "/home/rg", name: "" }) ?? "", /名前を入れて/);
+  assert.match(v({ type: "folder.create", parent: "/home/rg", name: " ws" }) ?? "", /空白/);
+  for (const name of ["..", "a/b", "-x", "a\nb"]) assert.match(v({ type: "folder.create", parent: "/home/rg", name }) ?? "", /使えません/, name);
+  assert.match(v({ type: "folder.create", parent: "/home/rg", name: "x".repeat(256) }) ?? "", /長すぎ/);
+  assert.equal(v({ type: "repo.clone", parent: "/home/rg/repos", repo: "https://github.com/cli/cli.git", name: "gh" }), undefined);
+  assert.equal(v({ type: "repo.clone", parent: "/home/rg/repos", repo: "cli/cli" }), undefined);
+  assert.match(v({ type: "repo.clone", parent: "/home/rg/repos", repo: " " }) ?? "", /リポジトリを入れて/);
+  assert.match(v({ type: "repo.clone", parent: "/home/rg/repos", repo: "--upload-pack=x" }) ?? "", /リポジトリの指定/);
+  assert.match(v({ type: "repo.clone", parent: "/home/rg/repos", repo: "cli/cli extra" }) ?? "", /リポジトリの指定/);
+  assert.match(v({ type: "repo.clone", parent: "/home/rg/repos", repo: "cli/cli", name: "../x" }) ?? "", /使えません/);
+  assert.match(v({ type: "repo.clone", parent: "~/repos", repo: "cli/cli" }) ?? "", /絶対パス/);
+  assert.equal(v({ type: "session.launch", cwd: "/home/rg/repos/cli", trust: true }), undefined);
+  assert.match(v({ type: "session.launch", cwd: "/home/rg/repos/cli", trust: "yes" }) ?? "", /信頼の指定/);
+});
+
+test("making folders, cloning and trusting go to a gasho-daemon 0.10.0 or later, and are recorded", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.9.0" });
+  hub.onClientMessage(c, { type: "folder.create", requestId: "f0", machine: machineId, parent: "/home/rg/repos", name: "ws" });
+  let reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && reply.requestId === "f0" && !reply.result.ok);
+  assert.match(reply.result.error ?? "", /フォルダーの作成と clone を扱えません/);
+  hub.onClientMessage(c, { type: "session.launch", requestId: "l0", machine: machineId, cwd: "/home/rg/repos/ws", trust: true });
+  reply = c.sent.at(-1);
+  assert.ok(reply?.type === "command.result" && reply.requestId === "l0" && !reply.result.ok);
+  assert.match(reply.result.error ?? "", /信頼できません/);
+  // A launch that does not ask to trust still goes to an older daemon.
+  hub.onClientMessage(c, { type: "session.launch", requestId: "l1", machine: machineId, cwd: "/home/rg/repos/zen" });
+  assert.equal(old.sent.at(-1)?.type, "session.launch");
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  hub.onClientMessage(c, { type: "folder.create", requestId: "f1", machine: machineId, parent: "/home/rg/repos", name: "ws" });
+  const mk = d.sent.at(-1);
+  assert.ok(mk?.type === "folder.create" && mk.parent === "/home/rg/repos" && mk.name === "ws");
+  hub.onDaemonMessage(d, { type: "command.result", requestId: mk.requestId, result: { ok: true, path: "/home/rg/repos/ws" } });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "f1", machine: machineId, result: { ok: true, path: "/home/rg/repos/ws" } });
+
+  hub.onClientMessage(c, { type: "repo.clone", requestId: "c1", machine: machineId, parent: "/home/rg/repos/ws", repo: "cli/cli" });
+  const clone = d.sent.at(-1);
+  assert.ok(clone?.type === "repo.clone" && clone.repo === "cli/cli" && clone.name === undefined);
+
+  // A launch that stopped at Claude Code's question comes back with what Claude Code pointed out.
+  hub.onClientMessage(c, { type: "session.launch", requestId: "l2", machine: machineId, cwd: "/home/rg/repos/ws/cli" });
+  const asked = d.sent.at(-1);
+  assert.ok(asked?.type === "session.launch" && asked.trust === undefined);
+  const stopped = { ok: false, error: "このフォルダーは、まだ Claude Code に信頼されていません。", needsTrust: true, trustWarnings: ["⚠ This folder …"] };
+  hub.onDaemonMessage(d, { type: "command.result", requestId: asked.requestId, result: stopped });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "l2", machine: machineId, result: stopped });
+  hub.onClientMessage(c, { type: "session.launch", requestId: "l3", machine: machineId, cwd: "/home/rg/repos/ws/cli", trust: true });
+  const trusted = d.sent.at(-1);
+  assert.ok(trusted?.type === "session.launch" && trusted.trust === true);
+
+  // The audit log: refused commands are not in it; a launch told to trust its folder says so.
+  const summaries = c.sent.flatMap((m) => (m.type === "event" ? [[m.event.event, m.event.summary?.replace(/ \(by .*\)$/, "")]] : []));
+  assert.deepEqual(summaries, [
+    ["Gasho:session.launch", "/home/rg/repos/zen"],
+    ["Gasho:folder.create", "/home/rg/repos/ws"],
+    ["Gasho:repo.clone", "cli/cli → /home/rg/repos/ws"],
+    ["Gasho:session.launch", "/home/rg/repos/ws/cli"],
+    ["Gasho:session.launch", "/home/rg/repos/ws/cli [trust]"],
+  ]);
+});
+
+test("validateCommand checks an answer to a permission request", () => {
+  const ok = { type: "permission.answer" as const, sessionId: "s1", permissionId: "p1", decision: "allow" as const };
+  assert.equal(validateCommand(ok), undefined);
+  assert.equal(validateCommand({ ...ok, decision: "always" }), undefined);
+  assert.ok(validateCommand({ ...ok, permissionId: "" }));
+  assert.ok(validateCommand({ ...ok, decision: "maybe" as "allow" }));
+});
+
+test("a shell command (an input that starts with \"!\") needs a command and cannot carry files", () => {
+  const input = (text: string, files: { name: string; data: string }[] = []) =>
+    validateCommand({ type: "session.input", sessionId: "s1", text, ...(files.length ? { files } : {}) });
+  assert.equal(input("!ls -la"), undefined);
+  assert.equal(input("!npm test 2>&1 | tail -20"), undefined);
+  assert.match(input("!") ?? "", /コマンドを入れて/);
+  assert.match(input("  !   ") ?? "", /コマンドを入れて/);
+  assert.match(input("!cat", [{ name: "a.txt", data: "YQ==" }]) ?? "", /ファイルを添付できません/);
+  // Not a shell command: "!" further on, or files with an ordinary message.
+  assert.equal(input("これを見て!"), undefined);
+  assert.equal(input("見て", [{ name: "a.txt", data: "YQ==" }]), undefined);
 });

@@ -1,6 +1,7 @@
 // The daemon's typing against a fake Claude Code terminal (no claude, no zellij): Enter is pressed at most once per
 // paste, nothing is typed behind a command whose Enter was not taken yet, Claude Code's dim suggestion is not typed
 // text, and the /model picker gets "s" (this session only), never Enter (which saves the default for every session).
+// Also the /rename that names a session after its first message, which never empties a box someone is typing in.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -8,6 +9,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { Daemon } from "../src/daemon.ts";
 import { readScreen } from "../src/managed.ts";
+import { readTranscript, TranscriptTail } from "../src/transcript.ts";
 
 const RULE = "─".repeat(50);
 const MODELS = ["Default (recommended)  Sonnet 5.5 · Efficient", "Opus 5.5", "Fable 5.2", "Sonnet 5.5", "Haiku 5.5"];
@@ -331,5 +333,129 @@ test("an input reports only its own outcome, not that of an earlier queued input
   assert.equal(r.warning, undefined);
   assert.equal(r.unapplied, undefined);
   assert.equal(r.queued, true);
+  await done();
+});
+
+// ---- the name from the first message ----
+
+const FIRST_MESSAGE = {
+  type: "user",
+  uuid: "u1",
+  timestamp: "2026-11-13T00:00:00.000Z",
+  message: { role: "user", content: "セッションの最初のメッセージから、セッション名を自動で変更されるようにしたい。" },
+};
+const TITLE = { type: "ai-title", aiTitle: "セッション名の自動設定" };
+
+/** Makes the fake session one started without a name, whose transcript the daemon follows; returns how to add records. */
+async function startedWithoutName(d: Record<string, any>) {
+  Object.assign(d.managed.get(SID), { name: "repo-gasho", autoName: true });
+  const t = d.tracked.get(SID);
+  const file = path.join(t.info.cwd, "transcript.jsonl");
+  await fs.writeFile(file, "");
+  Object.assign(t, { transcript: file, tail: new TranscriptTail(file, 0) });
+  return (...records: object[]) => fs.appendFile(file, records.map((r) => `${JSON.stringify({ sessionId: SID, ...r })}\n`).join(""));
+}
+
+/** Waits for a flush the daemon started on its own. */
+async function settled(d: Record<string, any>): Promise<void> {
+  while (d.flushing.has(SID)) await sleep(20);
+}
+
+test("a session started without a name is named after its first message: in Gasho at once, in Claude Code once idle", async () => {
+  const c = new FakeClaude();
+  const { d, done } = await setup(c);
+  let status = "busy";
+  d.currentStatus = async () => status;
+  const write = await startedWithoutName(d);
+  await write(FIRST_MESSAGE);
+  await d.pollTails();
+  assert.equal(d.managed.get(SID).name, "repo-gasho");
+  await write(TITLE);
+  await d.pollTails();
+  await settled(d);
+  assert.equal(d.managed.get(SID).name, "セッション名の自動設定");
+  // Busy with the first message: the /rename waits, and is no input of anyone's waiting.
+  assert.deepEqual(c.submitted, []);
+  const sent: Record<string, any>[] = [];
+  d.hub = { connected: true, send: (m: Record<string, any>) => sent.push(m) };
+  (Daemon.prototype as unknown as Record<string, any>).emitSessions.call(d);
+  const info = sent.find((m) => m.type === "sessions")?.sessions[0];
+  assert.equal(info.name, "セッション名の自動設定");
+  assert.equal(info.pendingInputs, undefined);
+  status = "idle";
+  await d.flushInput(SID);
+  assert.deepEqual(c.submitted, ["/rename セッション名の自動設定"]);
+  // Not sent again before Claude Code records the name, nor after.
+  await d.pollTails();
+  await settled(d);
+  assert.equal(d.managed.pending(SID), 0);
+  await write({ type: "custom-title", customTitle: "セッション名の自動設定" });
+  await d.pollTails();
+  assert.equal(d.managed.get(SID).autoName, undefined);
+  await write({ type: "ai-title", aiTitle: "別のタイトル" });
+  await d.pollTails();
+  await settled(d);
+  assert.equal(d.managed.get(SID).name, "セッション名の自動設定");
+  assert.deepEqual(c.submitted, ["/rename セッション名の自動設定"]);
+  await done();
+});
+
+test("the name from the first message never empties a box someone is typing in, and gives way to a name given in the terminal", async () => {
+  const c = new FakeClaude();
+  const { d, done } = await setup(c);
+  c.box = "端末で打っている途中";
+  const write = await startedWithoutName(d);
+  await write(FIRST_MESSAGE, TITLE);
+  await d.pollTails();
+  await settled(d);
+  d.settleUntil.clear();
+  await d.flushInput(SID);
+  assert.equal(c.box, "端末で打っている途中");
+  assert.deepEqual(c.submitted, []);
+  assert.equal(d.managed.waiting(SID)[0]?.auto, true);
+  await write({ type: "custom-title", customTitle: "端末で付けた名前" });
+  await d.pollTails();
+  assert.equal(d.managed.get(SID).name, "端末で付けた名前");
+  assert.equal(d.managed.pending(SID), 0);
+  assert.equal(d.managed.get(SID).autoName, undefined);
+  await done();
+});
+
+test("a session renamed from Gasho before its first message keeps that name", async () => {
+  const c = new FakeClaude();
+  const { d, done } = await setup(c);
+  const write = await startedWithoutName(d);
+  assert.equal((await d.rename(SID, "自分で付けた名前", "r1")).ok, true);
+  await write(FIRST_MESSAGE, TITLE);
+  await d.pollTails();
+  await settled(d);
+  assert.equal(d.managed.get(SID).name, "自分で付けた名前");
+  assert.deepEqual(c.submitted, ["/rename 自分で付けた名前"]);
+  assert.equal(d.managed.pending(SID), 0);
+  await done();
+});
+
+test("after a restart of gasho-daemon, a /rename lost with the queue is sent again; a name Claude Code recorded ends it", async () => {
+  const c = new FakeClaude();
+  const { d, done } = await setup(c);
+  const write = await startedWithoutName(d);
+  // Named in Gasho before the restart, but the /rename waiting was lost with it.
+  d.managed.get(SID).name = "セッション名の自動設定";
+  await write(FIRST_MESSAGE, TITLE);
+  await d.pollTails();
+  await settled(d);
+  assert.deepEqual(c.submitted, ["/rename セッション名の自動設定"]);
+  // Restarted again once Claude Code had recorded it: the transcript is read anew, and nothing is sent.
+  await write({ type: "custom-title", customTitle: "セッション名の自動設定" });
+  const t = d.tracked.get(SID);
+  const { meta, consumed } = await readTranscript(t.transcript);
+  Object.assign(t, { meta, tail: new TranscriptTail(t.transcript, consumed) });
+  d.titleSent.clear();
+  d.managed.get(SID).autoName = true;
+  await d.pollTails();
+  await settled(d);
+  assert.equal(d.managed.get(SID).autoName, undefined);
+  assert.equal(d.managed.pending(SID), 0);
+  assert.deepEqual(c.submitted, ["/rename セッション名の自動設定"]);
   await done();
 });

@@ -11,8 +11,8 @@ export const KANBAN_COLUMNS: { id: KanbanColumn; label: string }[] = [
   { id: "done", label: "完了" },
 ];
 
-/** The kanban needs gasho-daemon 0.10.0. */
-export const kanbanReady = (m: MachineInfo): boolean => daemonAtLeast(m, 0, 10);
+/** The kanban needs gasho-daemon 0.11.0. */
+export const kanbanReady = (m: MachineInfo): boolean => daemonAtLeast(m, 0, 11);
 
 export interface PlacedCard {
   machine: MachineInfo;

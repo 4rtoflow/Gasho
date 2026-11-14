@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { emptyMeta, modelLabel, parseRecord, readTranscript, toUrlSessionId, TranscriptTail, unwrapPasted } from "../src/transcript.ts";
+import { compactSummaryText, emptyMeta, modelLabel, parseRecord, readTranscript, toUrlSessionId, TranscriptTail, unwrapPasted } from "../src/transcript.ts";
 
 test("user text: interrupt marker, branch and timestamp", () => {
   const meta = emptyMeta();
@@ -250,4 +250,58 @@ test("the name given with /rename or --name is recorded as custom-title, and the
   parseRecord({ type: "ai-title", aiTitle: "テストの整理" }, meta);
   assert.equal(meta.customTitle, "調査 その2");
   assert.equal(meta.title, "テストの整理");
+});
+
+// Records as Claude Code v2.1.323 writes them when it compacts the conversation.
+test("a compaction is a mark and a summary, not something the user said", () => {
+  const meta = emptyMeta();
+  const mark = parseRecord(
+    {
+      type: "system",
+      subtype: "compact_boundary",
+      content: "Conversation compacted",
+      isMeta: false,
+      uuid: "m1",
+      timestamp: "2026-11-13T16:47:18.040Z",
+      level: "info",
+      compactMetadata: { trigger: "auto", preTokens: 237557 },
+    },
+    meta,
+  );
+  assert.deepEqual(mark, {
+    uuid: "m1",
+    ts: "2026-11-13T16:47:18.040Z",
+    role: "system",
+    blocks: [{ type: "text", text: "Conversation compacted" }],
+    isSidechain: false,
+    compaction: "mark",
+  });
+  const content =
+    "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" +
+    "<system-reminder>\n<tools-used-before-summary>Bash, Read</tools-used-before-summary>\n</system-reminder>\n" +
+    "Summary:\n## 依頼\n- 連続したツールをまとめる\n\n" +
+    "If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/u/.claude/projects/x/s.jsonl\n" +
+    "Continue the conversation from where it left off without asking the user any further questions.\n\n" +
+    "The messages after this summary are the most recent messages from before compaction, kept verbatim.";
+  const summary = parseRecord(
+    { type: "user", uuid: "s1", parentUuid: "m1", isVisibleInTranscriptOnly: true, isCompactSummary: true, message: { role: "user", content } },
+    meta,
+  );
+  assert.equal(summary?.role, "system");
+  assert.equal(summary?.compaction, "summary");
+  assert.deepEqual(summary?.blocks, [{ type: "text", text: "## 依頼\n- 連続したツールをまとめる" }]);
+});
+
+test("the summary of a compaction keeps text of another shape, and lines it quotes", () => {
+  assert.equal(compactSummaryText("  要約だけ  "), "要約だけ");
+  const quoted = "Summary:\n- 次の行で終わる:\n\nIf you need specific details from before compaction (quoted)\n- 続き";
+  assert.equal(
+    compactSummaryText(`前置き\n${quoted}\n\nIf you need specific details from before compaction, read …`),
+    "- 次の行で終わる:\n\nIf you need specific details from before compaction (quoted)\n- 続き",
+  );
+  // "Summary:" counts only near the start; later, it is part of the summary.
+  const late = `${"x".repeat(3000)}\nSummary:\nmore`;
+  assert.equal(compactSummaryText(late), late);
+  // Claude Code v2.1.323 once left the model's closing tag in.
+  assert.equal(compactSummaryText("前置き\nSummary:\n1. 依頼\n</summary>\n\nIf you need specific details from before compaction …"), "1. 依頼");
 });

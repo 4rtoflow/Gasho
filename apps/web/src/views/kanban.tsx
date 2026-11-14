@@ -183,7 +183,7 @@ export function KanbanView() {
         {old.length > 0 && (
           <Alert tone="warning">
             <AlertTitle>gasho-daemon を更新してください</AlertTitle>
-            <AlertDescription>{old.map((m) => m.name).join("、")} の gasho-daemon は 0.10.0 より前なので、カンバンを出せません。</AlertDescription>
+            <AlertDescription>{old.map((m) => m.name).join("、")} の gasho-daemon は 0.11.0 より前なので、カンバンを出せません。</AlertDescription>
           </Alert>
         )}
         {offline.length > 0 && (
@@ -744,7 +744,7 @@ function EmptyState({ canChoose, onChoose }: { canChoose: boolean; onChoose: () 
       <Button variant="primary" size="sm" leftIcon={<Settings2 />} onClick={onChoose} disabled={!canChoose}>
         見る repo を選ぶ
       </Button>
-      {!canChoose && <p className="text-xs text-muted-foreground">選べる working server がありません。gasho-daemon 0.10.0 以上の working server がつながると選べます。</p>}
+      {!canChoose && <p className="text-xs text-muted-foreground">選べる working server がありません。gasho-daemon 0.11.0 以上の working server がつながると選べます。</p>}
     </div>
   );
 }

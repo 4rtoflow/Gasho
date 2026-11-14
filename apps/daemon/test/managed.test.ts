@@ -20,6 +20,7 @@ import {
   renameCommand,
   resumeQuestionOpen,
   sessionName,
+  titleName,
   pickerCatalog,
   pickerEffort,
   pickerMatches,
@@ -156,6 +157,22 @@ test("promptBoxLines reads the prompt box at the bottom of the screen", () => {
   assert.deepEqual(promptBoxLines(screenWith("❯ [Pasted text #2 +40 lines]")), ["❯ [Pasted text #2 +40 lines]"]);
   assert.equal(promptBoxLines(screenWith(" Do you want to proceed?", " ❯ 1. Yes")), undefined);
   assert.equal(promptBoxLines("no prompt here"), undefined);
+});
+
+test("the rule above the prompt box can carry a name that leaves few \"─\" before it, or none", () => {
+  // As Claude Code draws it after /rename, in a 50-column terminal: a fork's name left only four "─".
+  const named = (rule: string, ...box: string[]) =>
+    ["❯ /rename Gasho iPhone用クライアントアプリ のフォーク", "  ⎿  Session renamed to: Gasho", rule, ...box, RULE, "  ⏵⏵ auto mode on"].join("\n");
+  const fork = "──── Gasho iPhone用クライアントアプリ のフォーク ─";
+  assert.deepEqual(promptBoxLines(named(fork, "❯ ")), ["❯"]);
+  assert.equal(typedInBox(plainScreen(named(fork, "❯ "))), "");
+  assert.ok(!dialogOpen(named(fork, "❯ ")));
+  assert.ok(promptHolds(plainScreen(named(fork, "❯ npx でのdaemonパッケージのセットアップをしたい")), "npx でのdaemonパッケージのセットアップをしたい"));
+  assert.equal(promptRuleUltracode(named(fork, "❯ ")), false);
+  // Should a name fill the whole rule, only the "─" at its end may be left.
+  assert.deepEqual(promptBoxLines(named(" Gasho iPhone用クライアントアプリ のフォーク のフ… ─", "❯ ")), ["❯"]);
+  // A dialog's options are indented: still no prompt box, whatever the rule above them carries.
+  assert.equal(promptBoxLines(named(fork, " Do you want to proceed?", " ❯ 1. Yes")), undefined);
 });
 
 test("clearPromptKeys sends one Ctrl+U and Backspace pair per line, plus one", () => {
@@ -478,6 +495,19 @@ test("session names are one line of at most 60 characters, and a fork's default 
   assert.equal(renameCommand("調査 その2"), "/rename 調査 その2");
   assert.ok(isRename("/rename 調査") && isRename("/name x") && isRename("/rename"));
   assert.ok(!isRename("/renamed") && !isRename("rename this") && !isRename("/model"));
+});
+
+test("a name taken from Claude Code's title is one line, clipped to 60 characters without cutting a character in half", () => {
+  assert.equal(titleName("セッション名の自動設定"), "セッション名の自動設定");
+  assert.equal(titleName("  一行目\n二行目\tと\u0007  "), "一行目 二行目 と");
+  assert.equal(titleName(" \n "), undefined);
+  assert.equal(titleName("x".repeat(80)), "x".repeat(MAX_SESSION_NAME));
+  // An emoji is two UTF-16 units: one that would go past 60 is left out whole.
+  const clipped = titleName(`${"x".repeat(MAX_SESSION_NAME - 1)}😀`);
+  assert.equal(clipped, "x".repeat(MAX_SESSION_NAME - 1));
+  // A space left at the end by the clipping goes.
+  assert.equal(titleName(`${"x".repeat(MAX_SESSION_NAME - 1)} yy`), "x".repeat(MAX_SESSION_NAME - 1));
+  for (const t of ["x".repeat(80), `${"あ".repeat(59)}😀`]) assert.ok(!("error" in sessionName(titleName(t) ?? "")));
 });
 
 test("a /rename still waiting is replaced, but not one whose Enter was pressed; names are kept on save", async () => {

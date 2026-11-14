@@ -67,7 +67,32 @@ export interface SessionInfo {
   tokens?: TokenUsage;
   /** …and per hour over the last 48 hours, oldest first: [start of the hour (ms), use]. Hours without use are left out. */
   tokenHours?: [number, TokenUsage][];
+  /**
+   * Permission requests waiting for an answer, oldest first (Claude Code's PermissionRequest hook). They can be
+   * answered from Gasho (`permission.answer`), or in the terminal or the official apps, which removes them here.
+   */
+  permissionRequests?: PermissionRequestInfo[];
 }
+
+/** A permission Claude Code asks for before using a tool. */
+export interface PermissionRequestInfo {
+  /** Given by gasho-daemon; answers name it. */
+  id: string;
+  toolName: string;
+  /** The tool's input as pretty JSON, clipped. */
+  input: string;
+  /** Its most telling field (the command, the file, …). */
+  summary?: string;
+  at: number;
+  /**
+   * What "allow from now on" would allow, in Claude Code's notation ("Bash(npm test:*)"), when Claude Code suggests
+   * a permanent rule for this request; absent when it does not, and "always" cannot be answered.
+   */
+  always?: string;
+}
+
+/** allow: this once. always: this time and from now on, as Claude Code suggests. deny: Claude stops and waits. */
+export type PermissionDecision = "allow" | "always" | "deny";
 
 /** Tokens as Claude Code records them for each reply. */
 export interface TokenUsage {
@@ -93,6 +118,12 @@ export interface TranscriptEntry {
   isSidechain?: boolean;
   /** True when the entry is Claude Code's "[Request interrupted by user]" marker. */
   interrupted?: boolean;
+  /**
+   * Set on the two system entries of a compaction, when Claude Code summarized the conversation to free its context:
+   * "mark" is where it did ("Conversation compacted"), "summary" is the summary the conversation goes on from (Claude
+   * Code records it as a user message, which the user did not write). The summary follows its mark.
+   */
+  compaction?: "mark" | "summary";
 }
 
 /** A Claude Code hook event, reduced to what the dashboard shows. */
@@ -150,7 +181,7 @@ export interface MachineInfo {
   features?: InputFeature[];
   /** The repositories the kanban watches on this machine (their primary checkouts), as chosen on Gasho. */
   kanbanRepos?: string[];
-  /** The repositories that can be chosen for the kanban (gasho-daemon 0.10.0 or later). */
+  /** The repositories that can be chosen for the kanban (gasho-daemon 0.11.0 or later). */
   kanbanOptions?: KanbanRepoOption[];
   /** The kanban of the watched repositories, while gasho-daemon is connected. */
   kanban?: KanbanBoard;
@@ -526,7 +557,22 @@ export interface InputFile {
 
 /** Commands a browser can send to a working server, relayed by the Gasho server. */
 export type SessionCommand =
-  | { type: "session.launch"; cwd: string; name?: string }
+  /**
+   * `name`: without one, the session is "<folder>-gasho" until its first message, and is then named after it, with the
+   * title Claude Code gives the conversation (gasho-daemon 0.10.0 and later; older ones keep "<folder>-gasho").
+   * `trust`: when Claude Code asks whether to trust the folder (one it does not trust yet), answer "Yes, I trust this
+   * folder" (gasho-daemon 0.10.0 and later). Without it, the launch stops at the question and its result says so
+   * (`needsTrust`), so that the person decides.
+   */
+  | { type: "session.launch"; cwd: string; name?: string; trust?: boolean }
+  /** Makes the folder `name` inside the folder `parent` (gasho-daemon 0.10.0 and later). */
+  | { type: "folder.create"; parent: string; name: string }
+  /**
+   * Clones a GitHub repository into the folder `parent` with the working server's GitHub CLI (`gh repo clone`, with its
+   * login), as the folder `name` (by default, the repository's name). `repo`: "owner/name", "name" (a repository of the
+   * account gh is logged in with), or its URL (gasho-daemon 0.10.0 and later).
+   */
+  | { type: "repo.clone"; parent: string; repo: string; name?: string }
   /**
    * `model`, `effort`, `ultracode`: switch the session (for this session only) before the text is sent.
    * `files`: saved on the working server and mentioned at the end of the text (`@path`), so Claude reads them.
@@ -555,7 +601,9 @@ export type SessionCommand =
    * Ends a session started from Gasho (its Claude Code, then its zellij session) and removes it from Gasho. Its
    * conversation stays on the working server: `claude --resume` lists it.
    */
-  | { type: "session.remove"; sessionId: string };
+  | { type: "session.remove"; sessionId: string }
+  /** Answers one of a session's `permissionRequests`. */
+  | { type: "permission.answer"; sessionId: string; permissionId: string; decision: PermissionDecision };
 
 export interface CommandResult {
   ok: boolean;
@@ -570,4 +618,13 @@ export interface CommandResult {
   warning?: string;
   /** session.input: what was asked to switch but was not switched (the session keeps what it had). */
   unapplied?: SwitchField[];
+  /** folder.create, repo.clone: the folder that was made (an absolute path). */
+  path?: string;
+  /**
+   * session.launch without `trust`: Claude Code asked whether to trust the folder, so nothing was started.
+   * `trustWarnings`: what Claude Code pointed out about the folder's own settings while asking (as it wrote it, in
+   * English), such as permissions the folder allows in advance.
+   */
+  needsTrust?: boolean;
+  trustWarnings?: string[];
 }

@@ -1,5 +1,6 @@
 // Gasho server state and message handling, independent of the transport so it can be tested without sockets.
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import type {
   ClientToHub,
   CommandResult,
@@ -65,6 +66,10 @@ const FORK_TIMEOUT_MS = 90_000;
 const RENAME_TIMEOUT_MS = 45_000;
 /** Removing waits for Claude Code to end (it is stopped harder after a while). */
 const REMOVE_TIMEOUT_MS = 30_000;
+/** gasho-daemon stops a clone after 10 minutes, and gives it a few seconds to end. */
+const CLONE_TIMEOUT_MS = 630_000;
+const MAX_PATH = 1024;
+const MAX_REPO = 300;
 const MAX_INPUT = 20_000;
 /** Names of sessions started from Gasho. */
 const MAX_NAME = 60;
@@ -72,9 +77,8 @@ const MAX_SESSION_ID = 100;
 const MODELS = new Set(["default", "opus", "fable", "sonnet", "haiku"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const FEATURES = new Set<InputFeature>(["model", "effort", "ultracode", "files"]);
-/** Repositories one working server's kanban can watch, and the length of their paths. */
+/** Repositories one working server's kanban can watch. */
 const MAX_KANBAN_REPOS = 30;
-const MAX_PATH = 500;
 
 /**
  * What a gasho-daemon that does not list its features (older than 0.6.0) can do with an input: 0.5 switches the model
@@ -92,8 +96,11 @@ export function versionAtLeast(version: string | undefined, major: number, minor
 
 /** gasho-daemon 0.9.0 renames, forks and removes sessions. */
 const SESSION_ACTIONS_SINCE: [number, number] = [0, 9];
-/** gasho-daemon 0.10.0 reads the kanban. */
-const kanbanReady = (version: string | undefined): boolean => versionAtLeast(version, 0, 10);
+/** gasho-daemon 0.10.0 makes folders, clones repositories, and answers Claude Code's question whether to trust a folder. */
+const FOLDER_ACTIONS_SINCE: [number, number] = [0, 10];
+
+/** gasho-daemon 0.11.0 reads the kanban. */
+const kanbanReady = (version: string | undefined): boolean => versionAtLeast(version, 0, 11);
 
 /** The repositories chosen for a kanban: absolute paths, each once; undefined when the list is not one. */
 function kanbanPaths(paths: unknown): string[] | undefined {
@@ -111,6 +118,22 @@ function nameError(name: unknown, required: boolean): string | undefined {
   if (/\p{Cc}/u.test(name)) return "名前に改行や制御文字は使えません。";
   return undefined;
 }
+
+/** An absolute path on a working server: an error message, or undefined. */
+function folderError(dir: unknown): string | undefined {
+  if (typeof dir !== "string" || !dir.startsWith("/") || dir.length > MAX_PATH || /\p{Cc}/u.test(dir)) return "フォルダーを絶対パスで指定してください。";
+  return undefined;
+}
+
+/** The name of a folder to make (one name, not a path): an error message, or undefined. gasho-daemon checks it again. */
+function folderNameError(name: unknown): string | undefined {
+  if (typeof name !== "string" || !name) return "フォルダーの名前を入れてください。";
+  if (name !== name.trim()) return "フォルダーの名前の前後に空白は使えません。";
+  if (name === "." || name === ".." || name.includes("/") || name.startsWith("-") || /\p{Cc}/u.test(name)) return "このフォルダーの名前は使えません。";
+  if (Buffer.byteLength(name) > 255) return "フォルダーの名前が長すぎます。";
+  return undefined;
+}
+
 /** Files sent with one input: how many, and their size in all. */
 export const MAX_FILES = 5;
 export const MAX_FILES_BYTES = 10 * 1024 * 1024;
@@ -137,7 +160,15 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
     case "session.launch":
       if (typeof cmd.cwd !== "string" || !cmd.cwd.startsWith("/") || cmd.cwd.length > 1024) return "フォルダーを絶対パスで指定してください。";
       if (cmd.name !== undefined && (typeof cmd.name !== "string" || cmd.name.length > 60)) return "名前は60文字までです。";
+      if (cmd.trust !== undefined && typeof cmd.trust !== "boolean") return "信頼の指定が正しくありません。";
       return undefined;
+    case "folder.create":
+      return folderError(cmd.parent) ?? folderNameError(cmd.name);
+    case "repo.clone":
+      if (typeof cmd.repo !== "string" || !cmd.repo.trim()) return "clone するリポジトリを入れてください。";
+      // gh would read a leading "-" as an option.
+      if (cmd.repo.length > MAX_REPO || /\s|\p{Cc}/u.test(cmd.repo) || cmd.repo.startsWith("-")) return "リポジトリの指定が正しくありません。";
+      return folderError(cmd.parent) ?? (cmd.name === undefined ? undefined : folderNameError(cmd.name));
     case "session.input": {
       const files = cmd.files ?? [];
       if (typeof cmd.text !== "string" || !Array.isArray(files)) return "入力が正しくありません。";
@@ -152,6 +183,12 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       }
       if (/^\s*\/effort(?=\s|$)/i.test(cmd.text) && !/^\s*\/effort\s+ultracode\s+(on|off)\s*$/i.test(cmd.text)) {
         return "Effort は、入力欄の Effort のボタンで切り替えてください。/effort で切り替えると、これから始めるすべてのセッションの既定の Effort も変わります（/effort ultracode on と off は、このセッションだけなので送れます）。";
+      }
+      // Claude Code's shell mode: what follows the "!" is run as a shell command. Files would be mentioned on lines of
+      // their own after it (@path), which the shell would run too.
+      if (/^\s*!/.test(cmd.text)) {
+        if (!cmd.text.trimStart().slice(1).trim()) return "「!」のあとに、実行するコマンドを入れてください。";
+        if (files.length > 0) return "シェルのコマンド（「!」で始まる入力）には、ファイルを添付できません。";
       }
       if (files.length > MAX_FILES) return `添付できるファイルは ${MAX_FILES} 個までです。`;
       let total = 0;
@@ -170,6 +207,10 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
       return nameError(cmd.name, true);
     case "session.fork":
       return nameError(cmd.name, false);
+    case "permission.answer":
+      if (typeof cmd.permissionId !== "string" || !cmd.permissionId || cmd.permissionId.length > 100) return "確認の指定が正しくありません。";
+      if (!["allow", "always", "deny"].includes(cmd.decision)) return "答えの指定が正しくありません。";
+      return undefined;
     default:
       return "不明な命令です。";
   }
@@ -451,7 +492,10 @@ export class Hub {
       case "session.interrupt":
       case "session.rename":
       case "session.fork":
-      case "session.remove": {
+      case "session.remove":
+      case "permission.answer":
+      case "folder.create":
+      case "repo.clone": {
         const { requestId: clientRequestId, machine, ...cmd } = msg;
         this.relayCommand(peer, clientRequestId, machine, cmd);
         break;
@@ -475,7 +519,7 @@ export class Hub {
 
     const requestId = randomUUID();
     // Launching and forking wait for Claude Code to start; an input may switch the model, effort and ultracode first;
-    // removing waits for Claude Code to end.
+    // removing waits for Claude Code to end; a clone takes as long as the repository needs.
     const timeout = {
       "session.launch": LAUNCH_TIMEOUT_MS,
       "session.input": INPUT_TIMEOUT_MS,
@@ -483,6 +527,9 @@ export class Hub {
       "session.rename": RENAME_TIMEOUT_MS,
       "session.fork": FORK_TIMEOUT_MS,
       "session.remove": REMOVE_TIMEOUT_MS,
+      "permission.answer": REQUEST_TIMEOUT_MS,
+      "folder.create": REQUEST_TIMEOUT_MS,
+      "repo.clone": CLONE_TIMEOUT_MS,
     }[cmd.type];
     const timer = setTimeout(() => {
       if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
@@ -495,8 +542,9 @@ export class Hub {
 
   /**
    * The audit log's words for a command: an input's text (with what it switches and the names and sizes of its files,
-   * never their contents), the folder of a launch, or a session's name (the new one for a rename, the copy's for a fork,
-   * the removed session's for a removal).
+   * never their contents), the folder of a launch (and whether Claude Code was told to trust it), a session's name (the
+   * new one for a rename, the copy's for a fork, the removed session's for a removal), the folder made, or the
+   * repository cloned and where to.
    */
   private summaryOf(machine: string, cmd: SessionCommand): string {
     switch (cmd.type) {
@@ -511,7 +559,11 @@ export class Hub {
           .filter(Boolean)
           .join(" ");
       case "session.launch":
-        return cmd.cwd;
+        return cmd.trust ? `${cmd.cwd} [trust]` : cmd.cwd;
+      case "folder.create":
+        return path.posix.join(cmd.parent, cmd.name);
+      case "repo.clone":
+        return `${cmd.repo} → ${cmd.name ? path.posix.join(cmd.parent, cmd.name) : cmd.parent}`;
       case "session.rename":
         return cmd.name.trim();
       case "session.fork":
@@ -520,6 +572,12 @@ export class Hub {
         // Once removed, the session is gone from the list: the record keeps its name.
         const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
         return s?.name ?? s?.title ?? "";
+      }
+      case "permission.answer": {
+        // The tool and what it was asked for, as the request said; it is gone once answered.
+        const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
+        const r = s?.permissionRequests?.find((x) => x.id === cmd.permissionId);
+        return `[${cmd.decision}] ${r ? `${r.toolName} ${r.summary ?? ""}`.trim().slice(0, 300) : ""}`.trim();
       }
       case "session.interrupt":
         return "";
@@ -532,6 +590,12 @@ export class Hub {
     if (cmd.type === "session.rename" || cmd.type === "session.fork" || cmd.type === "session.remove") {
       if (!m || versionAtLeast(m.daemonVersion, ...SESSION_ACTIONS_SINCE)) return undefined;
       return "この working server の gasho-daemon は古いため、セッションの名前の変更、フォーク、削除を扱えません。gasho-daemon を更新してください。";
+    }
+    if (cmd.type === "folder.create" || cmd.type === "repo.clone" || (cmd.type === "session.launch" && cmd.trust)) {
+      if (!m || versionAtLeast(m.daemonVersion, ...FOLDER_ACTIONS_SINCE)) return undefined;
+      return cmd.type === "session.launch"
+        ? "この working server の gasho-daemon は古いため、Gasho からフォルダーを信頼できません。gasho-daemon を更新してください。"
+        : "この working server の gasho-daemon は古いため、フォルダーの作成と clone を扱えません。gasho-daemon を更新してください。";
     }
     if (cmd.type !== "session.input") return undefined;
     const features = m?.features ?? legacyFeatures(m?.daemonVersion);

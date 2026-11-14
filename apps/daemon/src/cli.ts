@@ -1,20 +1,26 @@
+#!/usr/bin/env node
 import os from "node:os";
 import path from "node:path";
 import { loadConfig } from "./config.ts";
 import { credentialsPath, loadCredentials, register, saveCredentials } from "./credentials.ts";
 import { DAEMON_VERSION, Daemon } from "./daemon.ts";
 import { hooksConfig, installHooks, SECRET_ENV } from "./hooks.ts";
+import { commandOf, installOf, serviceCommand } from "./install.ts";
 import { doctor, formatChecks, launchdPlist, servicePath, systemdUnit } from "./setup.ts";
 
-const usage = `usage:
-  node src/cli.ts register --server URL --code CODE [--name NAME]
-                                                   register this working server with the Gasho server
-  node src/cli.ts run                              start the daemon
-  node src/cli.ts doctor                           check what the daemon needs on this machine
-  node src/cli.ts service print                    print the file that keeps the daemon running
+// How this copy was installed (a clone, npx, or npm install -g): the command to suggest and what a service runs.
+const install = installOf(import.meta.filename);
+const command = commandOf(install);
+
+const usage = `usage: ${command} <command>
+  register --server URL --code CODE [--name NAME]  register this working server with the Gasho server
+  run                                              start the daemon
+  doctor                                           check what the daemon needs on this machine
+  service print                                    print the file that keeps the daemon running
                                                    (a systemd user service on Linux, a launchd agent on macOS)
-  node src/cli.ts hooks print                      print the hooks to add to Claude Code settings
-  node src/cli.ts hooks install [--settings FILE]  merge the hooks into FILE (default ~/.claude/settings.json)
+  hooks print                                      print the hooks to add to Claude Code settings
+  hooks install [--settings FILE]                  merge the hooks into FILE (default ~/.claude/settings.json)
+  version                                          print the version
 
 The registration is stored in ${credentialsPath()} (GASHO_DAEMON_CONFIG to change).
 Settings such as ${SECRET_ENV} can go in daemon.env beside it (NAME=value per line); every command reads it.
@@ -62,6 +68,7 @@ try {
         ghBin: process.env.GASHO_GH_BIN ?? "gh",
         hookPort: port,
         settingsFile: path.join(process.env.GASHO_CLAUDE_DIR ?? path.join(os.homedir(), ".claude"), "settings.json"),
+        command,
       });
       console.log(formatChecks(checks, DAEMON_VERSION));
       if (checks.some((c) => c.level === "fail")) process.exitCode = 1;
@@ -69,11 +76,16 @@ try {
     }
     case "service": {
       if (args[1] !== "print") throw new Error(usage);
-      const repo = path.resolve(import.meta.dirname, "../../..");
-      const input = { node: process.execPath, repo, path: servicePath(process.execPath, process.env.PATH), home: os.homedir() };
+      const home = os.homedir();
+      const input = {
+        node: process.execPath,
+        ...serviceCommand(install, process.execPath, DAEMON_VERSION, home),
+        path: servicePath(process.execPath, process.env.PATH),
+        home,
+      };
       if (process.platform === "linux") process.stdout.write(systemdUnit(input));
       else if (process.platform === "darwin") process.stdout.write(launchdPlist(input));
-      else throw new Error(`no service file for ${process.platform}; run the daemon with: node apps/daemon/src/cli.ts run`);
+      else throw new Error(`no service file for ${process.platform}; run the daemon with: ${command} run`);
       break;
     }
     case "hooks": {
@@ -90,6 +102,10 @@ try {
       }
       break;
     }
+    case "version":
+    case "--version":
+      console.log(DAEMON_VERSION);
+      break;
     default:
       throw new Error(usage);
   }

@@ -6,6 +6,8 @@ import { clip, inputSummary, str } from "./util.ts";
 
 const MAX_TEXT = 4000;
 const MAX_TOOL = 2000;
+/** A compaction's summary is long (10,000 to 25,000 characters) and is read only when its fold is opened. */
+const MAX_SUMMARY = 40000;
 const INTERRUPT_RE = /^\[Request interrupted by user/;
 /** A slash command typed into Claude Code, recorded as a user message. */
 const COMMAND_RE = /^\s*<command-name>([\s\S]*?)<\/command-name>/;
@@ -50,6 +52,26 @@ function commandNote(content: string, meta: TranscriptMeta): string | undefined 
 /** Removes Claude Code's wrapper around pasted text, keeping the text. */
 export function unwrapPasted(text: string): string {
   return text.replace(PASTED_RE, "$1").replace(/^\n+|\n+$/g, "");
+}
+
+/** The line before the summary of a compaction, and the start of the lines for the model after it. */
+const SUMMARY_HEAD = "\nSummary:\n";
+const SUMMARY_TAIL = "\n\nIf you need specific details from before compaction";
+
+/**
+ * The summary Claude Code wrote at a compaction, without the lines around it that are meant for the model: before it,
+ * "This session is being continued from a previous conversation …"; after it, where the full transcript is and how to
+ * go on. Text of another shape is kept whole. The summary may quote these lines, so the last of the lines after it
+ * counts, and the line before it only near the start. A <summary> tag the model left around it is dropped too.
+ */
+export function compactSummaryText(raw: string): string {
+  const head = raw.indexOf(SUMMARY_HEAD);
+  const body = head >= 0 && head < 2000 ? raw.slice(head + SUMMARY_HEAD.length) : raw;
+  const tail = body.lastIndexOf(SUMMARY_TAIL);
+  return (tail >= 0 ? body.slice(0, tail) : body)
+    .trim()
+    .replace(/^<summary>\s*/, "")
+    .replace(/\s*<\/summary>$/, "");
 }
 
 /** Session facts collected from transcript records. */
@@ -154,6 +176,10 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
   const isSidechain = rec.isSidechain === true;
 
   if (role === "system") {
+    if (rec.subtype === "compact_boundary") {
+      const text = str(rec.content) || "Conversation compacted";
+      return { uuid, ts, role, blocks: [{ type: "text", text }], isSidechain, compaction: "mark" };
+    }
     const raw = str(rec.content);
     const text = raw === undefined ? undefined : (commandNote(raw, meta) ?? raw);
     return text ? { uuid, ts, role, blocks: [{ type: "text", text: clip(text, MAX_TEXT) }], isSidechain } : null;
@@ -165,6 +191,12 @@ export function parseRecord(rec: Record<string, unknown>, meta: TranscriptMeta):
     meta.model = modelLabel(message.model);
     // Each reply records the effort level it was made with.
     if (typeof rec.effort === "string" && EFFORTS.has(rec.effort)) meta.effort = rec.effort as EffortLevel;
+  }
+  if (rec.isCompactSummary === true) {
+    // The summary a compaction left, recorded as a user message: a system entry that goes with the compaction's mark.
+    const summary = compactSummaryText(contentToString(content));
+    if (!summary) return null;
+    return { uuid, ts, role: "system", blocks: [{ type: "text", text: clip(summary, MAX_SUMMARY) }], isSidechain, compaction: "summary" };
   }
   if (role === "user" && typeof content === "string") {
     // Slash commands (such as /model) and their output are shown as notes, not as something the user said.
