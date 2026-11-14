@@ -10,6 +10,9 @@
     "pack": "node scripts/pack.ts"
   },
   "dependencies": {
-    "@gasho/protocol": "*"
+    "@gasho/protocol": "*",
+    "@lydell/node-pty": "1.1.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/headless": "6.0.0"
   }
 }

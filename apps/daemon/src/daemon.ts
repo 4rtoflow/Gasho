@@ -17,6 +17,7 @@ import type {
   TranscriptEntry,
 } from "@gasho/protocol";
 import type { DaemonConfig } from "./config.ts";
+import { listDir, readFileAt, writeFileAt } from "./files.ts";
 import { cloneRepo, createFolder } from "./folders.ts";
 import { githubRepoOf, nestedRepos, readGitGraph } from "./git.ts";
 import { ghError, listGitHub, viewGitHub } from "./github.ts";
@@ -36,7 +37,6 @@ import {
   isAlive,
   isRename,
   launchableFolders,
-  launchArgs,
   ManagedSessions,
   mcpQuestionOpen,
   type ManagedSession,
@@ -65,13 +65,14 @@ import {
   trustQuestion,
   typedInBox,
   Zellij,
-  zellijSessionName,
+  terminalName,
 } from "./managed.ts";
 import { findTranscript, listAgents, mapStatus, rcModeOf, readRegistry, type AgentRow } from "./sessions.ts";
+import { SessionTerminals, Terminals } from "./terminal.ts";
 import { emptyMeta, readTranscript, TranscriptTail, type TranscriptMeta } from "./transcript.ts";
 import { log } from "./util.ts";
 
-export const DAEMON_VERSION = "0.10.1";
+export const DAEMON_VERSION = "0.11.0";
 const GITHUB_CACHE_MS = 5 * 60_000;
 /** How long the list of repositories inside a folder (and their branches) is reused. */
 const REPOS_CACHE_MS = 60_000;
@@ -84,6 +85,9 @@ const FORK_TRANSCRIPT_MS = 5000;
 const REMOVE_WAIT_MS = 8000;
 const MAX_INPUT = 20_000;
 const INTERRUPT_SETTLE_MS = 1500;
+/** Said when this machine cannot make a terminal for a session (see terminalWorks). */
+const NO_TERMINAL =
+  "この working server では、セッションの端末（node-pty）を用意できないので、セッションを起動できません。gasho-daemon の doctor で確かめてください。";
 /** Said when Claude Code asked about a folder's new MCP servers while starting, and was answered "not now". */
 const MCP_DECLINED =
   "このフォルダーの .mcp.json にある MCP サーバーは、使わない設定にして起動しました（Claude Code の確認に「使わない」と答えました）。使うときは、端末で claude を起動して /mcp から有効にしてください。";
@@ -160,7 +164,8 @@ export class Daemon {
   private polling = false;
   private github = new Map<string, { at: number; repo?: GitHubRepo }>();
   private repos = new Map<string, { at: number; repos?: SessionRepo[] }>();
-  private zellij: Zellij;
+  /** The terminals of the sessions Gasho started (built-in; zellij for those from gasho-daemon 0.10 and before). */
+  private terminals: SessionTerminals;
   private managed: ManagedSessions;
   /** Permission requests held until they are answered (in Gasho, or elsewhere). */
   private permissions = new PermissionRequests(() => this.emitSessions());
@@ -186,7 +191,7 @@ export class Daemon {
   constructor(cfg: DaemonConfig, opts: { enterWaitMs?: number } = {}) {
     this.cfg = cfg;
     this.enterWaitMs = opts.enterWaitMs ?? ENTER_WAIT_MS;
-    this.zellij = new Zellij(cleanEnv());
+    this.terminals = new SessionTerminals(new Terminals({ stateDir: cfg.stateDir, env: cleanEnv() }), new Zellij(cleanEnv()));
     this.managed = new ManagedSessions(path.join(cfg.stateDir, "managed.json"));
     this.hub = new HubClient({
       url: cfg.hubUrl,
@@ -208,10 +213,26 @@ export class Daemon {
   async start(): Promise<void> {
     log(`machine ${this.cfg.machineId}, Gasho server ${this.cfg.hubUrl}`);
     if (!this.cfg.hookSecret) log("GASHO_HOOK_SECRET is not set; hook requests are accepted without a secret");
-    this.canLaunch = await this.zellij.available();
-    if (!this.canLaunch) log("zellij is not available; sessions cannot be started from Gasho on this machine");
-    const live = this.canLaunch ? await this.zellij.liveSessions() : new Set<string>();
-    await this.managed.load(async (m) => isAlive(m.pid) && live.has(m.zellijSession));
+    this.canLaunch = await this.terminals.builtIn.available();
+    if (!this.canLaunch) log("no pseudo-terminal on this machine (node-pty did not load); sessions cannot be started from Gasho");
+    // The sessions started before this daemon: those whose Claude Code and terminal still run are kept.
+    const live = await this.terminals.builtIn.live();
+    let inZellij: Set<string> | undefined;
+    await this.managed.load(async (m) => {
+      if (!isAlive(m.pid)) return false;
+      if (!m.zellij) return live.get(m.terminal)?.pid === m.pid;
+      inZellij ??= (await this.terminals.zellij.available()) ? await this.terminals.zellij.liveSessions() : new Set();
+      if (!inZellij.has(m.terminal)) return false;
+      this.terminals.useZellij(m.terminal);
+      return true;
+    });
+    const old = this.managed.all().filter((m) => m.zellij).length;
+    if (old > 0) log(`${old} session(s) started by gasho-daemon 0.10 or before still run in zellij; they are used through zellij until they end`);
+    // Not closed: a terminal that no record names may still be someone's work (`gasho-daemon attach` shows it).
+    const kept = new Set(this.managed.all().map((m) => m.terminal));
+    for (const [name, h] of live) {
+      if (!kept.has(name)) log(`terminal ${name} (pid ${h.pid}, ${h.cwd}) is not one of the sessions Gasho keeps; it is left as it is`);
+    }
     await this.pruneAttachments();
     this.models = await fsp
       .readFile(this.modelsFile(), "utf8")
@@ -297,16 +318,16 @@ export class Daemon {
     }
   }
 
-  /** Managed sessions whose Claude Code has exited: drop them and close their zellij session. */
+  /** Managed sessions whose Claude Code has exited: drop them and close their terminal. */
   private async forgetEndedSessions(seen: Set<string>): Promise<void> {
     let changed = false;
     for (const m of this.managed.all()) {
       if (seen.has(m.sessionId) || isAlive(m.pid)) continue;
       this.managed.remove(m.sessionId);
       for (const map of [this.settleUntil, this.latePicker, this.prompts, this.titleSent]) map.delete(m.sessionId);
-      await this.zellij.kill(m.zellijSession);
+      await this.terminals.kill(m.terminal);
       await fsp.rm(this.attachmentsOf(m.sessionId), { recursive: true, force: true });
-      log(`session ${m.name} ended; closed zellij session ${m.zellijSession}`);
+      log(`session ${m.name} ended; closed its terminal ${m.terminal}`);
       changed = true;
     }
     if (changed) await this.managed.save();
@@ -476,7 +497,7 @@ export class Daemon {
       if (!t || this.flushing.has(m.sessionId)) continue;
       // What the screen shows now wins over the transcript: the line above the prompt box ("◐ medium · ultracode ·
       // /effort", shown for a while after a change) and the "ultracode" in the rule above the box (while it is on).
-      const screen = (await this.zellij.screen(m.zellijSession).catch(() => undefined))?.plain ?? "";
+      const screen = (await this.terminals.screen(m.terminal).catch(() => undefined))?.plain ?? "";
       const state = statusLine(screen);
       if (state) {
         t.info.effort = state.effort;
@@ -543,7 +564,7 @@ export class Daemon {
     this.latePicker.delete(m.sessionId);
     this.flushing.add(m.sessionId);
     try {
-      await this.closePicker(m.zellijSession);
+      await this.closePicker(m.terminal);
     } catch (e) {
       log(`could not close the /model picker in ${m.name}`, e);
     } finally {
@@ -562,8 +583,8 @@ export class Daemon {
     this.nextModelsProbe = Date.now() + MODELS_PROBE_INTERVAL_MS;
     try {
       if ((await this.currentStatus(m.pid)) !== "idle") return;
-      if (typedInBox(await this.zellij.screen(m.zellijSession)) !== "") return;
-      const result = await this.probeModels(m.zellijSession);
+      if (typedInBox(await this.terminals.screen(m.terminal)) !== "") return;
+      const result = await this.probeModels(m.terminal);
       if (result === "read") return;
       this.nextModelsProbe = Date.now() + MODELS_MAX_AGE_MS;
       log(`could not read the model names in ${m.name}; trying again in a day`);
@@ -680,6 +701,10 @@ export class Daemon {
         return this.sendGitHubList(m);
       case "github.item.get":
         return this.sendGitHubItem(m);
+      case "dir.get":
+        return this.sendDir(m);
+      case "file.get":
+        return this.sendFile(m);
       case "session.launch":
       case "session.input":
       case "session.interrupt":
@@ -688,7 +713,8 @@ export class Daemon {
       case "session.remove":
       case "permission.answer":
       case "folder.create":
-      case "repo.clone": {
+      case "repo.clone":
+      case "file.write": {
         let result: CommandResult;
         try {
           switch (m.type) {
@@ -720,6 +746,9 @@ export class Daemon {
               break;
             case "repo.clone":
               result = await this.cloneRepo(m.parent, m.repo, m.name);
+              break;
+            case "file.write":
+              result = await this.writeFile(m);
               break;
           }
         } catch (e) {
@@ -830,14 +859,42 @@ export class Daemon {
     }
   }
 
+  // ---- the files of a session's folder ----
+
+  /** The entries of a folder inside a session's folder (see files.ts). Only the folder of a session this daemon tracks. */
+  private async sendDir(m: Extract<HubToDaemon, { type: "dir.get" }>): Promise<void> {
+    const reply = { type: "dir" as const, requestId: m.requestId, sessionId: m.sessionId, path: m.path };
+    const root = this.tracked.get(m.sessionId)?.info.cwd;
+    const dir = root ? await listDir(root, m.path).catch((e: unknown) => ({ error: String(e) })) : { error: "このセッションは見つかりません。" };
+    this.hub.send("error" in dir ? { ...reply, error: dir.error } : { ...reply, dir });
+  }
+
+  /** A file inside a session's folder: its text, an image's data, or what kind of file it is (see files.ts). */
+  private async sendFile(m: Extract<HubToDaemon, { type: "file.get" }>): Promise<void> {
+    const reply = { type: "file" as const, requestId: m.requestId, sessionId: m.sessionId, path: m.path };
+    const root = this.tracked.get(m.sessionId)?.info.cwd;
+    const file = root ? await readFileAt(root, m.path).catch((e: unknown) => ({ error: String(e) })) : { error: "このセッションは見つかりません。" };
+    this.hub.send("error" in file ? { ...reply, error: file.error } : { ...reply, file });
+  }
+
+  /** Writes a text file inside a session's folder, or makes one (see files.ts). */
+  private async writeFile(m: Extract<HubToDaemon, { type: "file.write" }>): Promise<CommandResult> {
+    const root = this.tracked.get(m.sessionId)?.info.cwd;
+    if (!root) return { ok: false, error: "このセッションは見つかりません。" };
+    const written = await writeFileAt(root, m.path, m.content, { baseHash: m.baseHash, create: m.create === true });
+    if ("error" in written) return { ok: false, error: written.error, ...(written.conflict ? { conflict: true } : {}) };
+    log(`${m.create ? "made" : "wrote"} ${path.join(root, m.path)} (${written.size} bytes)`);
+    return { ok: true, written };
+  }
+
   // ---- sessions started by Gasho ----
 
   /**
-   * Starts `claude --remote-control` in `cwd` inside a new zellij session and waits for its session id. With `trust`,
+   * Starts `claude --remote-control` in `cwd` in a terminal of its own and waits for its session id. With `trust`,
    * Claude Code's question whether to trust the folder is answered with yes; without it, the launch stops there.
    */
   private async launch(cwd: string, name: string | undefined, trust = false): Promise<CommandResult> {
-    if (!this.canLaunch) return { ok: false, error: "この working server には zellij がないので、セッションを起動できません。" };
+    if (!this.canLaunch) return { ok: false, error: NO_TERMINAL };
     const dir = path.resolve(cwd);
     const stat = await fsp.stat(dir).catch(() => undefined);
     if (!stat?.isDirectory()) return { ok: false, error: `フォルダーがありません：${dir}` };
@@ -849,8 +906,8 @@ export class Daemon {
       const { error, needsTrust, trustWarnings } = started;
       return needsTrust ? { ok: false, error, needsTrust, trustWarnings } : { ok: false, error };
     }
-    const { sessionId, zellijSession, pid } = started;
-    this.managed.add({ sessionId, zellijSession, pid, cwd: dir, name: rcName, launchedAt: Date.now(), ...(autoName ? { autoName } : {}) });
+    const { sessionId, terminal, pid } = started;
+    this.managed.add({ sessionId, terminal, pid, cwd: dir, name: rcName, launchedAt: Date.now(), ...(autoName ? { autoName } : {}) });
     await this.managed.save();
     await this.refresh();
     // A folder trusted just now is one to offer from now on.
@@ -879,13 +936,13 @@ export class Daemon {
   }
 
   /**
-   * Starts `claude --remote-control <rcName> [claudeArgs…]` in `dir` inside a new zellij session, and waits until
+   * Starts `claude --remote-control <rcName> [claudeArgs…]` in `dir` in a new terminal, and waits until
    * `claude agents` lists it with a session id (one that `accept` takes). With `resuming`, Claude Code's question about
    * resuming an old, long session is answered with Esc (the full session, as it is; see resumeQuestionOpen), and
    * `resumeAsked` says so. Claude Code's question whether to trust the folder is answered with yes only when `trust`
    * is given; otherwise nothing is started, and `needsTrust` says why. Its question about the folder's new MCP servers
    * is answered with Esc: Gasho starts no MCP server that nobody has looked at (`mcpDeclined`; see mcpQuestionOpen).
-   * On failure, the zellij session is closed.
+   * On failure, the terminal is closed.
    */
   private async startClaude(
     dir: string,
@@ -897,74 +954,74 @@ export class Daemon {
       trust = false,
     }: { claudeArgs?: string[]; accept?: (row: AgentRow) => boolean; resuming?: boolean; trust?: boolean } = {},
   ): Promise<
-    | { sessionId: string; zellijSession: string; pid: number; resumeAsked: boolean; mcpDeclined: boolean }
+    | { sessionId: string; terminal: string; pid: number; resumeAsked: boolean; mcpDeclined: boolean }
     | { error: string; needsTrust?: true; trustWarnings?: string[] }
   > {
-    const zellijSession = zellijSessionName(rcName);
-    const pidFile = path.join(this.cfg.stateDir, `${zellijSession}.pid`);
-    await fsp.mkdir(this.cfg.stateDir, { recursive: true, mode: 0o700 });
-    await this.zellij.start(
-      zellijSession,
-      launchArgs({ zellijSession, pidFile, cwd: dir, claudeBin: this.cfg.claudeBin, rcName, env: cleanEnv(), claudeArgs }),
-    );
-    log(`launching "${rcName}" in ${dir} (zellij session ${zellijSession})${claudeArgs.length > 0 ? ` with ${claudeArgs.join(" ")}` : ""}`);
+    const terminal = terminalName(rcName);
+    let pid: number;
+    try {
+      pid = await this.terminals.start({
+        name: terminal,
+        cwd: dir,
+        file: this.cfg.claudeBin,
+        args: ["--remote-control", rcName, ...claudeArgs],
+        env: cleanEnv(),
+      });
+    } catch (e) {
+      log(`could not start a terminal for "${rcName}"`, e);
+      return { error: "Claude Code を起動できませんでした（端末を用意できませんでした）。" };
+    }
+    log(`launching "${rcName}" in ${dir} (terminal ${terminal})${claudeArgs.length > 0 ? ` with ${claudeArgs.join(" ")}` : ""}`);
 
     const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
-    let pid: number | undefined;
     let resumeAsked = false;
     let mcpDeclined = false;
-    try {
-      while (Date.now() < deadline) {
-        await sleep(500);
-        pid ??= Number((await fsp.readFile(pidFile, "utf8").catch(() => "")).trim()) || undefined;
-        if (!pid) continue;
-        // The dialogs are drawn at the bottom, in place of the prompt box. A conversation being resumed can quote their
-        // words above it, so only a dialog that has the keys counts.
-        const screen = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain ?? "";
-        const question = trustQuestion(screen);
-        if (question || (dialogOpen(screen) && atBottom(screen, TRUST_PROMPT_RE))) {
-          if (!trust) {
-            await this.zellij.kill(zellijSession);
-            return { error: "このフォルダーは、まだ Claude Code に信頼されていません。", needsTrust: true, trustWarnings: question?.warnings ?? [] };
-          }
-          if (!question || !(await this.answerTrust(zellijSession).then(() => true, () => false))) {
-            await this.zellij.kill(zellijSession);
-            return {
-              error:
-                "Claude Code の「このフォルダーを信頼するか」の確認に答えられませんでした。端末で一度 claude を起動して信頼してから、もう一度試してください。",
-            };
-          }
-          log(`"${rcName}": trusted ${dir} in Claude Code, as asked from Gasho`);
-          continue;
+    while (Date.now() < deadline) {
+      await sleep(500);
+      // The dialogs are drawn at the bottom, in place of the prompt box. A conversation being resumed can quote their
+      // words above it, so only a dialog that has the keys counts.
+      const screen = (await this.terminals.screen(terminal).catch(() => undefined))?.plain ?? "";
+      const question = trustQuestion(screen);
+      if (question || (dialogOpen(screen) && atBottom(screen, TRUST_PROMPT_RE))) {
+        if (!trust) {
+          await this.terminals.kill(terminal);
+          return { error: "このフォルダーは、まだ Claude Code に信頼されていません。", needsTrust: true, trustWarnings: question?.warnings ?? [] };
         }
-        if (mcpQuestionOpen(screen)) {
-          if (!(await this.answerMcpQuestion(zellijSession).then(() => true, () => false))) {
-            await this.zellij.kill(zellijSession);
-            return { error: "Claude Code が、このフォルダーの MCP サーバーを使うかを尋ねたまま、答えを受け付けませんでした。" };
-          }
-          mcpDeclined = true;
-          log(`"${rcName}": started without the new MCP servers of ${dir}`);
-          continue;
+        if (!question || !(await this.answerTrust(terminal).then(() => true, () => false))) {
+          await this.terminals.kill(terminal);
+          return {
+            error:
+              "Claude Code の「このフォルダーを信頼するか」の確認に答えられませんでした。端末で一度 claude を起動して信頼してから、もう一度試してください。",
+          };
         }
-        if (resuming && resumeQuestionOpen(screen)) {
-          resumeAsked = true;
-          if (!(await this.answerResumeQuestion(zellijSession).then(() => true, () => false))) {
-            await this.zellij.kill(zellijSession);
-            return { error: "Claude Code が会話を要約から始めるかを尋ねたまま、答えを受け付けませんでした。" };
-          }
-          continue;
-        }
-        const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid && r.sessionId);
-        if (row?.sessionId && accept(row)) return { sessionId: row.sessionId, zellijSession, pid, resumeAsked, mcpDeclined };
-        if (!isAlive(pid)) break;
+        log(`"${rcName}": trusted ${dir} in Claude Code, as asked from Gasho`);
+        continue;
       }
-      const last = (await this.zellij.screen(zellijSession).catch(() => undefined))?.plain;
-      if (last) log(`"${rcName}" did not start; the end of its screen:\n${bottomLines(last, 8).join("\n")}`);
-      await this.zellij.kill(zellijSession);
-      return { error: "Claude Code を起動できませんでした（時間内にセッションを確認できませんでした）。" };
-    } finally {
-      await fsp.rm(pidFile, { force: true });
+      if (mcpQuestionOpen(screen)) {
+        if (!(await this.answerMcpQuestion(terminal).then(() => true, () => false))) {
+          await this.terminals.kill(terminal);
+          return { error: "Claude Code が、このフォルダーの MCP サーバーを使うかを尋ねたまま、答えを受け付けませんでした。" };
+        }
+        mcpDeclined = true;
+        log(`"${rcName}": started without the new MCP servers of ${dir}`);
+        continue;
+      }
+      if (resuming && resumeQuestionOpen(screen)) {
+        resumeAsked = true;
+        if (!(await this.answerResumeQuestion(terminal).then(() => true, () => false))) {
+          await this.terminals.kill(terminal);
+          return { error: "Claude Code が会話を要約から始めるかを尋ねたまま、答えを受け付けませんでした。" };
+        }
+        continue;
+      }
+      const row = (await listAgents(this.cfg.claudeBin)).find((r) => r.pid === pid && r.sessionId);
+      if (row?.sessionId && accept(row)) return { sessionId: row.sessionId, terminal, pid, resumeAsked, mcpDeclined };
+      if (!isAlive(pid)) break;
     }
+    const last = (await this.terminals.screen(terminal).catch(() => undefined))?.plain;
+    if (last) log(`"${rcName}" did not start; the end of its screen:\n${bottomLines(last, 8).join("\n")}`);
+    await this.terminals.kill(terminal);
+    return { error: "Claude Code を起動できませんでした（時間内にセッションを確認できませんでした）。" };
   }
 
   /**
@@ -974,14 +1031,14 @@ export class Daemon {
    */
   private async answerTrust(session: string): Promise<void> {
     for (let step = 0; step < 6; step++) {
-      const q = trustQuestion((await this.zellij.screen(session)).plain);
+      const q = trustQuestion((await this.terminals.screen(session)).plain);
       if (!q) throw new Error("the trust question is not on the screen");
       if (q.onYes) {
-        await this.zellij.keys(session, "Enter");
+        await this.terminals.keys(session, "Enter");
         if (await this.waitForScreen(session, (r) => trustQuestion(r.screen) === undefined, 5000)) return;
         throw new Error("the trust question did not close");
       }
-      await this.zellij.keys(session, q.yesBelow ? "Down" : "Up");
+      await this.terminals.keys(session, q.yesBelow ? "Down" : "Up");
       await this.waitForScreen(session, (r) => trustQuestion(r.screen)?.onYes === true, 1500);
     }
     throw new Error('the cursor did not reach "Yes, I trust this folder"');
@@ -990,7 +1047,7 @@ export class Daemon {
   /** Esc to the question about a folder's new MCP servers (see mcpQuestionOpen); throws if it stays open. */
   private async answerMcpQuestion(session: string): Promise<void> {
     for (let i = 0; i < 3; i++) {
-      await this.zellij.keys(session, "Esc");
+      await this.terminals.keys(session, "Esc");
       if (await this.waitForScreen(session, (r) => !mcpQuestionOpen(r.screen))) return;
     }
     throw new Error("the question about MCP servers did not close");
@@ -999,7 +1056,7 @@ export class Daemon {
   /** Esc to the question about resuming an old, long session (see resumeQuestionOpen); throws if it stays open. */
   private async answerResumeQuestion(session: string): Promise<void> {
     for (let i = 0; i < 3; i++) {
-      await this.zellij.keys(session, "Esc");
+      await this.terminals.keys(session, "Esc");
       if (await this.waitForScreen(session, (r) => !resumeQuestionOpen(r.screen))) return;
     }
     throw new Error("the question about resuming the session did not close");
@@ -1007,14 +1064,14 @@ export class Daemon {
 
   /**
    * Forks a session started from Gasho: `claude --remote-control <name> --resume <id> --fork-session` in its folder, in
-   * a new zellij session. The copy starts with the conversation so far; the session itself goes on as it was. Claude
+   * a new terminal. The copy starts with the conversation so far; the session itself goes on as it was. Claude
    * Code writes a fork's transcript only once something is recorded, so the copy is named with /rename right away:
    * that names it in Claude Code too (the Remote Control name is set already), and its conversation can be read at once.
    */
   private async fork(sessionId: string, name: string | undefined): Promise<CommandResult> {
     const source = this.managed.get(sessionId);
     if (!source) return { ok: false, error: "このセッションはフォークできません。フォークできるのは、Gasho が起動したセッションだけです。" };
-    if (!this.canLaunch) return { ok: false, error: "この working server には zellij がないので、セッションを起動できません。" };
+    if (!this.canLaunch) return { ok: false, error: NO_TERMINAL };
     const checked = sessionName(name?.trim() ? name : forkName(source.name));
     if ("error" in checked) return { ok: false, error: checked.error };
     if (!(this.tracked.get(sessionId)?.transcript ?? (await findTranscript(this.cfg.claudeDir, sessionId)))) {
@@ -1034,7 +1091,7 @@ export class Daemon {
         : started.error;
       return { ok: false, error };
     }
-    const { sessionId: forkId, zellijSession, pid } = started;
+    const { sessionId: forkId, terminal, pid } = started;
     const warnings: string[] = started.mcpDeclined ? [MCP_DECLINED] : [];
     let resumeAsked = started.resumeAsked;
     try {
@@ -1043,17 +1100,17 @@ export class Daemon {
       let ready = false;
       for (let waited = 0; waited < FORK_READY_MS && !ready; waited += 300) {
         await sleep(300);
-        const s = await this.zellij.screen(zellijSession).catch(() => undefined);
+        const s = await this.terminals.screen(terminal).catch(() => undefined);
         if (!s) continue;
         if (resumeQuestionOpen(s.plain)) {
-          await this.answerResumeQuestion(zellijSession).catch((e) => log(`${checked.name}: could not answer the question about resuming`, e));
+          await this.answerResumeQuestion(terminal).catch((e) => log(`${checked.name}: could not answer the question about resuming`, e));
           resumeAsked = true;
           continue;
         }
         ready = typedInBox(s) !== undefined;
       }
       const rename = renameCommand(checked.name);
-      const typed: TypeResult = ready ? await this.typeInput(zellijSession, rename).catch(() => "not-typed" as const) : "not-typed";
+      const typed: TypeResult = ready ? await this.typeInput(terminal, rename).catch(() => "not-typed" as const) : "not-typed";
       if (typed === "sent") {
         for (let waited = 0; waited < FORK_TRANSCRIPT_MS; waited += 250) {
           if (await findTranscript(this.cfg.claudeDir, forkId)) break;
@@ -1064,7 +1121,7 @@ export class Daemon {
         const t = this.tracked.get(forkId);
         if (t && !t.transcript) t.sawWithoutTranscript = false;
       }
-      this.managed.add({ sessionId: forkId, zellijSession, pid, cwd: source.cwd, name: checked.name, launchedAt: Date.now(), forkOf: sessionId, forkedAt });
+      this.managed.add({ sessionId: forkId, terminal, pid, cwd: source.cwd, name: checked.name, launchedAt: Date.now(), forkOf: sessionId, forkedAt });
       if (typed !== "sent") {
         // Until Claude Code records something, the copy shows no conversation in Gasho.
         this.managed.enqueue(forkId, { text: rename, ...(typed === "unsure" ? { entered: true, enteredAt: Date.now() } : {}) });
@@ -1074,7 +1131,7 @@ export class Daemon {
     } catch (e) {
       // A copy that Gasho does not keep would run on unseen: it is closed instead.
       this.managed.remove(forkId);
-      await this.zellij.kill(zellijSession);
+      await this.terminals.kill(terminal);
       throw e;
     }
     log(`forked ${source.name} (${sessionId}) as "${checked.name}" (${forkId})`);
@@ -1123,7 +1180,7 @@ export class Daemon {
 
   /**
    * Removes a session started from Gasho. Claude Code is asked to end with SIGTERM, as on a shutdown: it ends its
-   * Remote Control session, and its conversation is kept (`claude --resume` lists it). Then its zellij session is
+   * Remote Control session, and its conversation is kept (`claude --resume` lists it). Then its terminal is
    * closed, which ends whatever still runs in it. Only a process that `claude agents` lists with this session's id is
    * signalled, so a PID used again by another process is never hit.
    */
@@ -1145,7 +1202,7 @@ export class Daemon {
       }
       for (let waited = 0; waited < REMOVE_WAIT_MS && isAlive(m.pid); waited += 250) await sleep(250);
     }
-    await this.zellij.kill(m.zellijSession);
+    await this.terminals.kill(m.terminal);
     if (ours && isAlive(m.pid)) {
       log(`${m.name} did not end; stopping it`);
       try {
@@ -1155,7 +1212,7 @@ export class Daemon {
       }
     }
     await fsp.rm(this.attachmentsOf(sessionId), { recursive: true, force: true });
-    log(`removed session ${m.name} (${sessionId}); closed zellij session ${m.zellijSession}`);
+    log(`removed session ${m.name} (${sessionId}); closed its terminal ${m.terminal}`);
     await this.refresh();
     return { ok: true };
   }
@@ -1256,10 +1313,10 @@ export class Daemon {
         if (head?.entered) head.seenBusy = true;
         return;
       }
-      const screen = (await this.zellij.screen(m.zellijSession)).plain;
+      const screen = (await this.terminals.screen(m.terminal)).plain;
       // A /model picker (or its question) still open, e.g. from an Enter that Claude Code took late: close it first
       // (Esc changes nothing there). Any other dialog, such as a permission request, is the person's to answer.
-      if (modelPickerOptions(screen).length > 0 || switchQuestion(screen)) await this.closePicker(m.zellijSession);
+      if (modelPickerOptions(screen).length > 0 || switchQuestion(screen)) await this.closePicker(m.terminal);
       else if (dialogOpen(screen)) return;
       const item = this.managed.next(sessionId);
       if (item === undefined) return;
@@ -1288,12 +1345,12 @@ export class Daemon {
           // Compared with the session's state first, so what an earlier try switched is not switched again.
           const model = item.model && !this.sameModel(t?.info.model, item.model) ? item.model : undefined;
           const effort = item.effort && item.effort !== t?.info.effort ? item.effort : undefined;
-          if (model || effort) await this.switchModel(m.zellijSession, model, effort, t, out);
+          if (model || effort) await this.switchModel(m.terminal, model, effort, t, out);
           if (item.ultracode !== undefined && item.ultracode !== t?.info.ultracode) {
-            await this.setUltracode(m.zellijSession, item.ultracode, out);
+            await this.setUltracode(m.terminal, item.ultracode, out);
           }
         }
-        typed = await this.typeInput(m.zellijSession, item.text, item.entered, item.auto);
+        typed = await this.typeInput(m.terminal, item.text, item.entered, item.auto);
       } catch (e) {
         this.managed.unshift(sessionId, item);
         if (!(e instanceof EnterNotTaken)) throw e;
@@ -1342,7 +1399,7 @@ export class Daemon {
    * box still holds the text).
    */
   private async typeInput(session: string, text: string, entered = false, keepTyped = false): Promise<TypeResult> {
-    const look = () => this.zellij.screen(session).catch(() => undefined);
+    const look = () => this.terminals.screen(session).catch(() => undefined);
     const waitFor = async (done: (s: Screen) => boolean, ms: number): Promise<Screen | undefined> => {
       for (let waited = 0; waited < ms; waited += 150) {
         await sleep(150);
@@ -1353,7 +1410,7 @@ export class Daemon {
     };
     const enter = async (): Promise<TypeResult> => {
       try {
-        await this.zellij.keys(session, "Enter");
+        await this.terminals.keys(session, "Enter");
       } catch (e) {
         // The key may have reached the pane before the call failed.
         log("pressing Enter failed", e);
@@ -1362,7 +1419,7 @@ export class Daemon {
       // Taken: the box lets go of the text (or a picker, such as /model's, takes its place).
       return (await waitFor((s) => !promptHolds(s, text), this.enterWaitMs)) ? "sent" : "unsure";
     };
-    const clear = (s: Screen) => this.zellij.keys(session, ...clearPromptKeys(promptBoxLines(s.plain)?.length ?? 1));
+    const clear = (s: Screen) => this.terminals.keys(session, ...clearPromptKeys(promptBoxLines(s.plain)?.length ?? 1));
     // Right after a picker or a command, Claude Code is still redrawing; wait for the prompt box.
     let ready = await waitFor((s) => typedInBox(s) !== undefined, 3000);
     if (!ready) return "not-typed";
@@ -1372,7 +1429,7 @@ export class Daemon {
       return surveyOpen(ready.plain) ? "not-typed" : enter();
     }
     if (surveyOpen(ready.plain)) {
-      await this.zellij.keys(session, "0");
+      await this.terminals.keys(session, "0");
       // Decide on what the screen shows now: had the survey not taken the "0", it is in the box.
       ready = await waitFor((s) => !surveyOpen(s.plain) && typedInBox(s) !== undefined, 1500);
       if (!ready) return "not-typed";
@@ -1382,7 +1439,7 @@ export class Daemon {
       await clear(ready);
       if (!(await waitFor((s) => typedInBox(s) === "", 1500))) return "not-typed";
     }
-    await this.zellij.paste(session, text);
+    await this.terminals.paste(session, text);
     // Enter only once the text is in the box. Otherwise an empty box after Enter could not tell "sent" from
     // "never typed" (a redraw can drop a paste).
     if (!(await waitFor((s) => promptHolds(s, text), 2000))) {
@@ -1401,7 +1458,7 @@ export class Daemon {
   ): Promise<{ screen: string; options: PickerOption[] } | undefined> {
     for (let waited = 0; waited < ms; waited += 200) {
       await sleep(200);
-      const s = await this.zellij.screen(session).catch(() => undefined);
+      const s = await this.terminals.screen(session).catch(() => undefined);
       if (!s) continue;
       const r = { screen: s.plain, options: modelPickerOptions(s.plain) };
       if (done(r)) return r;
@@ -1416,7 +1473,7 @@ export class Daemon {
    */
   private async closePicker(session: string): Promise<void> {
     for (let i = 0; i < 3; i++) {
-      await this.zellij.keys(session, "Esc");
+      await this.terminals.keys(session, "Esc");
       if (await this.waitForScreen(session, (r) => promptBoxLines(r.screen) !== undefined && !dialogOpen(r.screen))) return;
     }
     throw new Error("the /model picker did not close");
@@ -1466,7 +1523,7 @@ export class Daemon {
       target = opened.options.findIndex((o) => pickerMatches(o.label, model));
       if (target < 0) return giveUp(`${this.modelName(model)} はこのセッションでは選べません。`);
       const steps = target - Math.max(0, cursorAt);
-      if (steps !== 0) await this.zellij.keys(session, ...Array<string>(Math.abs(steps)).fill(steps > 0 ? "Down" : "Up"));
+      if (steps !== 0) await this.terminals.keys(session, ...Array<string>(Math.abs(steps)).fill(steps > 0 ? "Down" : "Up"));
       if (!(await this.waitForScreen(session, (r) => r.options[target]?.cursor === true))) return giveUp("モデルを選べませんでした。");
     } else if (!opened.options[cursorAt]?.current) {
       // Effort only: "s" applies the model under the cursor too, so it must be the one the session uses (✔).
@@ -1492,7 +1549,7 @@ export class Daemon {
       (r) => r.options[target]?.cursor === true && (level === undefined || pickerEffort(r.screen) === level),
     );
     if (!ready) return giveUp("モデルを選べませんでした。");
-    await this.zellij.keys(session, "s");
+    await this.terminals.keys(session, "s");
     // In a conversation Claude Code has cached, switching asks first, because the whole history is read again. The
     // switch was asked for in Gasho, so the answer is "Yes" (still for this session only). Any other question with
     // the same choices (a hook may ask to confirm) is for the person, and the switch is cancelled.
@@ -1503,13 +1560,13 @@ export class Daemon {
     let done = false;
     for (let i = 0; i < 40 && !done; i++) {
       await sleep(200);
-      const s = await this.zellij.screen(session).catch(() => undefined);
+      const s = await this.terminals.screen(session).catch(() => undefined);
       if (!s) continue;
       const question = switchQuestion(s.plain);
       if (question) {
         if (answered) continue; // answered already; the question is going away
         if (!question.aboutCache || !question.onYes) return giveUp("Claude Code が切り替えの確認を求めたので、切り替えませんでした。");
-        await this.zellij.keys(session, "Enter");
+        await this.terminals.keys(session, "Enter");
         answered = true;
         note = `${model ? "モデル" : "Effort "}を切り替えたので、次の返答では会話の履歴を読み直します（時間とトークンが多くかかります）。`;
         continue;
@@ -1541,7 +1598,7 @@ export class Daemon {
     const walk = async (from: EffortLevel, goal: EffortLevel): Promise<EffortLevel> => {
       let now = from;
       for (let i = 0; i < EFFORT_LEVELS.length && now !== goal; i++) {
-        await this.zellij.keys(session, at(goal) > at(now) ? "Right" : "Left");
+        await this.terminals.keys(session, at(goal) > at(now) ? "Right" : "Left");
         const moved = await this.waitForScreen(
           session,
           (r) => {
@@ -1614,7 +1671,7 @@ export class Daemon {
     // Claude Code puts the stopped text back into the box.
     const head = this.managed.peek(sessionId);
     if (head?.entered) head.seenBusy = true;
-    await this.zellij.keys(m.zellijSession, "Esc");
+    await this.terminals.keys(m.terminal, "Esc");
     this.settleUntil.set(sessionId, Date.now() + INTERRUPT_SETTLE_MS);
     this.scheduleRefresh(500);
     return { ok: true };

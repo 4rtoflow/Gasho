@@ -1,4 +1,4 @@
-// Starts a new session on a working server: `claude --remote-control` in its own zellij session. The same form shows on
+// Starts a new session on a working server: `claude --remote-control` in a terminal of its own. The same form shows on
 // the home screen (LaunchPanel) and in a dialog opened from the sidebar's "＋" (LaunchDialog).
 import { Plus, X } from "lucide-react";
 import { Dialog } from "radix-ui";
@@ -72,7 +72,7 @@ function LaunchForm({
 
       {candidates.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          起動できる working server がありません。接続していて、zellij が入っている working server が必要です。
+          起動できる working server がありません。接続していて、セッションの端末を作れる working server が必要です（gasho-daemon の doctor の「端末」）。
         </p>
       ) : (
         <>

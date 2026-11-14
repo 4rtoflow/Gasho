@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HubToClient, HubToDaemon, SessionInfo } from "@gasho/protocol";
-import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, legacyFeatures, MAX_FILES_BYTES, validateCommand } from "../src/hub.ts";
+import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, legacyFeatures, MAX_FILES_BYTES, MAX_WRITE_BYTES, validateCommand } from "../src/hub.ts";
 import { notificationFor } from "../src/notify.ts";
 import { Store } from "../src/store.ts";
 
@@ -592,4 +592,109 @@ test("a shell command (an input that starts with \"!\") needs a command and cann
   // Not a shell command: "!" further on, or files with an ordinary message.
   assert.equal(input("これを見て!"), undefined);
   assert.equal(input("見て", [{ name: "a.txt", data: "YQ==" }]), undefined);
+});
+
+test("a folder and a file of a session go to a gasho-daemon 0.11.0 or later, and back to the browser that asked", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const asking = fakePeer<HubToClient>(browserId);
+  const other = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(asking);
+  hub.onClientConnect(other);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path: "" });
+  const tooOld = asking.sent.at(-1);
+  assert.ok(tooOld?.type === "dir" && tooOld.path === "" && /0\.11\.0/.test(tooOld.error ?? ""));
+  assert.equal(old.sent.length, 1); // the welcome only
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
+  hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path: "src" });
+  const askedDir = d.sent.at(-1);
+  assert.ok(askedDir?.type === "dir.get" && askedDir.path === "src" && askedDir.sessionId === "s1");
+  // An answer of the other kind is not taken for it.
+  hub.onDaemonMessage(d, { type: "file", requestId: askedDir.requestId, sessionId: "s1", path: "src", error: "x" });
+  assert.ok(!asking.sent.some((m) => m.type === "file"));
+  const dir = { path: "src", entries: [{ name: "app.ts", kind: "file" as const, size: 10, mtime: 1 }], truncated: false };
+  hub.onDaemonMessage(d, { type: "dir", requestId: askedDir.requestId, sessionId: "s1", path: "src", dir });
+  assert.deepEqual(asking.sent.at(-1), { type: "dir", machine: machineId, sessionId: "s1", path: "src", dir, error: undefined });
+
+  hub.onClientMessage(asking, { type: "file.get", machine: machineId, sessionId: "s1", path: "src/app.ts" });
+  const askedFile = d.sent.at(-1);
+  assert.ok(askedFile?.type === "file.get" && askedFile.path === "src/app.ts");
+  const file = { path: "src/app.ts", size: 10, mtime: 1, hash: "a".repeat(64), text: "const a=1;", writable: true };
+  hub.onDaemonMessage(d, { type: "file", requestId: askedFile.requestId, sessionId: "s1", path: "src/app.ts", file });
+  const got = asking.sent.at(-1);
+  assert.ok(got?.type === "file" && got.machine === machineId && got.file?.text === "const a=1;");
+  assert.ok(!other.sent.some((m) => m.type === "dir" || m.type === "file"));
+
+  // Paths that leave the folder never reach the working server; a file needs a path.
+  const before = d.sent.length;
+  for (const path of ["../x", "/etc/passwd", "a//b", "a/./b", "a\0b"]) {
+    hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path });
+    const r = asking.sent.at(-1);
+    assert.ok(r?.type === "dir" && r.path === path && r.error, path);
+  }
+  hub.onClientMessage(asking, { type: "file.get", machine: machineId, sessionId: "s1", path: "" });
+  const noFile = asking.sent.at(-1);
+  assert.ok(noFile?.type === "file" && /ファイルを指定/.test(noFile.error ?? ""));
+  assert.equal(d.sent.length, before);
+
+  // Waiting requests fail when the working server goes away.
+  hub.onClientMessage(asking, { type: "file.get", machine: machineId, sessionId: "s1", path: "README.md" });
+  hub.onDaemonClose(d);
+  const gone = asking.sent.at(-1);
+  assert.ok(gone?.type === "file" && gone.path === "README.md" && gone.error && !gone.file);
+  hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path: "" });
+  const offline = asking.sent.at(-1);
+  assert.ok(offline?.type === "dir" && /オフライン/.test(offline.error ?? ""));
+});
+
+test("writing a file is checked, goes to a gasho-daemon 0.11.0 or later, and the audit log keeps its path and size, never its text", () => {
+  const ok = { type: "file.write" as const, sessionId: "s1", path: "notes/a.md", content: "メモ" };
+  assert.equal(validateCommand(ok), undefined);
+  assert.equal(validateCommand({ ...ok, content: "", create: true }), undefined);
+  assert.equal(validateCommand({ ...ok, baseHash: "0123456789abcdef".repeat(4) }), undefined);
+  assert.match(validateCommand({ ...ok, path: "" }) ?? "", /ファイルを指定/);
+  assert.match(validateCommand({ ...ok, path: "../a.md" }) ?? "", /フォルダーの中のパス/);
+  assert.match(validateCommand({ ...ok, path: "/home/rg/a.md" }) ?? "", /フォルダーの中のパス/);
+  assert.match(validateCommand({ ...ok, content: 3 as never }) ?? "", /中身/);
+  assert.match(validateCommand({ ...ok, content: "あ".repeat(MAX_WRITE_BYTES / 3 + 1) }) ?? "", /1MB/);
+  assert.match(validateCommand({ ...ok, baseHash: "abc" }) ?? "", /版/);
+  assert.match(validateCommand({ ...ok, create: "yes" as never }) ?? "", /作成/);
+
+  const { hub, store, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  hub.onClientMessage(c, { ...ok, requestId: "w0", machine: machineId });
+  const refused = c.sent.at(-1);
+  assert.ok(refused?.type === "command.result" && refused.requestId === "w0" && !refused.result.ok);
+  assert.match(refused.result.error ?? "", /ファイルを扱えません/);
+  assert.equal(old.sent.at(-1)?.type, "welcome");
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
+  const secret = "これは秘密の本文";
+  hub.onClientMessage(c, { ...ok, content: secret, create: true, requestId: "w1", machine: machineId });
+  const made = d.sent.at(-1);
+  assert.ok(made?.type === "file.write" && made.content === secret && made.create === true && made.path === "notes/a.md");
+  const written = { hash: "b".repeat(64), size: 24, mtime: 5 };
+  hub.onDaemonMessage(d, { type: "command.result", requestId: made.requestId, result: { ok: true, written } });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "w1", machine: machineId, result: { ok: true, written } });
+
+  hub.onClientMessage(c, { ...ok, content: "新しい本文", baseHash: written.hash, requestId: "w2", machine: machineId });
+  const save = d.sent.at(-1);
+  assert.ok(save?.type === "file.write" && save.baseHash === written.hash && save.create === undefined);
+  const conflict = { ok: false, error: "このファイルは、開いたあとで変更されています。", conflict: true };
+  hub.onDaemonMessage(d, { type: "command.result", requestId: save.requestId, result: conflict });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "w2", machine: machineId, result: conflict });
+
+  const logged = store.recentEvents().filter((e) => e.event === "Gasho:file.write");
+  assert.deepEqual(
+    logged.map((e) => e.summary?.replace(/ \(by .*\)$/, "")),
+    ["notes/a.md [new] [1KB]", "notes/a.md [1KB]"],
+  );
+  assert.ok(logged.every((e) => !e.summary?.includes(secret) && !e.summary?.includes("新しい本文")));
 });

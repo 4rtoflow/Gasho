@@ -52,7 +52,7 @@ export interface SessionInfo {
   prLinks: PrLink[];
   costUSD?: number;
   lastActivityAt?: number;
-  /** Started by Gasho (in zellij), so Gasho can send input to it. */
+  /** Started by Gasho (in a terminal of gasho-daemon's), so Gasho can send input to it. */
   managed?: boolean;
   /** Inputs waiting until the session is idle. */
   pendingInputs?: number;
@@ -166,7 +166,7 @@ export interface MachineInfo {
   lastSeen: number;
   daemonVersion?: string;
   sessions: SessionInfo[];
-  /** Whether Gasho can start sessions on this machine (zellij is available). */
+  /** Whether Gasho can start sessions on this machine (gasho-daemon can make their terminals). */
   canLaunch?: boolean;
   /** Folders a session can be started in (already trusted by Claude Code). */
   folders?: string[];
@@ -346,6 +346,59 @@ export interface GitHubItemDetail extends GitHubItem {
   checks?: GitHubCheck[];
 }
 
+/**
+ * Something in a folder inside a session's folder. A symbolic link is what it points to (`link`), and is not opened
+ * when it points outside the session's folder (`outside`). "other": anything else, such as a socket or a broken link.
+ */
+export interface DirEntry {
+  name: string;
+  kind: "dir" | "file" | "other";
+  /** Files: their size in bytes, and when they were last changed (ms since the epoch). */
+  size?: number;
+  mtime?: number;
+  link?: boolean;
+  outside?: boolean;
+}
+
+/** The entries of a folder inside a session's folder, folders first, then by name. Git's own `.git` is left out. */
+export interface DirListing {
+  /** From the session's folder, "/"-separated: "" for the folder itself, "src/lib" for one inside it. */
+  path: string;
+  entries: DirEntry[];
+  /** More entries are there than were sent. */
+  truncated: boolean;
+}
+
+/** A text file as it was just written, to tell whether it changes again. */
+export interface FileStamp {
+  /** SHA-256 of its bytes, in hex. */
+  hash: string;
+  size: number;
+  /** When it was last changed (ms since the epoch). */
+  mtime: number;
+}
+
+/**
+ * A file inside a session's folder, as gasho-daemon read it: a UTF-8 text file's text (up to 1 MB), or an image's
+ * data to show (up to 5 MB). Otherwise neither, with why: the file is binary (or text in another encoding than
+ * UTF-8), or too large to send.
+ */
+export interface FileContent {
+  /** As asked for: from the session's folder, "/"-separated. */
+  path: string;
+  size: number;
+  mtime: number;
+  /** SHA-256 of the bytes that were read, in hex; saving sends it back, so that changes made meanwhile are not lost. */
+  hash?: string;
+  /** The text as it is in the file, with its line endings and byte order mark. */
+  text?: string;
+  image?: { mime: string; data: string };
+  binary?: boolean;
+  tooLarge?: boolean;
+  /** gasho-daemon may write it (the file's permissions). */
+  writable: boolean;
+}
+
 /** A page of transcript entries. `start` is the index of entries[0]; `total` counts all entries. */
 export interface TranscriptPage {
   entries: TranscriptEntry[];
@@ -389,7 +442,9 @@ export type DaemonToHub =
       number: number;
       item?: GitHubItemDetail;
       error?: string;
-    };
+    }
+  | { type: "dir"; requestId: string; sessionId: string; path: string; dir?: DirListing; error?: string }
+  | { type: "file"; requestId: string; sessionId: string; path: string; file?: FileContent; error?: string };
 
 // gasho-hub -> gasho-daemon
 export type HubToDaemon =
@@ -398,6 +453,8 @@ export type HubToDaemon =
   | { type: "git.graph.get"; requestId: string; sessionId: string; repo?: string }
   | { type: "github.list.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind }
   | { type: "github.item.get"; requestId: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
+  | { type: "dir.get"; requestId: string; sessionId: string; path: string }
+  | { type: "file.get"; requestId: string; sessionId: string; path: string }
   | ({ requestId: string } & SessionCommand);
 
 // gasho-hub -> browser
@@ -435,7 +492,9 @@ export type HubToClient =
       number: number;
       item?: GitHubItemDetail;
       error?: string;
-    };
+    }
+  | { type: "dir"; machine: string; sessionId: string; path: string; dir?: DirListing; error?: string }
+  | { type: "file"; machine: string; sessionId: string; path: string; file?: FileContent; error?: string };
 
 // browser -> gasho-hub
 export type ClientToHub =
@@ -446,6 +505,13 @@ export type ClientToHub =
   | { type: "github.list.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind }
   /** One issue or pull request of that repository, with its text and conversation. */
   | { type: "github.item.get"; machine: string; sessionId: string; repo?: string; kind: GitHubListKind; number: number }
+  /**
+   * The entries of a folder inside the session's folder (gasho-daemon 0.11.0 and later). `path`: from the session's
+   * folder, "/"-separated, without "." or ".." ("" for the folder itself, "src/lib").
+   */
+  | { type: "dir.get"; machine: string; sessionId: string; path: string }
+  /** A file inside the session's folder ("src/app.ts"): its text, or what kind of file it is. */
+  | { type: "file.get"; machine: string; sessionId: string; path: string }
   | { type: "notification.read"; ids: string[] }
   | ({ requestId: string; machine: string } & SessionCommand);
 
@@ -516,12 +582,19 @@ export type SessionCommand =
    */
   | { type: "session.fork"; sessionId: string; name?: string }
   /**
-   * Ends a session started from Gasho (its Claude Code, then its zellij session) and removes it from Gasho. Its
+   * Ends a session started from Gasho (its Claude Code, then its terminal) and removes it from Gasho. Its
    * conversation stays on the working server: `claude --resume` lists it.
    */
   | { type: "session.remove"; sessionId: string }
   /** Answers one of a session's `permissionRequests`. */
-  | { type: "permission.answer"; sessionId: string; permissionId: string; decision: PermissionDecision };
+  | { type: "permission.answer"; sessionId: string; permissionId: string; decision: PermissionDecision }
+  /**
+   * Writes a text file inside the session's folder (`path` as in file.get), as UTF-8, up to 1 MB (gasho-daemon 0.11.0
+   * and later). `baseHash`: the file's hash when it was read; if the file is no longer that, nothing is written and
+   * the result says so (`conflict`). Without it, the file is overwritten. `create`: makes a new file instead, in a
+   * folder that is there; nothing that is already there is overwritten.
+   */
+  | { type: "file.write"; sessionId: string; path: string; content: string; baseHash?: string; create?: boolean };
 
 export interface CommandResult {
   ok: boolean;
@@ -545,4 +618,8 @@ export interface CommandResult {
    */
   needsTrust?: boolean;
   trustWarnings?: string[];
+  /** file.write: the file as written. */
+  written?: FileStamp;
+  /** file.write with `baseHash`: the file changed after it was read (by Claude, or anyone else), so it was not written. */
+  conflict?: boolean;
 }

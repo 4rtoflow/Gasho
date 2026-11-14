@@ -54,7 +54,7 @@ node apps/daemon/src/cli.ts doctor          # 要るものが揃っているか�
 node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル（Ubuntu は systemd、Mac は launchd）を書き出す
 ```
 
-`npm install` は要らない。`doctor` は、Node.js、登録、Claude Code、zellij、git、GitHub CLI、通知の hooks が揃っているかを確かめ、足りないものがあれば、使えなくなる機能と直し方を示す。
+`npm install` は要らない。`doctor` は、Node.js、登録、Claude Code、セッションの端末、git、GitHub CLI、通知の hooks が揃っているかを確かめ、足りないものがあれば、使えなくなる機能と直し方を示す。
 
 ### Gasho からセッションを起動して、入力する
 
@@ -64,7 +64,7 @@ node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル�
 
 サイドバーには、これらのセッションを working server に分けずに1つの一覧で出し、最後に会話があったものから並べる。まだ会話がないセッションは、起動した時刻で並べる。オフラインの working server のセッションには「オフライン」と出す。セッションがまだないときも、一覧の見出しと「＋」は出す。
 
-- working server に zellij が要る（0.45 で確かめた）。セッションは、専用の zellij セッション（`gasho-<名前>-xxxx`）の中で動くので、SSH から `zellij attach <その名前>` で直接見ることもできる
+- セッションは、gasho-daemon がセッションごとに用意する端末（`gasho-<名前>-xxxx`）の中で動く。端末は gasho-daemon とは別のプロセスで、Ubuntu では systemd のスコープの中で動くので、gasho-daemon を動かし直してもセッションは止まらない。SSH から `gasho-daemon attach <その名前>` で直接見て、そのまま操作することもできる（Ctrl+] で抜ける。名前を付けずに実行すると、端末の一覧を出す）。gasho-daemon 0.10 までは zellij が要った。そのころに起動したセッションは、終わるまで zellij で動かし続ける
 - フォルダーの一覧に出るのは、Claude Code がすでに信頼しているフォルダー。ほかのフォルダーは、端末で一度 `claude` を起動して信頼してから使う
 - 作業中は、送信ボタンが停止ボタンに変わる。押すと Esc を送って作業を止める
 - 送った時点で作業中になっていた指示（公式アプリからの発言と重なったときなど）は daemon が預かり、作業が終わってから順に送る
@@ -78,7 +78,7 @@ node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル�
 - クリップのボタン、ドラッグ、貼り付けでファイルを添付できる（1回に5個、合わせて10MB まで）。ファイルは working server の `~/.local/share/gasho/attachments/` に保存され、Claude が読む。セッションが終わると消える
 - 入力欄に書きかけた文、添付したファイル、選んだモデル・Effort・Ultracode、↑ で呼び出せる送った文は、セッションごとに覚えておく。ほかのセッションやホームに移って戻っても残る。ページを開いているあいだだけ覚えるので、読み込み直すと消える
 - ホームでは、Gasho が起動したセッションが使ったトークンを、過去24時間の推移と内訳（入力、出力、キャッシュへの書き込み、キャッシュからの読み込み）で見られる。daemon が、セッションとそのサブエージェントの会話の記録（`~/.claude/projects/` の下）から、返答ごとに1回ずつ数える。キャッシュからの読み込みは、それまでの会話を毎回読み直した分で、たいてい全体の大部分を占める
-- `/exit` を送るか公式アプリで終了すると、daemon が zellij のセッションも閉じる
+- `/exit` を送るか公式アプリで終了すると、daemon がセッションの端末も閉じる
 - `claude rc` が起動したセッションには、外から入力する公式の手段がないので、Gasho からは入力できない。入力欄の下の「公式アプリで開く」から操作する
 
 起動したセッションの記録は `~/.config/gasho/managed.json` に残り、daemon を起動し直しても引き継ぐ。
@@ -102,10 +102,10 @@ node apps/daemon/src/cli.ts service print   # 常駐させる設定ファイル�
 - ホームのトークンの数には、引き継いだ会話の分を入れない
 - まだ会話がないセッションは、フォークできない
 
-削除すると、daemon が Claude Code を終了し、zellij のセッションを閉じて、Gasho の一覧から外す。会話の記録は working server に残るので、端末で `claude --resume` を使えば開き直せる。
+削除すると、daemon が Claude Code を終了し、セッションの端末を閉じて、Gasho の一覧から外す。会話の記録は working server に残るので、端末で `claude --resume` を使えば開き直せる。
 
 - 作業中なら、途中で止まる。待たせていた指示は送らず、添付ファイルは消える
-- daemon は Claude Code に SIGTERM を送り、8秒たっても終わらなければ zellij のセッションごと止める
+- daemon は Claude Code に SIGTERM を送り、8秒たっても終わらなければ端末ごと止める
 
 ### セッション画面とブランチグラフ
 

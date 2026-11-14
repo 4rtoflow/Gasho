@@ -6,7 +6,7 @@ Gasho を、Mac と Ubuntu Server で動いている `claude rc` のセッショ
 
 - rc の通信は、ローカルの子プロセスと Anthropic の API のあいだで直接行われる。第三者のクライアントが加わるための公開 API はなく、ローカルの認証情報で非公開の API を呼ぶことは規約で禁じられている
 - 同じマシンの上なら、`claude agents --json`、トランスクリプト、hooks を使って、セッションの状態と履歴を取得し、権限の確認に答えられる。rc のサーバーモードで起動したセッションでも動くことを確かめた
-- Gasho が zellij 上で `claude --remote-control` を起動したセッションには、発言の送信、割り込み、新規作成もできる。同じセッションを公式アプリからも操作できる
+- Gasho が自分の端末（はじめは zellij、gasho-daemon 0.11 からは node-pty と xterm.js。検証7）で `claude --remote-control` を起動したセッションには、発言の送信、割り込み、新規作成もできる。同じセッションを公式アプリからも操作できる
 
 ## rc の仕組み
 
@@ -131,12 +131,25 @@ zellij を操作するときは、`--session` で対象を必ず指定する。r
 - SIGTERM を送ると、Claude Code は0.25秒以内に終了した。レジストリのファイルを消し、トランスクリプトの最後に `cost-state` を書いて、`claude --resume <ID>` で再開できると表示した。Remote Control につながっているセッションでは、1秒より長くかかった
 - Claude Code のコードでは、前の発言から70分以上（`CLAUDE_CODE_RESUME_THRESHOLD_MINUTES`）たち、会話が10万トークン以上（`CLAUDE_CODE_RESUME_TOKEN_THRESHOLD`）あるセッションを再開すると、要約から始めるかを尋ねる。出るかどうかは、サーバー側の設定でも変わる。Esc で閉じると、何も保存せずにそのまま再開する。`Don't ask me again` を選ぶと、全体の設定（`resumeReturnDismissed`）に保存される。この問いも、画面ではまだ見ていない
 
+## 検証7：zellij を使わずに Claude Code を動かす
+
+2026年11月14日に、Claude Code 2.1.325 で確かめた。作業用の一時フォルダーで試し、試したあとで `claude purge` で消した。
+
+- node-pty（`@lydell/node-pty` 1.1.0。node-pty のビルド済み版）で疑似端末を作り、出力を `@xterm/headless` 6.0.0 に読ませると、Claude Code の画面を読めた。信頼の確認は起動から約0.4秒で出て、`trustQuestion` などの画面を読む関数は、zellij の画面と同じように働いた
+- xterm.js は、Claude Code の問い合わせのうち DA1 に答えた。kitty キーボードの問い合わせ（`CSI ? u`）には答えないので、Claude Code は従来のキーを使う。↓ ↑ Enter Esc Ctrl+U Backspace は、端末が送るのと同じバイト列で効いた
+- 入力欄の薄い文字の候補（`Try "how does <filepath> work?"`）は、セルの属性（dim）で、打った文字と見分けられた。2行の日本語を bracketed paste で貼ると入力欄に入り、Enter を押さずに `clearPromptKeys` のキーで消せた
+- 本家の node-pty 1.1.0 には Linux 用のビルド済みが入っておらず、コンパイラがないと入らない（この Ubuntu Server には gcc も make もない）。`@lydell/node-pty` は、プラットフォームごとのビルド済み（linux-x64 は約72KB）だけを入れ、install スクリプトもない
+- 1セッション分の端末のプロセスは、メモリを約73MB 使った（zellij のサーバーは約74MB）
+- systemd のユーザーサービスとして動く gasho-daemon が起動したプロセスは、サービスの cgroup に入る。KillMode の既定（control-group）では、サービスを動かし直すとそれらも止まる。`systemd-run --user --scope` で起動したプロセスは別のスコープに入り、サービスの外にいた。すでに動いているプロセスも、`StartTransientUnit` に PID を渡すとスコープへ移せた
+- KillMode=process では直らない。npx で起動した gasho-daemon は `npm exec` → `sh -c` → `node` の形で動き、停止のときに sh は SIGTERM を node に渡さずに終わる。同じ形の一時的な unit で試すと、unit は止まったのに node が残った
+- gasho-daemon の起動・入力・再起動・削除を、本物の Claude Code で通した（Remote Control・hooks・MCP は外した）。信頼の確認への回答を含めて起動は約2.4秒、`/rename` の入力は約0.6秒で済み、gasho-daemon を作り直しても端末を見つけてセッションを引き継ぎ、削除で Claude Code と端末が終わった
+
 ## 未確認の事項
 
 - 名前の変更が、公式アプリのセッション名に反映されるか
 - 古く長い会話を再開するときの問いの画面と、Esc で閉じたときの動き
 - hook から拒否を返したときの動き
-- Mac（launchd、zellij）での動き
+- Mac（launchd）での動き（端末の node-pty を含む）
 - AskUserQuestion に hook で答える方法
 - MessageDisplay が届く条件
 

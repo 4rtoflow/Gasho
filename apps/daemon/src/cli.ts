@@ -7,6 +7,7 @@ import { DAEMON_VERSION, Daemon } from "./daemon.ts";
 import { hooksConfig, installHooks, SECRET_ENV } from "./hooks.ts";
 import { commandOf, installOf, serviceCommand } from "./install.ts";
 import { doctor, formatChecks, launchdPlist, servicePath, systemdUnit } from "./setup.ts";
+import { attach, listTerminals } from "./terminal.ts";
 
 // How this copy was installed (a clone, npx, or npm install -g): the command to suggest and what a service runs.
 const install = installOf(import.meta.filename);
@@ -20,6 +21,8 @@ const usage = `usage: ${command} <command>
                                                    (a systemd user service on Linux, a launchd agent on macOS)
   hooks print                                      print the hooks to add to Claude Code settings
   hooks install [--settings FILE]                  merge the hooks into FILE (default ~/.claude/settings.json)
+  attach [NAME]                                    show the terminal of a session Gasho started, and type into it
+                                                   (Ctrl+] leaves it running); without NAME, list the terminals
   version                                          print the version
 
 The registration is stored in ${credentialsPath()} (GASHO_DAEMON_CONFIG to change).
@@ -86,6 +89,17 @@ try {
       if (process.platform === "linux") process.stdout.write(systemdUnit(input));
       else if (process.platform === "darwin") process.stdout.write(launchdPlist(input));
       else throw new Error(`no service file for ${process.platform}; run the daemon with: ${command} run`);
+      break;
+    }
+    case "attach": {
+      const stateDir = path.dirname(credentialsPath());
+      if (args[1]) {
+        await attach(stateDir, args[1]);
+        break;
+      }
+      const list = await listTerminals(stateDir);
+      if (list.length === 0) console.log("no session terminals are running");
+      for (const t of list) console.log(`${t.name}\t${t.cwd}${t.exited ? "\t(ended)" : ""}`);
       break;
     }
     case "hooks": {

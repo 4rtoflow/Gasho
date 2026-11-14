@@ -8,6 +8,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { credentialsPath, loadCredentials } from "./credentials.ts";
 import { hookUrl, installedHookEvents } from "./hooks.ts";
+import { terminalWorks } from "./terminal.ts";
 
 const execFileP = promisify(execFile);
 
@@ -20,7 +21,7 @@ export interface Check {
   hint?: string;
 }
 
-/** "v24.1.0", "zellij 0.45.1", "2.1.323 (Claude Code)" → [24, 1, 0] … */
+/** "v24.1.0", "git version 2.43.0", "2.1.323 (Claude Code)" → [24, 1, 0] … */
 export function versionOf(text: string): number[] | undefined {
   const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(text);
   return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : undefined;
@@ -114,14 +115,15 @@ export async function doctor(o: {
       : { level: "fail", name: "Claude Code", detail: `${o.claudeBin} が見つかりません`, hint: "Claude Code を入れて、端末で一度 claude を起動してログインしてください（パスが違うときは GASHO_CLAUDE_BIN）" },
   );
 
-  const zellij = await run("zellij", ["--version"]);
-  const zv = zellij ? versionOf(zellij) : undefined;
   checks.push(
-    !zellij || !zv
-      ? { level: "warn", name: "zellij", detail: "ありません", hint: "Gasho からセッションを起動して指示を送るのに使います（ないと見るだけになります）。0.45 以上を入れてください" }
-      : atLeast(zv, [0, 45])
-        ? { level: "ok", name: "zellij", detail: zv.join(".") }
-        : { level: "warn", name: "zellij", detail: zv.join("."), hint: "0.45 以上で確かめています。古いと起動や入力がうまくいかないことがあります" },
+    (await terminalWorks())
+      ? { level: "ok", name: "端末", detail: "セッションの端末を作れます" }
+      : {
+          level: "warn",
+          name: "端末",
+          detail: "作れません",
+          hint: `Gasho からセッションを起動して指示を送るのに使います（ないと見るだけになります）。node-pty のビルド済みのモジュールがあるのは、Linux と macOS の x64・arm64 です（このマシンは ${process.platform}-${process.arch}）`,
+        },
   );
 
   const git = await run("git", ["--version"]);
@@ -196,12 +198,12 @@ export interface ServiceInput {
   argv: string[];
   /** The folder it runs in: the repository's, or the home folder. */
   cwd: string;
-  /** PATH for the daemon: Claude Code, zellij, gh and git must be found in it. */
+  /** PATH for the daemon: Claude Code, gh and git must be found in it. */
   path: string;
   home: string;
 }
 
-/** The PATH the service gets: Node.js's folder first, then this shell's PATH (where claude, zellij and gh are found). */
+/** The PATH the service gets: Node.js's folder first, then this shell's PATH (where claude and gh are found). */
 export function servicePath(node: string, envPath: string | undefined): string {
   const dirs = [path.dirname(node), ...(envPath ?? "").split(":")].filter(Boolean);
   return [...new Set(dirs)].join(":");

@@ -16,6 +16,11 @@ const tsc = path.resolve(daemon, "../../node_modules/.bin/tsc");
 execFileSync(tsc, ["-p", path.join(daemon, "tsconfig.build.json"), "--outDir", path.join(out, "lib")], { stdio: "inherit" });
 fs.chmodSync(path.join(out, "lib/cli.js"), 0o755);
 
+// The daemon's own dependencies (the sessions' terminals: node-pty and xterm.js), at the versions it was tested with;
+// the workspace's packages (@gasho/protocol) are only types, gone in the JavaScript.
+const own = JSON.parse(fs.readFileSync(path.join(daemon, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
+const dependencies = Object.fromEntries(Object.entries(own.dependencies ?? {}).filter(([name]) => !name.startsWith("@gasho/")));
+
 const pkg = {
   name: PACKAGE_NAME,
   version,
@@ -23,6 +28,7 @@ const pkg = {
   type: "module",
   bin: { "gasho-daemon": "lib/cli.js" },
   files: ["lib"],
+  dependencies,
   engines: { node: ">=24" },
   repository: { type: "git", url: "git+https://github.com/4rtoflow/Gasho.git", directory: "apps/daemon" },
   homepage: "https://github.com/4rtoflow/Gasho/blob/main/docs/daemon-setup.md",

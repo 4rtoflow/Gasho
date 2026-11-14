@@ -1,5 +1,6 @@
-// Sessions that Gasho starts itself: `claude --remote-control` running in its own zellij session.
-// Gasho can type into these (paste + Enter) and interrupt them (Esc); the official apps can still use them.
+// Sessions that Gasho starts itself: `claude --remote-control` running in a terminal of its own (terminal.ts; zellij
+// for those that gasho-daemon 0.10 and before started). Gasho can type into these (paste + Enter) and interrupt them
+// (Esc); the official apps can still use them.
 // Rules from the verification (docs/research.md): send input only while the session is idle, and never while
 // a permission dialog is open, because Enter would answer the dialog.
 import { execFile } from "node:child_process";
@@ -18,7 +19,8 @@ export const TRUST_PROMPT_RE = /trust this folder|Quick safety check/i;
 export const PERMISSION_PROMPT_RE = /Do you want to proceed\?/;
 
 /**
- * A screen of the pane, read from `zellij action dump-screen --ansi`. `plain` has every character. `typed` leaves out
+ * A screen of a session's terminal, read from its dump (terminal.ts's dumpScreen, or zellij's `action dump-screen
+ * --ansi`, which mark dim and reverse video the same way). `plain` has every character. `typed` leaves out
  * what is drawn dim (SGR 2): in the prompt box, that is Claude Code's suggestion for the next message and its
  * placeholder, which nobody typed. Unless the terminal's own cursor is used, Claude Code draws its cursor on the first
  * character of these in reverse video (SGR 7) instead of dim; a single reversed character followed by dim text is left
@@ -32,7 +34,7 @@ export interface Screen {
 // CSI (with SGR as the "m" case), OSC, character set selection, and the other two-character escapes.
 const ESCAPE_RE = /\x1b(?:\[([0-?]*)[ -\/]*([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()*+][ -~]|[ -~])/g;
 
-/** Reads the output of `zellij action dump-screen --ansi`. */
+/** Reads the dump of a terminal's screen (see Screen). */
 export function readScreen(ansi: string): Screen {
   let plain = "";
   let typed = "";
@@ -482,7 +484,14 @@ export function safeFileName(name: string): string {
 
 export interface ManagedSession {
   sessionId: string;
-  zellijSession: string;
+  /** The session's terminal, by name (gasho-<name>-xxxx; see terminal.ts). */
+  terminal: string;
+  /**
+   * The terminal is a zellij session: gasho-daemon 0.10 and before started it. Saved as `zellijSession`, as they
+   * saved it, so that going back to one of them keeps these sessions.
+   */
+  zellij?: boolean;
+  /** Claude Code's PID. */
   pid: number;
   cwd: string;
   name: string;
@@ -546,8 +555,9 @@ export function forkName(of: string): string {
 }
 
 /**
- * Environment for zellij and the Claude Code it starts. Nothing else is inherited: the daemon may itself run
- * inside Claude Code or zellij (CLAUDECODE, ZELLIJ_SESSION_NAME, …), which would confuse both.
+ * Environment for the terminals and the Claude Code they start. Nothing else is inherited: the daemon may itself run
+ * inside Claude Code or zellij (CLAUDECODE, ZELLIJ_SESSION_NAME, …), which would confuse both. XDG_RUNTIME_DIR lets
+ * systemd-run reach the user's systemd.
  */
 export function cleanEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = { TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "C.UTF-8" };
@@ -558,50 +568,17 @@ export function cleanEnv(env: NodeJS.ProcessEnv = process.env): Record<string, s
   return out;
 }
 
-export function zellijSessionName(label: string, suffix = randomBytes(2).toString("hex")): string {
+/**
+ * The name of a new session's terminal: "gasho-", the start of `label` in lowercase letters and digits, and a random
+ * suffix. It names the terminal's socket and its systemd scope too, and `gasho-daemon attach` takes it.
+ */
+export function terminalName(label: string, suffix = randomBytes(2).toString("hex")): string {
   const slug = label
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 24);
   return `gasho-${slug || "session"}-${suffix}`;
-}
-
-/**
- * Arguments for `zellij` that start Claude Code with Remote Control in `cwd` inside a new background session.
- * The shell writes its PID and then execs, so the PID file ends up holding Claude Code's PID. `claudeArgs` go to
- * Claude Code after the Remote Control name (a fork: `--resume <id> --fork-session`).
- */
-export function launchArgs(o: {
-  zellijSession: string;
-  pidFile: string;
-  cwd: string;
-  claudeBin: string;
-  rcName: string;
-  env: Record<string, string>;
-  claudeArgs?: string[];
-}): string[] {
-  const script = 'echo $$ > "$1" && cd "$2" && shift 2 && exec "$@"';
-  const envPairs = Object.entries(o.env).map(([k, v]) => `${k}=${v}`);
-  return [
-    "attach",
-    "--create-background",
-    o.zellijSession,
-    "--",
-    "/bin/sh",
-    "-c",
-    script,
-    "gasho-launch",
-    o.pidFile,
-    o.cwd,
-    "env",
-    "-i",
-    ...envPairs,
-    o.claudeBin,
-    "--remote-control",
-    o.rcName,
-    ...(o.claudeArgs ?? []),
-  ];
 }
 
 /**
@@ -622,11 +599,12 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-/** Thin wrapper over the zellij CLI. Every call names the session explicitly. */
+/**
+ * Thin wrapper over the zellij CLI, for the sessions that gasho-daemon 0.10 and before started in zellij, until they
+ * end; new sessions get a terminal of their own (terminal.ts). Every call names the session explicitly.
+ */
 export class Zellij {
   private env: Record<string, string>;
-  /** Whether systemd-run can start user scopes on this machine (checked once; see start). */
-  private scopes: Promise<boolean> | undefined;
 
   constructor(env: Record<string, string>) {
     this.env = env;
@@ -635,30 +613,6 @@ export class Zellij {
   async run(args: string[]): Promise<string> {
     const { stdout } = await execFileP("zellij", args, { env: this.env, timeout: 15_000, maxBuffer: 4 * 1024 * 1024 });
     return stdout;
-  }
-
-  /**
-   * Starts the background session `session` with `args` (launchArgs). Where the user's systemd runs, it starts in a
-   * scope of its own (see scopeArgs), so its zellij server and Claude Code do not belong to gasho-daemon's service and
-   * outlive a restart of it. Elsewhere (macOS, no user manager), zellij is run as it is.
-   */
-  async start(session: string, args: string[]): Promise<void> {
-    if (!(await this.canScope())) {
-      await this.run(args);
-      return;
-    }
-    await execFileP("systemd-run", [...scopeArgs(session), "zellij", ...args], { env: this.env, timeout: 15_000 });
-  }
-
-  private canScope(): Promise<boolean> {
-    this.scopes ??= execFileP("systemd-run", ["--user", "--scope", "--quiet", "--collect", "true"], {
-      env: this.env,
-      timeout: 15_000,
-    }).then(
-      () => true,
-      () => false,
-    );
-    return this.scopes;
   }
 
   async available(): Promise<boolean> {
@@ -711,19 +665,28 @@ export class ManagedSessions {
   }
 
   async load(keep: (m: ManagedSession) => Promise<boolean>): Promise<void> {
-    let list: ManagedSession[] = [];
+    let list: (ManagedSession & { zellijSession?: string })[] = [];
     try {
-      list = JSON.parse(await fs.readFile(this.file, "utf8")) as ManagedSession[];
+      list = JSON.parse(await fs.readFile(this.file, "utf8")) as typeof list;
     } catch {
       return;
     }
-    for (const m of list) if (await keep(m)) this.sessions.set(m.sessionId, m);
+    for (const saved of list) {
+      // Saved by gasho-daemon 0.10 or before, or saved for a session in zellij (see save).
+      const { zellijSession, ...rest } = saved;
+      const m: ManagedSession = zellijSession !== undefined ? { ...rest, terminal: zellijSession, zellij: true } : rest;
+      if (await keep(m)) this.sessions.set(m.sessionId, m);
+    }
     await this.save();
   }
 
   async save(): Promise<void> {
     await fs.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-    await fs.writeFile(this.file, `${JSON.stringify([...this.sessions.values()], null, 2)}\n`, { mode: 0o600 });
+    // A session in zellij is saved the way gasho-daemon 0.10 and before saved it (see ManagedSession.zellij).
+    const list = [...this.sessions.values()].map(({ terminal, zellij, ...rest }) =>
+      zellij ? { ...rest, zellijSession: terminal } : { ...rest, terminal },
+    );
+    await fs.writeFile(this.file, `${JSON.stringify(list, null, 2)}\n`, { mode: 0o600 });
   }
 
   has(sessionId: string): boolean {

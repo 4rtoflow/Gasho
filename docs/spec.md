@@ -29,13 +29,13 @@ Gasho は、Mac と Ubuntu Server で動く Claude Code のセッションと、
 | S3 | 通知（ツールの実行、応答の完了、権限の確認待ち、入力待ち） | すべて | hooks |
 | S4 | 権限の確認への許可と拒否 | すべて | PermissionRequest hook |
 | S5 | 公式アプリでセッションを開くリンク | すべて | `bridgeSessionId` |
-| S6 | 新しいセッションの起動 | Gasho が起動するもの | zellij |
-| S7 | 発言の送信（モデル・Effort・Ultracode の切り替えと、ファイルの添付を含む） | Gasho が起動するもの | zellij（貼り付けと Enter、/model の選択画面、/effort ultracode） |
-| S8 | 割り込み | Gasho が起動するもの | zellij（Esc） |
-| S9 | 端末画面の表示 | Gasho が起動するもの | zellij（画面の取得） |
-| S10 | セッションの名前の変更 | Gasho が起動するもの | zellij（`/rename`） |
-| S11 | フォーク（会話を引き継いだセッションを、同じフォルダーで起動する） | Gasho が起動するもの | `claude --resume <ID> --fork-session`、zellij |
-| S12 | 削除（Claude Code を終了し、一覧から外す。会話の記録は残す） | Gasho が起動するもの | SIGTERM、zellij |
+| S6 | 新しいセッションの起動 | Gasho が起動するもの | gasho-daemon の端末（node-pty と xterm.js） |
+| S7 | 発言の送信（モデル・Effort・Ultracode の切り替えと、ファイルの添付を含む） | Gasho が起動するもの | 端末（貼り付けと Enter、/model の選択画面、/effort ultracode） |
+| S8 | 割り込み | Gasho が起動するもの | 端末（Esc） |
+| S9 | 端末画面の表示 | Gasho が起動するもの | 端末（画面の取得） |
+| S10 | セッションの名前の変更 | Gasho が起動するもの | 端末（`/rename`） |
+| S11 | フォーク（会話を引き継いだセッションを、同じフォルダーで起動する） | Gasho が起動するもの | `claude --resume <ID> --fork-session`、端末 |
+| S12 | 削除（Claude Code を終了し、一覧から外す。会話の記録は残す） | Gasho が起動するもの | SIGTERM、端末 |
 
 「すべて」は、`claude rc` が起動したセッションと Gasho が起動したセッションの両方を指す。`claude rc` が起動したセッションへの発言の送信と割り込みには公式の手段がないので、これまでどおり公式アプリで行う。
 
@@ -84,13 +84,13 @@ git のリポジトリでないフォルダー（例：hardcore2）では、Git 
          gasho-daemon（working server：Ubuntu）     gasho-daemon（working server：Mac。同じ LAN にいるあいだ）
            ├ Claude Code（hooks、トランスクリプト、claude agents）
            ├ git
-           └ zellij
+           └ セッションの端末（node-pty、xterm.js）
 ```
 
 | 構成要素 | 置き場所 | 役割 |
 |---|---|---|
 | gasho-hub（Gasho サーバー） | Ubuntu Server | 各 working server からの情報をまとめて保存し、画面に送る。端末の登録を管理する。GitHub の情報を取得する。画面のファイルを配信する |
-| gasho-daemon | 各 working server | Claude Code・git・zellij の情報を集めて Gasho サーバーに送り、Gasho サーバーからの操作を実行する |
+| gasho-daemon | 各 working server | Claude Code・git の情報を集めて Gasho サーバーに送り、Gasho サーバーからの操作を実行する |
 | gasho-web（画面） | Gasho サーバーから配信 | ブラウザとスマホで使う画面 |
 
 技術は次のとおり。
@@ -149,11 +149,25 @@ working server は、ホスト名ではなく登録時に発行した ID で区�
 2. トランスクリプトに追記された分を読み、Gasho サーバーに送る
 3. hooks を HTTP で受け、イベントを Gasho サーバーに送る
 4. 権限の確認（PermissionRequest）への応答を保留し、確認の内容を Gasho サーバーに送る。画面で許可か拒否が決まったら、それを応答として返す
-5. Gasho が起動するセッションを zellij で起動し、発言の送信、割り込み、画面の取得を行う
+5. Gasho が起動するセッションを、セッションごとの端末で起動し、発言の送信、割り込み、画面の取得を行う（「セッションの端末」）
 6. `claude rc` のプロセスを監視する。通信断で終了したときは画面で知らせ、`claude remote-control --continue` で起動し直せるようにする
 7. セッションの作業ディレクトリから git のリポジトリを見つけ、ブランチ・worktree・コミットのグラフを Gasho サーバーに送る。`.git` の中の参照を監視し、変化をすぐに送る
 
-常駐のさせ方（systemd のユーザーサービス、launchd、zellij）は、まだ決めていない。
+常駐は、systemd のユーザーサービス（Ubuntu）か launchd のエージェント（Mac）で行う（`service print`、docs/daemon-setup.md）。
+
+### セッションの端末
+
+Gasho が起動するセッションは、gasho-daemon がセッションごとに起動する小さなプロセス（端末）の中で動く。端末は、node-pty で疑似端末を作って Claude Code を動かし、画面を xterm.js（VS Code の端末と同じもの）で保つ。gasho-daemon は、Unix ソケット（`~/.config/gasho/terminals/<名前>.sock`）で、画面の取得、キーと貼り付けの入力、終了を頼む。
+
+- 端末は gasho-daemon とは別のプロセスなので、gasho-daemon を動かし直してもセッションは続く。gasho-daemon は起動したとき、記録（`managed.json`）にあるセッションのうち、端末が答え、Claude Code の PID が合うものを引き継ぐ
+- systemd のユーザーマネージャーがあるマシンでは、端末を `systemd-run --user --scope` で起動し、セッションごとのスコープ（`gasho-<名前>-xxxx.scope`）に入れる。systemd はサービスを止めるときにサービスの中のプロセスをすべて止める（KillMode の既定）ため、サービスの外に出しておく
+- 端末の大きさは 50 桁 × 50 行。画面を読む規則は、この大きさの画面で確かめている
+- 画面は、薄い文字（SGR 2）と反転（SGR 7）だけを印にした文字列で受け取り、zellij の `dump-screen --ansi` と同じ読み方で読む
+- キーは、端末が送るのと同じバイト列にする。矢印は、Claude Code が選んだカーソルキーのモードに合わせる。キーとキーのあいだは 25 ミリ秒あける（Claude Code は、Esc だけのキーと、Esc で始まるほかのキーを、続く入力までの時間で見分けるため）
+- 貼り付けは、Claude Code が求めたときは bracketed paste の印で囲む。文の中の Esc の文字は除く（貼り付けの終わりの印として読まれ、残りがキーになるのを防ぐ）
+- プログラムが終わったあとも、最後の画面を1分間は読めるようにしておく（起動に失敗したときに、画面の終わりをログに残すため）
+- `gasho-daemon attach <名前>` で、端末を直接見て操作できる。そのあいだ端末はその大きさになり、抜けると元に戻る
+- gasho-daemon 0.10 までは zellij を使っていた。そのころに起動したセッションは、終わるまで zellij で扱う（`managed.json` には、0.10 までと同じ `zellijSession` で記録する）
 
 ### hooks の設定
 
@@ -177,8 +191,8 @@ hook の `onFailure` は既定のままにする。こうすると、gasho-daemo
 - 応答が始まる前に割り込むと、送った発言が入力欄に戻る。次の発言を貼り付ける前に、Ctrl+U と Backspace を入力欄の行数より1組多く送って、入力欄を空にする。割り込んでから1.5秒は、発言が入力欄に戻るのを待つために送らない。Ctrl+C は、続けて押すと Claude Code が終了するので使わない
 - 割り込まれたときは Stop が届かない。トランスクリプトの `[Request interrupted by user]` か、状態の変化から判断する
 - 画面の承認待ちの表示は gasho-daemon が消す。公式アプリで答えられても hook は打ち切られないので、PostToolUse や状態の変化を見て消す。PermissionRequest には `tool_use_id` がないので、直前の PreToolUse とは、セッション・ツール名・入力の内容で対応づける
-- zellij を操作するときは、`--session` と `--pane-id` を必ず指定する
-- 発言は、貼り付けたあと入力欄に入ったことを確かめてから Enter を1回だけ送り、Enter のあとで入力欄が空になったことを確かめる。入力欄の文字は `zellij action dump-screen --ansi` で読み、Claude Code が薄い文字で出す次の発言の候補を除く。入らなければ発言を預かったままにし、5秒後にやり直す。満足度のアンケートが入力欄のすぐ上に出ていたら、評価は付けずに「0」で閉じ、画面を読み直してから続ける。アンケートが「0」を受け取らなかったときは入力欄に入るので、貼り付ける前に消す
+- 端末は名前で必ず指定する（0.10 までの zellij のセッションでは、`--session` と `--pane-id` を必ず指定する）
+- 発言は、貼り付けたあと入力欄に入ったことを確かめてから Enter を1回だけ送り、Enter のあとで入力欄が空になったことを確かめる。入力欄の文字は端末の画面から読み、Claude Code が薄い文字で出す次の発言の候補を除く。入らなければ発言を預かったままにし、5秒後にやり直す。満足度のアンケートが入力欄のすぐ上に出ていたら、評価は付けずに「0」で閉じ、画面を読み直してから続ける。アンケートが「0」を受け取らなかったときは入力欄に入るので、貼り付ける前に消す
 - Enter のあと8秒たっても入力欄に発言が残っていたら、Enter は続けて押さない。Claude Code が Enter を遅れて受け取ることがあり、2回目の Enter が遅れて開いた選択画面に入ると、全体の既定が保存されるため。発言は預かり直し、20秒後に確かめる。トランスクリプトにその発言が記録されていれば（トランスクリプトを読めないセッションでは、そのあいだに作業中になっていれば）、送れたとみなす。止めたあとで Claude Code が入力欄に戻した発言を、送り直さないため。記録がなく、入力欄にまだ残っていれば Enter を押す。`/model` などのコマンドの Enter がこうなったときは、そのあとに何も入力せず、発言ごと20秒後にやり直す
 - モデルと Effort は、`/model` の選択画面で目的のモデルに移り、←→ で Effort を合わせてから「s」を押し、そのセッションだけ切り替える。選択画面で Enter を押すと、全体の既定として `~/.claude/settings.json` に保存されるので、押さない
 - Effort は、←→ を1回押すごとに選択画面を読み直して合わせる。モデルによっては選べない段階があり、その段階は飛ばされるため。選べないときは元の段階に戻してモデルだけを切り替え、戻せなければ Esc で何も変えずに閉じる。Effort だけを変えるときは、カーソルがいまのモデル（✔）にあることを確かめてから「s」を押す
@@ -195,10 +209,10 @@ hook の `onFailure` は既定のままにする。こうすると、gasho-daemo
 - 添付ファイルは、working server の `~/.local/share/gasho/attachments/<セッションの ID>/` に保存し、発言の末尾に `@パス` を1行ずつ並べる。Claude Code は送信のときにそのファイルを読む。ファイル名は、文字と数字と `. _ -` 以外を `_` に置き換える。セッションが終わったら、フォルダーごと消す
 - 名前の変更は、gasho-daemon の記録（`managed.json`）の名前をすぐ変え、Claude Code には `/rename <名前>` を発言と同じ規則で送る。まだ送っていない `/rename` があれば、新しいほうに置き換える。`/rename` は行の残りを名前にするので、名前は1行、60文字までにする
 - トランスクリプトに新しい `custom-title` が記録されたら、Gasho の名前をそれに合わせる。同じマシンで同じ名前のセッションが動いていると、Claude Code は別の名前を付けるためである。端末で `/rename` したときの名前も、これで Gasho に反映される。ただし、Gasho の `/rename` を預かっているあいだは合わせない。合わせると、送る前の古い名前に戻ってしまう。合わせるのは、トランスクリプトを読み始めてから記録された名前だけにする
-- フォークは、元のセッションのフォルダーで `claude --remote-control <名前> --resume <ID> --fork-session` を新しい zellij のセッションで起動する。`claude agents` に元と違う ID で出たら、それをフォークの ID とする。Claude Code は、フォークのトランスクリプトを、発言やコマンドが記録されるまで書き出さない（`--name` を付けても同じ）。そこで、入力欄が出たら `/rename <名前>` を送って書き出させ、トランスクリプトができてから、Gasho が起動したセッションとして記録する。送れなかったときは預かって、あとで送る
+- フォークは、元のセッションのフォルダーで `claude --remote-control <名前> --resume <ID> --fork-session` を新しい端末で起動する。`claude agents` に元と違う ID で出たら、それをフォークの ID とする。Claude Code は、フォークのトランスクリプトを、発言やコマンドが記録されるまで書き出さない（`--name` を付けても同じ）。そこで、入力欄が出たら `/rename <名前>` を送って書き出させ、トランスクリプトができてから、Gasho が起動したセッションとして記録する。送れなかったときは預かって、あとで送る
 - フォークのトランスクリプトの最初には、元の会話のコピーが、元と同じ uuid とタイムスタンプで入る。フォークのトークンは、フォークした時刻より後の返答だけを数える。元の会話の分を二重に数えないためである
 - Claude Code は、前の発言から70分以上たち、会話が10万トークン以上あるセッションを再開するとき、要約から始めるかを尋ねることがある（`Resume from summary`、`Resume full session as-is`、`Don't ask me again`）。フォークの起動中に、この問いが入力欄の代わりに出ていたら Esc で答える。Esc はそのまま再開するのと同じで、要約も設定の保存もしない。`Don't ask me again` は、すべてのセッションでこの問いを出さない設定を保存するので選ばない。入力欄が画面のいちばん下にあるときは、会話の中の引用とみなして Esc を送らない。Esc を続けて押すと、Claude Code の巻き戻しの画面が開くためである
-- 削除は、まず gasho-daemon の記録から外して、それ以上は何も入力しないようにする。続けて、`claude agents` がそのセッションの ID で出している PID にだけ SIGTERM を送る。PID が別のプロセスに使い回されていても、そのプロセスを止めないためである。8秒待っても終わらなければ zellij のセッションを閉じ、まだ残っていれば SIGKILL を送る。SIGTERM を受けた Claude Code は、トランスクリプトを残して終了するので、`claude --resume <ID>` で開き直せる。添付ファイルのフォルダーは消す
+- 削除は、まず gasho-daemon の記録から外して、それ以上は何も入力しないようにする。続けて、`claude agents` がそのセッションの ID で出している PID にだけ SIGTERM を送る。PID が別のプロセスに使い回されていても、そのプロセスを止めないためである。8秒待っても終わらなければ端末を閉じ、まだ残っていれば SIGKILL を送る。SIGTERM を受けた Claude Code は、トランスクリプトを残して終了するので、`claude --resume <ID>` で開き直せる。添付ファイルのフォルダーは消す
 - 新しいフォルダーでは、最初に信頼の確認が端末に出る。端末画面の表示（S9）から答えられるようにする
 
 ## gasho-hub（Gasho サーバー）
@@ -257,7 +271,7 @@ Gasho からは手元のマシンでコマンドを実行させられるので�
 ## 未確認の事項
 
 - hook から拒否を返したときの動き
-- Mac（launchd、zellij）での動き
+- Mac（launchd）での動き。端末の node-pty は、macOS の x64・arm64 のビルド済みを使う
 - AskUserQuestion に hook で答える方法
 - トランスクリプトなどの内部の形式が、Claude Code の更新で変わったときの影響
 - easyui.site の部品の、スマホでの重さ
