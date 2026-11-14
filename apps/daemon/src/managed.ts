@@ -585,10 +585,18 @@ export function terminalName(label: string, suffix = randomBytes(2).toString("he
  * `systemd-run` arguments that run a command in a systemd user scope of its own (`<unit>.scope`). Every process that a
  * service starts belongs to the service's unit, and stopping the unit stops them all (systemd's default KillMode): a
  * session that gasho-daemon's service started would end with each restart of gasho-daemon. In a scope, it goes on.
+ * `extra`: what this machine's systemd-run needs to run the command as it is given (see NO_EXPANSION).
  */
-export function scopeArgs(unit: string): string[] {
-  return ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, "--"];
+export function scopeArgs(unit: string, extra: readonly string[] = []): string[] {
+  return ["--user", "--scope", "--quiet", "--collect", ...extra, `--unit=${unit}`, "--"];
 }
+
+/**
+ * systemd 254 and later expand "$VAR" in the command that systemd-run runs, also with --scope, and make "$$" a "$": a
+ * path with a "$" in it would reach the command changed. `--expand-environment=no` runs the command as it is given.
+ * Older versions lack the switch, and expand nothing.
+ */
+export const NO_EXPANSION: readonly string[] = ["--expand-environment=no"];
 
 export function isAlive(pid: number): boolean {
   try {

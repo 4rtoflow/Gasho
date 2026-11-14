@@ -135,8 +135,13 @@ test("a terminal that cannot start says why, and leaves nothing behind", async (
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-term-"));
   const bin = path.join(stateDir, "bin");
   await fs.mkdir(bin);
-  // A systemd-run that can make scopes (it runs `true`), but not this one.
-  const failing = `#!/bin/sh\n[ "$5" = "true" ] && exit 0\necho "Failed to start transient scope unit: Unit $5 already exists." >&2\nexit 1\n`;
+  // A systemd-run that can make scopes (it runs the command that checks it), but not this one.
+  const failing = `#!/bin/sh
+for a; do case "$a" in --unit=*) echo "Failed to start transient scope unit: Unit \${a#--unit=}.scope already exists." >&2; exit 1;; esac; done
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ $# -gt 0 ] && shift
+exec "$@"
+`;
   await fs.writeFile(path.join(bin, "systemd-run"), failing, { mode: 0o755 });
   const t = new Terminals({ stateDir, env: { ...cleanEnv(), PATH: `${bin}:${process.env.PATH}` } });
   try {
@@ -150,34 +155,65 @@ test("a terminal that cannot start says why, and leaves nothing behind", async (
   }
 });
 
-// A systemd-run that writes its arguments to $LOG and runs the command after "--", as `--scope` does.
-const FAKE_SYSTEMD_RUN = `#!/bin/sh
-echo "systemd-run $*" >> "$LOG"
-while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
-[ $# -gt 0 ] && shift
-[ $# -gt 0 ] && exec "$@"
-exit 0
+// A systemd-run like systemd 254 and later: it writes its arguments to $LOG, then runs its command (after "--", or
+// after the options) as `--scope` does, with each "$$" made a "$" unless it is given --expand-environment=no. With $OLD set, it is like an
+// older one: it knows no --expand-environment, and expands nothing. With $FAIL set, it fails like one that finds no
+// user manager.
+const fakeSystemdRun = (): string => `#!${process.execPath}
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.LOG, "systemd-run " + args.join(" ") + "\\n");
+if (process.env.FAIL) process.exit(1);
+const asGiven = args.includes("--expand-environment=no");
+if (asGiven && process.env.OLD) process.exit(1);
+const at = args.indexOf("--");
+const command = at >= 0 ? args.slice(at + 1) : args.slice(args.findIndex((a) => !a.startsWith("-")));
+const run = asGiven || process.env.OLD ? command : command.map((a) => a.replaceAll("$$", "$"));
+process.exit(spawnSync(run[0], run.slice(1), { stdio: "inherit" }).status ?? 1);
 `;
 
-test("where systemd runs for the user, a terminal gets a scope of its own, outside gasho-daemon's service", async () => {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-term-"));
+test("where systemd runs for the user, a terminal gets a scope of its own, outside gasho-daemon's service, and its paths reach it as they are", async () => {
+  // systemd 254 and later would make the "$$" in this folder a "$" (and the terminal would find no config).
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-$$-term-"));
   const bin = path.join(stateDir, "bin");
   await fs.mkdir(bin);
   const log = path.join(stateDir, "systemd-run.log");
-  await fs.writeFile(path.join(bin, "systemd-run"), FAKE_SYSTEMD_RUN, { mode: 0o755 });
-  const t = new Terminals({ stateDir, env: { ...cleanEnv(), PATH: `${bin}:${process.env.PATH}`, LOG: log } });
+  await fs.writeFile(path.join(bin, "systemd-run"), fakeSystemdRun(), { mode: 0o755 });
+  const env = (more: Record<string, string> = {}) => ({ ...cleanEnv(), PATH: `${bin}:${process.env.PATH}`, LOG: log, ...more });
+  const calls = async () => (await fs.readFile(log, "utf8")).trim().split("\n");
+  const check = (extra: string) => `systemd-run --user --scope --quiet --collect ${extra}-- ${process.execPath} -p '$$'`;
+  const started = (name: string, extra: string) => `systemd-run --user --scope --quiet --collect ${extra}--unit=${name} -- ${process.execPath} `;
+  const t = new Terminals({ stateDir, env: env() });
   try {
     await t.start(shell("gasho-scoped-0005", "exec cat"));
     await t.start(shell("gasho-scoped-0006", "exec cat"));
-    const calls = (await fs.readFile(log, "utf8")).trim().split("\n");
-    // Whether scopes can be made is asked once; each terminal is started in its own.
-    assert.equal(calls.length, 3);
-    assert.equal(calls[0], "systemd-run --user --scope --quiet --collect true");
+    const c = await calls();
+    // Checked once: scopes can be made, and run their command as it is given; each terminal is started in its own.
+    assert.equal(c.length, 3);
+    assert.equal(c[0], check("--expand-environment=no "));
     for (const [i, name] of [[1, "gasho-scoped-0005"], [2, "gasho-scoped-0006"]] as const) {
-      assert.ok(calls[i]?.startsWith(`systemd-run --user --scope --quiet --collect --unit=${name} -- ${process.execPath} `), calls[i]);
-      assert.ok(calls[i]?.endsWith(path.join(t.dir, `${name}.json`)), calls[i]);
+      assert.ok(c[i]?.startsWith(started(name, "--expand-environment=no ")), c[i]);
+      assert.ok(c[i]?.endsWith(path.join(t.dir, `${name}.json`)), c[i]);
     }
     assert.deepEqual([...(await t.live()).keys()].sort(), ["gasho-scoped-0005", "gasho-scoped-0006"]);
+
+    // An older systemd (before 254) knows no --expand-environment, and expands nothing: scopes are made without it.
+    await fs.rm(log);
+    const old = new Terminals({ stateDir, env: env({ OLD: "1" }) });
+    await old.start(shell("gasho-scoped-0007", "exec cat"));
+    const o = await calls();
+    assert.equal(o.length, 3);
+    assert.equal(o[0], check("--expand-environment=no "));
+    assert.equal(o[1], check(""));
+    assert.ok(o[2]?.startsWith(started("gasho-scoped-0007", "")), o[2]);
+
+    // Without systemd for the user (macOS, no user manager), a terminal starts without a scope.
+    await fs.rm(log);
+    const none = new Terminals({ stateDir, env: env({ FAIL: "1" }) });
+    await none.start(shell("gasho-scoped-0008", "exec cat"));
+    assert.deepEqual(await calls(), [check("--expand-environment=no "), check("")]);
+    assert.ok((await none.live()).has("gasho-scoped-0008"));
   } finally {
     for (const name of (await t.live()).keys()) await t.kill(name);
     await fs.rm(stateDir, { recursive: true, force: true });
