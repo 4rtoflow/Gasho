@@ -55,7 +55,7 @@ npm config set //npm.pkg.github.com/:_authToken "$(gh auth token)"
 
 npx @4rtoflow/gasho-daemon register --server http://<Gasho サーバーの IP アドレス>:7740 --code <コード>
 npx @4rtoflow/gasho-daemon doctor          # 要るものが揃っているかを確かめる
-npx @4rtoflow/gasho-daemon service print   # 常駐させる設定ファイル（Ubuntu は systemd、Mac は launchd）を書き出す
+npx @4rtoflow/gasho-daemon service install # 常駐させる（Ubuntu は systemd、Mac は launchd）。これからは Gasho の画面から更新できる
 ```
 
 gasho-daemon は GitHub Packages の npm パッケージ `@4rtoflow/gasho-daemon` として配っているので、リポジトリの clone も `npm install` も要らない。`doctor` は、Node.js、登録、Claude Code、セッションの端末、git、GitHub CLI、通知の hooks が揃っているかを確かめ、足りないものがあれば、使えなくなる機能と直し方を示す。
@@ -247,6 +247,8 @@ gasho-daemon（`@4rtoflow/gasho-daemon`）とプラグインの SDK（`@4rtoflow
 | `GASHO_PLUGINS_DIR` | hub | `~/.local/share/gasho/plugins`（入れたプラグイン） |
 | `GASHO_PLUGIN_CACHE` | hub | `~/.cache/gasho/hub-plugins`（配るプラグインの版ごとの写し） |
 | `GASHO_PLUGIN_REPO` | hub | `4rtoflow/GashoPlugins`（プラグインを追加するリポジトリ） |
+| `GASHO_LATEST_CHECK` | hub | なし。`off` にすると、公開されている gasho-daemon の最新の版を調べない |
+| `GASHO_NPM_BIN` | hub・daemon | Node.js と同じフォルダーの `npm`（最新の版を調べる、更新で入れる） |
 | `GASHO_DAEMON_CONFIG` | daemon | `~/.config/gasho/daemon.json` |
 | `GASHO_HUB_URL` | daemon | 登録した Gasho サーバーから決める |
 | `GASHO_HOOK_PORT` | daemon | `7741` |
@@ -255,6 +257,7 @@ gasho-daemon（`@4rtoflow/gasho-daemon`）とプラグインの SDK（`@4rtoflow
 | `GASHO_GH_BIN` | hub・daemon | `gh` |
 | `GASHO_POLL_MS` | daemon | `3000` |
 | `GASHO_PLUGINS` | daemon | なし。`none` にすると、この working server ではプラグインの daemon の部分を動かさない |
+| `GASHO_DAEMON_HOME` | daemon | `~/.local/share/gasho/daemon`（`service install` と更新が、版ごとに gasho-daemon を入れるフォルダー） |
 
 gasho-daemon の変数は、`~/.config/gasho/daemon.env` に `名前=値` の形で書いておくこともできる。gasho-daemon のコマンドは、起動するときにこのファイルを読む。端末で設定した値のほうが優先される。
 

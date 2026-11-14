@@ -1,6 +1,7 @@
 import { Copy, KeyRound, Laptop, Monitor, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DeviceInfo, PairingCode } from "@gasho/protocol";
+import { DaemonUpdates } from "@/components/daemon-updates";
 import { Badge } from "@/components/ui/badge";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import {
@@ -192,6 +193,8 @@ export function DevicesView() {
         </div>
         {code && <CodePanel code={code} />}
       </section>
+
+      <DaemonUpdates />
 
       {error && <p className="text-sm text-red-400">{error}</p>}
 

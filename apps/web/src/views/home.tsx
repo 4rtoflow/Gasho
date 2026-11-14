@@ -6,6 +6,7 @@
 // handle has the focus; this browser keeps the order.
 import { motion, useTransform } from "framer-motion";
 import {
+  CircleArrowUp,
   CircleDot,
   CircleStop,
   Cpu,
@@ -46,6 +47,7 @@ import { EFFORTS } from "@/components/session-controls";
 import { StatusBadge } from "@/components/status-badge";
 import { NotificationStack, type NotificationItem } from "@/components/ui/notification-stack";
 import { CHART_BLUE, StatCard, TILE, TILE_SHADOW } from "@/components/ui/stat-card";
+import { updateTo } from "@/lib/daemon-update";
 import { branchLabel, formatCost, relativeTime, repoLabel, sessionLabel, waitingText } from "@/lib/format";
 import { arrangeTiles, sameOrder, useSavedOrder } from "@/lib/order";
 import { go } from "@/lib/route";
@@ -684,6 +686,7 @@ const OPERATION_ICONS: Record<string, LucideIcon> = {
   "Gasho:plugin.install": Puzzle,
   "Gasho:plugin.update": Puzzle,
   "Gasho:plugin.remove": Puzzle,
+  "Gasho:daemon.update": CircleArrowUp,
 };
 
 /**
@@ -757,6 +760,8 @@ function operationText(e: MachineHookEvent): string {
   if (e.event === "Gasho:plugin.update") return `プラグインを更新：${summary}`;
   if (e.event === "Gasho:plugin.remove") return `プラグインを外した：${summary.replace(/\s*\[link\]$/, "")}`;
   if (e.event === "Gasho:plugin.call") return summary;
+  // "0.15.0 → 0.16.0": the version it ran and the one asked for.
+  if (e.event === "Gasho:daemon.update") return `gasho-daemon を更新：${summary}`;
   // The folder's last name; "[trust]" when Claude Code was told to trust it.
   if (e.event === "Gasho:session.launch" || e.event === "Gasho:folder.create") {
     const dir = summary.replace(/\s*\[trust\]$/, "");
@@ -805,6 +810,7 @@ function operationText(e: MachineHookEvent): string {
 }
 
 function Machines({ machines, now }: { machines: MachineInfo[]; now: number }) {
+  const { latest } = useAppState();
   if (machines.length === 0) return <p className="text-sm text-muted-foreground">登録された working server はありません。</p>;
   return (
     <ul className="space-y-2.5">
@@ -815,7 +821,7 @@ function Machines({ machines, now }: { machines: MachineInfo[]; now: number }) {
             <p className="truncate text-sm font-medium text-foreground">{m.name}</p>
             <p className="text-xs text-muted-foreground">
               {m.connected
-                ? `接続中・セッション ${shownSessions(m).length}${m.daemonVersion ? `・gasho-daemon ${m.daemonVersion}` : ""}`
+                ? `接続中・セッション ${shownSessions(m).length}${m.daemonVersion ? `・gasho-daemon ${m.daemonVersion}` : ""}${updateTo(m, latest) ? "（更新できます）" : ""}`
                 : `オフライン・最後の接続 ${relativeTime(m.lastSeen, now)}`}
             </p>
           </div>
