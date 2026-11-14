@@ -220,8 +220,8 @@ export class Daemon {
   private endWaitMs = REMOVE_WAIT_MS;
   /**
    * The PIDs of the Claude Codes Gasho is starting or has started in this run, and of one it is removing, until they
-   * end. While one starts or is being removed, it is not among Gasho's sessions, and is still none started outside
-   * Gasho (see emitSessions, end).
+   * end and `claude agents` no longer lists them. While one starts or is being removed, it is not among Gasho's
+   * sessions, and is still none started outside Gasho (see emitSessions, end).
    */
   private ownPids = new Set<number>();
   private lastSent = "";
@@ -459,7 +459,8 @@ export class Daemon {
         this.tracked.delete(id);
         this.permissions.settleSession(id);
       }
-      for (const pid of this.ownPids) if (!isAlive(pid)) this.ownPids.delete(pid);
+      // One that ended while `claude agents` was read is still in rows.
+      for (const pid of this.ownPids) if (!isAlive(pid) && !rows.some((r) => r.pid === pid)) this.ownPids.delete(pid);
       await this.forgetEndedSessions(seen);
       await this.readManagedScreens();
       await this.countTokens();

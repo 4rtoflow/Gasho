@@ -301,10 +301,6 @@ test("a Claude Code that Gasho is starting or removing is neither sent nor ended
   const mine = await child('process.on("SIGTERM", () => setTimeout(() => process.exit(0), 300))');
   const rows = new Map([["src", process.pid], ["mine", mine.pid!]]);
   const agents = () => writeFileSync(agentsFile, JSON.stringify([...rows].map(([sessionId, pid]) => ({ pid, sessionId, cwd: folder, status: "idle" }))));
-  mine.on("exit", () => {
-    rows.delete("mine");
-    agents();
-  });
   agents();
   const sent: { sessionId: string; pid?: number; managed?: boolean }[][] = [];
   try {
@@ -336,10 +332,14 @@ test("a Claude Code that Gasho is starting or removing is neither sent nor ended
     assert.equal((await forking).ok, true);
     assert.equal(sent.at(-1)?.find((s) => s.sessionId === "copy")?.managed, true);
 
-    // Taken off Gasho's sessions at once, it runs on until SIGTERM ends it.
+    // Taken off Gasho's sessions at once, it runs on until SIGTERM ends it. The refresh after it is still given a
+    // listing that has it, as one read just before it ended is.
     assert.equal((await d.remove("mine")).ok, true);
     assert.equal(mine.signalCode, null);
     assert.equal(mine.exitCode, 0);
+    rows.delete("mine");
+    agents();
+    await d.refresh();
     assert.deepEqual(
       sent.flat().filter((s) => !s.managed && s.pid),
       [],
