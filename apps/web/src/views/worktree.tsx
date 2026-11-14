@@ -1,4 +1,4 @@
-// A worktree with no session open: a plugin's screen that one of its tabs opened (docs/plugins.md, P14), or a worktree
+// A worktree with no session open: a plugin's screen that one of its tabs opened (docs/plugins.md, P15), or a worktree
 // whose sessions are all gone, kept in the sidebar by this browser. Its tabs row still starts a new session ("＋") and
 // opens a past conversation again.
 import { ArrowLeft } from "lucide-react";

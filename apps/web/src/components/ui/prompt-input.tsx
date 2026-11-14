@@ -148,6 +148,11 @@ export interface PromptInputProps {
    */
   showCount?: boolean;
   /**
+   * Parts at the right of the line under the box, left of the character count (Gasho's plugins put theirs here, P14).
+   * Unlike the keyboard hint, they show on phones too.
+   */
+  footer?: ReactNode;
+  /**
    * Where the box keeps its text, files and sent texts (see createPromptDraft). One that outlives the component finds
    * them again when the box is shown anew (after another screen); its files keep their previews meanwhile. A text put
    * back after a failed send also goes there, even when the box has gone. Without one, the box keeps its own.
@@ -465,6 +470,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
     hint,
     safeArea = false,
     showCount = false,
+    footer,
     draft,
     shell = false,
     className = "",
@@ -1044,9 +1050,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
             {error}
           </p>
           {!error && hintNode && <p className="hidden min-w-0 items-center gap-1 sm:flex [@media(pointer:coarse)]:hidden">{hintNode}</p>}
-          <span className={cx("ml-auto shrink-0 tabular-nums", over && "text-rose-500")}>
-            {text.length}/{maxLength}
-          </span>
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            {footer}
+            <span className={cx("tabular-nums", over && "text-rose-500")}>
+              {text.length}/{maxLength}
+            </span>
+          </div>
         </div>
       ) : (
         <div className="flex min-h-[1.5rem] items-center justify-between gap-3 px-3 pt-2 text-[12px] text-neutral-500">
@@ -1054,6 +1063,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(funct
             {error}
           </p>
           {!error && hintNode && <p className="hidden shrink-0 items-center gap-1 sm:flex [@media(pointer:coarse)]:hidden">{hintNode}</p>}
+          {footer && <div className="ml-auto flex shrink-0 items-center gap-3">{footer}</div>}
         </div>
       )}
     </div>

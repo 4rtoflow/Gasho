@@ -1,7 +1,7 @@
 // The tabs above a session: the sessions Gasho shows in the same worktree, in the order they started. A tab opens its
 // session; a right-click (a long press on a phone) opens the session's menu (see session-menu). The button before the
 // tabs lists the worktree's past conversations (see session-history); "＋" after them starts a new session in it. The
-// plugins' tabs of the worktree come last (docs/plugins.md, P14).
+// plugins' tabs of the worktree come last (docs/plugins.md, P15).
 import { LoaderCircle, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { SessionHistory } from "@/components/session-history";

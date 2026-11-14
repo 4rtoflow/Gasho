@@ -1,10 +1,11 @@
 // Where the plugins' parts go on Gasho's screen (docs/plugins.md): sidebar items and their badges (P1), pages (P2),
-// session header items (P3), session panels (P4), settings (P5), home tiles (P6), the end of a session's conversation
-// (P13) and a worktree's tabs and their screens (P14). Every part is drawn in the scope of its plugin (the SDK's hooks
-// find it there) and inside an error boundary of its own, so that a plugin that throws shows an error in its place
-// while the rest of Gasho goes on.
+// session header items (P3), session panels (P4), settings (P5), home tiles (P6), the end of a session's
+// conversation (P13), the line under its chat box (P14) and a worktree's tabs and their screens (P15). Every part is
+// drawn in the scope of its plugin (the SDK's hooks find it there) and inside an error boundary of its own, so that a
+// plugin that throws shows an error in its place while the rest of Gasho goes on.
 import { Component, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type {
+  ComposerFooterItem,
   ConversationEndItem,
   OpenPanel,
   Params,
@@ -315,7 +316,38 @@ function ConversationEndPart({ part, item, machine, session }: { part: PluginPar
   );
 }
 
-// ---- a worktree's tabs and their screens (P14) ----
+// ---- the line under a session's chat box (P14) ----
+
+/** The plugins' parts in the line under a session's chat box, left of the character count. */
+export function PluginComposerFooter({ machine, session }: { machine: MachineInfo; session: SessionInfo }) {
+  const { parts } = usePluginRegistry();
+  return (
+    <>
+      {ordered(parts, (def) => def.composerFooter).map(({ part, item }) => (
+        // A `when` that throws leaves the part out, as a header item's does.
+        <Part key={`${part.info.id}.${item.id}`} part={part} fallback={null}>
+          <ComposerFooterPart part={part} item={item} machine={machine} session={session} />
+        </Part>
+      ))}
+    </>
+  );
+}
+
+function ComposerFooterPart({ part, item, machine, session }: { part: PluginPart; item: ComposerFooterItem; machine: MachineInfo; session: SessionInfo }) {
+  const ctx: SessionContext = { machine, session, daemon: readiness(part.info, machine.id) };
+  if (item.when && !item.when(ctx)) return null;
+  const Shown = item.component;
+  return (
+    <SessionScopeContext.Provider value={ctx}>
+      {/* What throws is left out: the line is too small for the notice with "もう一度". */}
+      <Part part={part} fallback={null}>
+        <Shown machine={machine} session={session} />
+      </Part>
+    </SessionScopeContext.Provider>
+  );
+}
+
+// ---- a worktree's tabs and their screens (P15) ----
 
 /** What a plugin gets of a worktree. */
 function worktreeInfo(w: WorktreeSessions): WorktreeInfo {

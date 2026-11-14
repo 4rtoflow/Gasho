@@ -80,6 +80,16 @@ export interface SessionInfo {
   /** …and per hour over the last 48 hours, oldest first: [start of the hour (ms), use]. Hours without use are left out. */
   tokenHours?: [number, TokenUsage][];
   /**
+   * Sessions started from Gasho by a gasho-daemon of plugin API 1.4 or later: the context window, as Claude Code's
+   * status line last reported it. Absent until the session's first reply.
+   */
+  context?: ContextWindow;
+  /**
+   * …and the Claude.ai plan's usage limits, as of the session's latest reply. Absent until then, and when the session
+   * does not use a Claude.ai plan (an API key).
+   */
+  limits?: PlanLimits;
+  /**
    * Permission requests waiting for an answer, oldest first (Claude Code's PermissionRequest hook). They can be
    * answered from Gasho (`permission.answer`), or in the terminal or the official apps, which removes them here.
    */
@@ -151,6 +161,39 @@ export type PlanMode = "auto" | "default";
 
 /** allow: this once. always: this time and from now on, as Claude Code suggests. deny: Claude stops and waits. */
 export type PermissionDecision = "allow" | "always" | "deny";
+
+/** A session's context window, from Claude Code's status line (its `context_window`). */
+export interface ContextWindow {
+  /** Input tokens in the context now: the latest reply's input, cache writes and cache reads. */
+  used: number;
+  /** The size of the model's context window (200000, 1000000). */
+  size: number;
+  /** The share used, 0-100, as Claude Code works it out (a whole number). */
+  percent: number;
+  /** When Claude Code reported it (ms since the epoch, the working server's clock). */
+  at: number;
+}
+
+/** A usage limit of the Claude.ai plan: the share of it used, and when it starts again. */
+export interface UsageWindow {
+  /** 0-100 */
+  percent: number;
+  /** ms since the epoch */
+  resetsAt: number;
+}
+
+/**
+ * The Claude.ai plan's usage limits, from Claude Code's status line (its `rate_limits`, which Claude Code reads from
+ * the headers of the API's replies). They are the account's, the same for every session that uses its login.
+ */
+export interface PlanLimits {
+  /** The 5-hour limit; some plans have none. */
+  fiveHour?: UsageWindow;
+  /** The weekly limit, all models together. */
+  sevenDay?: UsageWindow;
+  /** When Claude Code reported them (ms since the epoch, the working server's clock). */
+  at: number;
+}
 
 /** Tokens as Claude Code records them for each reply. */
 export interface TokenUsage {

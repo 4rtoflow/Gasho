@@ -6,8 +6,8 @@ name: Release
 
 on:
   schedule:
-    # Every 15 minutes, off the full hour, when GitHub's schedule is the busiest and the runs are late.
-    - cron: "4,19,34,49 * * * *"
+    # Every 15 minutes.
+    - cron: "0,15,30,45 * * * *"
   workflow_dispatch:
 
 permissions:

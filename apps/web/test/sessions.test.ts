@@ -51,7 +51,7 @@ test("a worktree is named by its branch, else its folder, and its repository by 
       ["notes", undefined],
     ],
   );
-  // What plugins get of a worktree (docs/plugins.md, P14), also once its sessions are gone and the sidebar keeps it.
+  // What plugins get of a worktree (docs/plugins.md, P15), also once its sessions are gone and the sidebar keeps it.
   const [gasho, , notes] = list;
   assert.ok(gasho && notes);
   assert.deepEqual([gasho.branch, gasho.repoFolder, gasho.github], ["main", "/w/gasho", github]);

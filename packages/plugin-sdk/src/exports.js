@@ -26,7 +26,8 @@ export const SDK_EXPORTS = [
   "Tile",
   "Markdown",
   "RelativeTime",
+  "Popover",
 ];
 
 /** The version of the plugin API that this SDK describes (gasho-plugin.json `api`). */
-export const PLUGIN_API = "1.4";
+export const PLUGIN_API = "1.5";

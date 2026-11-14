@@ -4,7 +4,7 @@
 import type { ComponentType, ReactNode } from "react";
 import type { GitHubRepo, MachineInfo, PluginInfo, SessionInfo, SessionRepo } from "@gasho/protocol";
 
-export type { GitHubRepo, MachineInfo, PluginInfo, SessionInfo, SessionRepo } from "@gasho/protocol";
+export type { ContextWindow, GitHubRepo, MachineInfo, PlanLimits, PluginInfo, SessionInfo, SessionRepo, UsageWindow } from "@gasho/protocol";
 
 /** The arguments of a page or a panel: the query of its URL. */
 export type Params = Record<string, string>;
@@ -121,7 +121,7 @@ export interface ConversationEndItem {
   component: ComponentType<ConversationEndProps>;
 }
 
-/** A worktree of a working server, for the tabs a plugin adds to it and the screens they open (P14). Plugin API 1.4. */
+/** A worktree of a working server, for the tabs a plugin adds to it and the screens they open (P15). Plugin API 1.5. */
 export interface WorktreeInfo {
   /** Its top folder on the working server. For sessions in a folder outside a repository, that folder. */
   path: string;
@@ -135,7 +135,7 @@ export interface WorktreeInfo {
   sessions: SessionInfo[];
 }
 
-/** A worktree, for the tabs a plugin adds to it (P14). */
+/** A worktree, for the tabs a plugin adds to it (P15). */
 export interface WorktreeContext {
   machine: MachineInfo;
   worktree: WorktreeInfo;
@@ -143,7 +143,7 @@ export interface WorktreeContext {
   daemon: DaemonReadiness;
 }
 
-/** A tab beside a worktree's sessions (P14). Pressing it opens the plugin's `worktreeViews[view]` with `params` there. */
+/** A tab beside a worktree's sessions (P15). Pressing it opens the plugin's `worktreeViews[view]` with `params` there. */
 export interface WorktreeTab {
   label: string;
   icon?: Icon;
@@ -156,7 +156,7 @@ export interface WorktreeTab {
 }
 
 /**
- * What adds tabs to the worktrees (P14). They go after the sessions' tabs and their "＋". Plugin API 1.4.
+ * What adds tabs to the worktrees (P15). They go after the sessions' tabs and their "＋". Plugin API 1.5.
  * `useTabs` is a React hook, called whenever a worktree's tabs are drawn: the tabs for that worktree (none, one or several).
  */
 export interface WorktreeTabItem {
@@ -166,11 +166,31 @@ export interface WorktreeTabItem {
   useTabs: (ctx: WorktreeContext) => WorktreeTab[] | undefined;
 }
 
-/** A screen a worktree's tab opens, below the tabs, where a session shows (P14): #/w/<machine>/<folder>/p/<plugin>/<view>?<params>. */
+/** A screen a worktree's tab opens, below the tabs, where a session shows (P15): #/w/<machine>/<folder>/p/<plugin>/<view>?<params>. */
 export interface WorktreeViewProps {
   machine: MachineInfo;
   worktree: WorktreeInfo;
   params: Params;
+}
+
+/** A part in the line under a session's chat box (P14), and the session it is drawn for. */
+export interface ComposerFooterProps {
+  machine: MachineInfo;
+  session: SessionInfo;
+}
+
+/**
+ * A part in the line under a session's chat box (P14), where the keyboard hint and the character count are: left of
+ * the count, also on a phone (where the hint is hidden). The line is 1.5rem high; what does not fit goes in a Popover.
+ * Plugin API 1.4.
+ */
+export interface ComposerFooterItem {
+  id: string;
+  /** Where it goes among the plugins' parts there: a smaller one comes further left. By default 500. */
+  order?: number;
+  /** Whether it shows for this session. */
+  when?: (ctx: SessionContext) => boolean;
+  component: ComponentType<ComposerFooterProps>;
 }
 
 /** What the web part of a plugin adds to Gasho's screen (its web.js exports it as default). */
@@ -184,10 +204,12 @@ export interface PluginDefinition {
   settings?: ComponentType;
   /** Parts at the end of a session's conversation (P13). Plugin API 1.2. */
   conversationEnd?: ConversationEndItem[];
-  /** Tabs beside a worktree's sessions (P14). Plugin API 1.4. */
+  /** Tabs beside a worktree's sessions (P15). Plugin API 1.5. */
   worktreeTabs?: WorktreeTabItem[];
-  /** The screens the worktree's tabs open (P14). Plugin API 1.4. */
+  /** The screens the worktree's tabs open (P15). Plugin API 1.5. */
   worktreeViews?: Record<string, ComponentType<WorktreeViewProps>>;
+  /** Parts in the line under a session's chat box (P14). Plugin API 1.4. */
+  composerFooter?: ComposerFooterItem[];
 }
 
 /** A call of a method of the plugin's daemon part (P7). */
@@ -239,11 +261,11 @@ export interface Navigation {
   /** Opens Gasho's screen of a session (plugin API 1.1). */
   openSession(machine: string, sessionId: string): void;
   /**
-   * A screen of the plugin's worktree tabs (P14): in the worktree on screen (or the worktree of the session on screen),
-   * or in `at` (its working server and top folder). Plugin API 1.4.
+   * A screen of the plugin's worktree tabs (P15): in the worktree on screen (or the worktree of the session on screen),
+   * or in `at` (its working server and top folder). Plugin API 1.5.
    */
   worktreeHref(view: string, params?: Params, at?: { machine: string; path: string }): string;
-  /** Opens a screen of the plugin's worktree tabs, as worktreeHref (a new entry of the browser's history). Plugin API 1.4. */
+  /** Opens a screen of the plugin's worktree tabs, as worktreeHref (a new entry of the browser's history). Plugin API 1.5. */
   openWorktreeView(view: string, params?: Params, at?: { machine: string; path: string }): void;
 }
 
@@ -271,6 +293,28 @@ export interface SessionActivity {
    * is its most telling input (the command, the file, …).
    */
   tool?: { name: string; summary?: string; startedAt: number };
+}
+
+/**
+ * A popup that `trigger` opens, in Gasho's look (plugin API 1.4). It closes on Esc, on a press outside it, and on a
+ * press of the trigger. It is not modal: the page behind it scrolls. What it shows is drawn only while it is open,
+ * in the plugin's scope (its CSS and the SDK's hooks work there).
+ */
+export interface PopoverProps {
+  /** One element that takes a ref, such as a <button>: it gets aria-expanded and aria-controls. */
+  trigger: ReactNode;
+  children?: ReactNode;
+  /** The side of the trigger it opens on, when there is room ("bottom" by default). */
+  side?: "top" | "bottom" | "left" | "right";
+  /** How it lines up with the trigger along that side ("center" by default). */
+  align?: "start" | "center" | "end";
+  /** Its name for a screen reader. */
+  label?: string;
+  /** Classes for the popup itself, such as its width ("w-72" by default). */
+  className?: string;
+  /** Open or closed, when the plugin keeps that itself (with onOpenChange). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /** A session's folder, or one of the repositories gasho-daemon found inside it. */
@@ -331,6 +375,8 @@ export interface GashoSdk {
   Markdown: ComponentType<{ text: string }>;
   /** "3分前", with the exact time on hover. */
   RelativeTime: ComponentType<{ at: string | number; now: number }>;
+  /** A popup that a button opens (plugin API 1.4). */
+  Popover: ComponentType<PopoverProps>;
 }
 
 export declare const definePlugin: GashoSdk["definePlugin"];
@@ -357,6 +403,7 @@ export declare const RepoTabs: GashoSdk["RepoTabs"];
 export declare const Tile: GashoSdk["Tile"];
 export declare const Markdown: GashoSdk["Markdown"];
 export declare const RelativeTime: GashoSdk["RelativeTime"];
+export declare const Popover: GashoSdk["Popover"];
 
 /**
  * What Gasho's screen puts on globalThis.__gasho for plugins: the version of the plugin API, and the modules plugins
