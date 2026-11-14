@@ -30,6 +30,8 @@ const file = process.argv[2];
 let plugin = "?";
 let machine = { id: "", name: "" };
 let settings: Record<string, unknown> = {};
+let folders: string[] = [];
+let dataDir = "";
 let def: Definition | undefined;
 const aborts = new Map<number, AbortController>();
 
@@ -132,13 +134,15 @@ function sessionOf(w: SessionWire) {
 }
 
 function baseContext() {
-  return { machine, settings, log, exec: (c: string, a: string[], o?: ExecOptions) => exec(c, a, o) };
+  return { machine, settings, dataDir, folders: () => [...folders], log, exec: (c: string, a: string[], o?: ExecOptions) => exec(c, a, o) };
 }
 
 async function init(m: Extract<ToHost, { t: "init" }>): Promise<void> {
   plugin = m.plugin;
   machine = m.machine;
   settings = m.settings;
+  folders = m.local.folders;
+  dataDir = m.local.dataDir;
   try {
     if (!file) throw new Error("no daemon.js was given");
     const mod = (await import(pathToFileURL(file).href)) as { default?: Definition };
@@ -194,6 +198,9 @@ process.on("message", (raw) => {
       break;
     case "settings":
       settings = m.settings;
+      break;
+    case "folders":
+      folders = m.folders;
       break;
     case "stop":
       for (const a of aborts.values()) a.abort();

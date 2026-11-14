@@ -157,7 +157,19 @@ export interface Navigation {
   closePanel(): void;
   /** Back to `panel`: through the browser's history when the current one was opened from it, else by replacing. */
   back(panel: { id: string; params?: Params }): void;
+  /** Gasho's screen of a session (plugin API 1.1). */
+  sessionHref(machine: string, sessionId: string): string;
+  /** Opens Gasho's screen of a session (plugin API 1.1). */
+  openSession(machine: string, sessionId: string): void;
 }
+
+/**
+ * What starting a session gave: the new session, or why none was started. `needsTrust`: Claude Code asked whether to
+ * trust the folder, so nothing was started; ask the person, and start it again with `trust: true` if they agree.
+ */
+export type LaunchResult =
+  | { ok: true; sessionId: string }
+  | { ok: false; error: string; needsTrust?: boolean; trustWarnings?: string[] };
 
 /** A session's folder, or one of the repositories gasho-daemon found inside it. */
 export interface RepoChoice {
@@ -186,6 +198,11 @@ export interface GashoSdk {
   useNavigation(): Navigation;
   /** Sends a message to a session (needs the permission "session.input"), as the chat box does. */
   useSendInput(): (input: { machine: string; sessionId: string; text: string }) => Promise<CallResult<undefined>>;
+  /**
+   * Starts a Claude Code session in a folder of a working server (needs the permission "session.launch"), as "新しい
+   * セッション" does. Plugin API 1.1.
+   */
+  useLaunchSession(): (input: { machine: string; cwd: string; name?: string; trust?: boolean }) => Promise<LaunchResult>;
   /** The current time, renewed every `intervalMs` (30 s by default). */
   useNow(intervalMs?: number): number;
   /** The GitHub repositories of a session: its folder's, or those of the repositories inside it. */
@@ -222,6 +239,7 @@ export declare const useSetting: GashoSdk["useSetting"];
 export declare const usePluginState: GashoSdk["usePluginState"];
 export declare const useNavigation: GashoSdk["useNavigation"];
 export declare const useSendInput: GashoSdk["useSendInput"];
+export declare const useLaunchSession: GashoSdk["useLaunchSession"];
 export declare const useNow: GashoSdk["useNow"];
 export declare const githubRepos: GashoSdk["githubRepos"];
 export declare const panelRepo: GashoSdk["panelRepo"];

@@ -142,10 +142,10 @@ GitHub プラグインの場合は、次のようになる。
 | `id` | 英小文字で始まり、英小文字・数字・`-` からなる2〜32文字。GashoPlugins のディレクトリの名前と同じにする。URL、保存のキー、操作のログに使う |
 | `name`、`description` | 画面に出す名前（40文字まで）と説明 |
 | `version` | プラグインの版（1.2.0 の形）。GashoPlugins に新しい版を出すときに上げる。プラグインの画面は、カタログの版が入れた版より新しいときに「更新」を出す。ホットリロードで入れ替えるかは、版ではなく中身のハッシュで判断する |
-| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる |
+| `api` | プラグインが前提にする、プラグインの API の版。Gasho は、メジャーが同じで、マイナーが Gasho の対応する版以下のものだけを読み込む。daemon の部分は、マイナーがその gasho-daemon の版以下の working server でだけ使える（それより古い gasho-daemon は「古い」と出す）。拡張点を足すなど、前の版のプラグインがそのまま動く変更ではマイナーを上げ、動かなくなる変更ではメジャーを上げる。1.1 で、`session.launch`、`useLaunchSession`、`useNavigation` の `openSession`、daemon の部分の `ctx.folders()` と `ctx.dataDir` を足した |
 | `web`、`daemon` | 画面の部分と daemon の部分のファイル。少なくともどちらか1つは要る |
 | `methods` | 画面の部分から呼べる、daemon の部分のメソッド。`kind` は、読むだけのもの（`read`）か、何かを変えるもの（`write`）か。`write` の呼び出しは操作のログに残す。`timeoutSeconds` は待つ時間で、既定は15秒、長くても120秒まで |
-| `permissions` | 読む・出す以外に、画面の部分がすること。いまは `session.input`（セッションに発言を送る）だけ |
+| `permissions` | 読む・出す以外に、画面の部分がすること。`session.input`（セッションに発言を送る）と `session.launch`（セッションを起動する。API 1.1） |
 | `settings` | 設定の項目（P5） |
 
 ## 拡張点
@@ -347,8 +347,9 @@ sidebar: [{ id: "repos", label: "リポジトリ", icon: FolderGit2, page: { id:
 | `useEvent(topic, { machine })` | daemon の部分から届いたイベントの、最後のデータ（P8、第2段階） |
 | `useSetting(key)` | 設定の値と、値を変える関数（P5） |
 | `usePluginState(key, 初期値)` | ページを開いているあいだ Gasho が覚えておく値。ホットリロードで部品を作り直しても残り、ページを読み込み直すと消える |
-| `useNavigation()` | このプラグインのページとパネルを開く・閉じる・戻る。ホームのタイルのようにセッションの外からは、セッションを指定してパネルを開く。`<a href>` に入れる URL も作る |
+| `useNavigation()` | このプラグインのページとパネルを開く・閉じる・戻る。ホームのタイルのようにセッションの外からは、セッションを指定してパネルを開く。`<a href>` に入れる URL も作る。`openSession(machine, sessionId)` と `sessionHref(…)` で、Gasho のセッションの画面に移る（API 1.1） |
 | `useSendInput()` | セッションに発言を送る関数を返す。引数は `{ machine, sessionId, text }`。`permissions` に `session.input` が要る。入力欄から送ったときと同じく、会話の末尾にすぐ出し、操作のログに残す |
+| `useLaunchSession()` | working server のフォルダーでセッションを起動する関数を返す（API 1.1）。引数は `{ machine, cwd, name, trust }`。`permissions` に `session.launch` が要る。「新しいセッション」と同じく起動し、操作のログに残す。Claude Code がフォルダーを信頼するかを聞いたときは起動せず、`needsTrust` を返す。利用者に確かめてから `trust: true` で呼び直す |
 | `useNow(ミリ秒)` | 一定の間隔で変わる現在の時刻。「3分前」の表示を更新するために使う |
 | `githubRepos(session)` | セッションのフォルダーか、その中のリポジトリのうち、GitHub にあるもの |
 | `panelRepo(session, repo, fit)` | セッションのフォルダーの中のリポジトリのうち `fit` に合うものと、パネルで選んでいるもの（`repo`、なければ最初のもの） |
@@ -444,6 +445,8 @@ export default defineDaemonPlugin({
 | `ctx.machine` | working server の ID と名前 |
 | `ctx.session` | 呼び出しで指したセッション。gasho-daemon が見ているセッションだけで、ID、フォルダー、名前、GitHub のリポジトリ、フォルダーの中のリポジトリを持つ。`repo(パス)` は、セッションのフォルダー（パスを渡さないとき）か、gasho-daemon がその中で見つけたリポジトリのフォルダーを、その GitHub のリポジトリと一緒に返す |
 | `ctx.settings` | Gasho サーバーに保存した設定の値（`scope: "server"`） |
+| `ctx.folders()` | その working server で、Gasho がセッションを起動できるフォルダー（Claude Code が信頼しているフォルダーと、その親）。画面の `MachineInfo.folders` と同じもの。ブラウザーから来たパスで git などを動かす前に、この中にあるかを確かめるのに使う（API 1.1） |
+| `ctx.dataDir` | その working server での、このプラグイン専用のフォルダー（`~/.local/share/gasho/plugin-data/<ID>/`）。呼び出しをまたいで覚えておくもの（選んだ項目など）を置く。プラグインを更新しても外しても残る（API 1.1） |
 | `ctx.signal` | 待つ時間を過ぎたときと、子プロセスを止めるときに、中断を知らせる AbortSignal |
 | `ctx.exec(コマンド, 引数, 指定)` | コマンドを、シェルを通さず、制御端末なしで実行する。gh と git が入力を求めて止まらないよう、`GH_PROMPT_DISABLED=1` と `GIT_TERMINAL_PROMPT=0` を付け、待つ時間と出力の大きさに上限を付ける。待つ時間を過ぎたら、プロセスグループに SIGTERM を送る |
 | `ctx.emit(topic, data, 指定)` | 画面にイベントを送る（P8） |

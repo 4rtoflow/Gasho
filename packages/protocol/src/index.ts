@@ -370,7 +370,7 @@ export interface TranscriptPage {
 // ---- plugins (docs/plugins.md) ----
 
 /** What a plugin's web part may do besides reading and showing: send messages to sessions. */
-export type PluginPermission = "session.input";
+export type PluginPermission = "session.input" | "session.launch";
 
 /** A method of a plugin's daemon part, which its web part can call. */
 export interface PluginMethodSpec {

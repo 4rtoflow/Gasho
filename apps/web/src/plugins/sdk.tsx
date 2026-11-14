@@ -11,6 +11,7 @@ import type {
   CallResult,
   DaemonReadiness,
   GashoSdk,
+  LaunchResult,
   Navigation,
   Params,
   PluginDefinition,
@@ -189,6 +190,8 @@ function useNavigation(): Navigation {
       if (route.name === "session") go({ name: "session", machine: route.machine, sessionId: route.sessionId }, { replace: true });
     },
     back: (panel) => backTo(panelRoute(panel.id, panel.params)),
+    sessionHref: (machine, sessionId) => hrefOf({ name: "session", machine, sessionId }),
+    openSession: (machine, sessionId) => go({ name: "session", machine, sessionId }),
   };
 }
 
@@ -279,6 +282,20 @@ export const sdk: GashoSdk = {
       }
       settlePending(key, pending, r.queued ? "queued" : "sent");
       return { ok: true, data: undefined };
+    };
+  },
+  useLaunchSession: () => {
+    const info = usePluginInfo();
+    return async ({ machine, cwd, name, trust }): Promise<LaunchResult> => {
+      if (!info.manifest.permissions?.includes("session.launch")) {
+        return { ok: false, error: `${info.manifest.name} には、セッションを起動する権限がありません（gasho-plugin.json の permissions）。` };
+      }
+      const r = await sendCommand(machine, { type: "session.launch", cwd, name: name?.trim() || undefined, ...(trust ? { trust: true } : {}) }, 60_000);
+      if (r.ok && r.sessionId) return { ok: true, sessionId: r.sessionId };
+      if (r.needsTrust) {
+        return { ok: false, error: "Claude Code がこのフォルダーを信頼するかを聞いています。", needsTrust: true, ...(r.trustWarnings ? { trustWarnings: r.trustWarnings } : {}) };
+      }
+      return { ok: false, error: r.error ?? "起動できませんでした。" };
     };
   },
   useNow,

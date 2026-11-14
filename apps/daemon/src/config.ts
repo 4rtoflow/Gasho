@@ -19,6 +19,8 @@ export interface DaemonConfig {
   attachmentsDir: string;
   /** The code of the plugins' daemon parts, as the Gasho server handed it over (docs/plugins.md). */
   pluginCacheDir: string;
+  /** The daemon parts' own files, one folder per plugin; kept when a plugin is updated or removed. */
+  pluginDataDir: string;
   /** False when GASHO_PLUGINS=none: no plugin's daemon part runs on this working server. */
   runPlugins: boolean;
 }
@@ -37,6 +39,7 @@ export function loadConfig(creds: Credentials, env: NodeJS.ProcessEnv = process.
     stateDir: path.dirname(credentialsPath(env)),
     attachmentsDir: path.join(env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "gasho", "attachments"),
     pluginCacheDir: path.join(env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "gasho", "daemon-plugins"),
+    pluginDataDir: path.join(env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "gasho", "plugin-data"),
     runPlugins: env.GASHO_PLUGINS !== "none",
   };
 }

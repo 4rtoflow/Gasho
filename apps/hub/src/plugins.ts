@@ -14,7 +14,7 @@ import type { PluginManifest, PluginMethodSpec, PluginPermission, PluginSettingS
 
 /** The plugin API this Gasho server serves: plugins written for 1.0 … 1.PLUGIN_API_MINOR. */
 export const PLUGIN_API_MAJOR = 1;
-export const PLUGIN_API_MINOR = 0;
+export const PLUGIN_API_MINOR = 1;
 /** The version of the plugin API, as plugins and gasho-daemon name it. */
 export const PLUGIN_API = `${PLUGIN_API_MAJOR}.${PLUGIN_API_MINOR}`;
 
@@ -22,7 +22,7 @@ const ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
 const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const API_RE = /^(\d+)\.(\d+)$/;
 const KEY_RE = /^[A-Za-z][\w-]{0,63}$/;
-const PERMISSIONS = new Set<PluginPermission>(["session.input"]);
+const PERMISSIONS = new Set<PluginPermission>(["session.input", "session.launch"]);
 export const DEFAULT_TIMEOUT_SECONDS = 15;
 export const MAX_TIMEOUT_SECONDS = 120;
 /** A plugin's files, at most. */
@@ -136,7 +136,7 @@ export function checkManifest(raw: unknown, folder: string | undefined, files: R
   }
   if (permissions !== undefined) {
     if (!Array.isArray(permissions) || !permissions.every((p) => PERMISSIONS.has(p as PluginPermission))) {
-      return { error: "permissions に使えるのは session.input だけです。" };
+      return { error: "permissions に使えるのは session.input と session.launch です。" };
     }
     manifest.permissions = [...new Set(permissions as PluginPermission[])];
   }
