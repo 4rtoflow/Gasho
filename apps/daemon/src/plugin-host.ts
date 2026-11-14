@@ -3,7 +3,8 @@
 // plugin's web part ("call"). It imports the plugin, runs `start`, answers each call with what the method returned,
 // and runs `stop` before it ends. A process of its own, so that a plugin that fails or blocks cannot stop gasho-daemon,
 // and so that a new version of the plugin replaces it as a whole (hot reload). What the plugin asks gh for
-// (ctx.github) goes to gasho-daemon ("github"), which runs gh for every plugin.
+// (ctx.github) goes to gasho-daemon ("github"), which runs gh for every plugin, and so do its events for the plugin's
+// web parts (ctx.emit, "event"), which gasho-daemon passes on to the Gasho server at most once a second per topic.
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { exec, type ExecOptions, type ExecResult } from "./exec.ts";
@@ -36,6 +37,26 @@ function userError(message: string): Error {
 }
 
 const log = (...args: unknown[]) => console.log(...args);
+
+/** A topic of an event, at most (characters). */
+const MAX_TOPIC = 100;
+/** The data of an event, at most (as JSON, in bytes). */
+const MAX_EVENT_BYTES = 256 * 1024;
+
+/** ctx.emit: checks the event (a PluginError when it is not right) and hands it to gasho-daemon. */
+function emit(topic: unknown, data: unknown, options?: { retain?: boolean }): void {
+  if (typeof topic !== "string" || topic.length === 0 || topic.length > MAX_TOPIC || /[\u0000-\u001f]/.test(topic)) {
+    throw userError(`イベントの topic は、${MAX_TOPIC}文字までの文字列にしてください。`);
+  }
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(data);
+  } catch {
+    throw userError("イベントのデータを JSON にできません。");
+  }
+  if (json !== undefined && Buffer.byteLength(json) > MAX_EVENT_BYTES) throw userError(`イベントのデータが大きすぎます（${MAX_EVENT_BYTES / 1024}KB まで）。`);
+  send({ t: "event", topic, data: json === undefined ? null : (JSON.parse(json) as unknown), retain: options?.retain === true });
+}
 
 /** ctx.github of a call (`call`: its id), or of `start` (none): gh, run by gasho-daemon. */
 function githubOf(call?: number, signal?: AbortSignal) {
@@ -87,6 +108,7 @@ function baseContext() {
     log,
     exec: (c: string, a: string[], o?: ExecOptions) => exec(c, a, o),
     github: githubOf(),
+    emit,
   };
 }
 

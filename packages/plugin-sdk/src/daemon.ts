@@ -98,6 +98,15 @@ export interface DaemonGitHub {
   write(args: string[], options: GitHubWriteOptions): Promise<ExecResult>;
 }
 
+export interface EmitOptions {
+  /**
+   * The Gasho server keeps the last event of the topic (on this working server) and gives it to browsers that connect
+   * later, until a new version of the plugin runs, or the plugin stops running here. For the state of what the daemon
+   * part watches; send it again from `start`.
+   */
+  retain?: boolean;
+}
+
 /** What a method gets besides its params. */
 export interface DaemonContext {
   machine: { id: string; name: string };
@@ -124,6 +133,13 @@ export interface DaemonContext {
   exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
   /** gh, run by gasho-daemon: use this rather than exec("gh", …) (plugin API 1.3). */
   github: DaemonGitHub;
+  /**
+   * Tells the plugin's web parts in every browser (useEvent) about this working server, without their asking (plugin
+   * API 1.5): how a long task goes, how what the daemon part watches stands. `topic`: up to 100 characters. `data`:
+   * JSON, up to 256 KB. A topic is passed on at most once a second: of the events in between, the last one follows when
+   * the second is over. Throws a PluginError for a topic or data that is not right.
+   */
+  emit(topic: string, data?: unknown, options?: EmitOptions): void;
   /** Writes to gasho-daemon's log, with the plugin's id. */
   log(...args: unknown[]): void;
 }

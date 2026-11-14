@@ -412,6 +412,7 @@ export class Hub {
       case "plugin.status":
       case "plugin.code.get":
       case "plugin.response":
+      case "plugin.event":
         this.plugins?.onDaemonMessage(id, peer, msg);
         break;
       case "hook": {
@@ -457,7 +458,7 @@ export class Hub {
       machines: [...this.machines.values()],
       notifications: this.store.recentNotifications(),
       events: this.store.recentEvents(),
-      ...(this.plugins ? { plugins: this.plugins.infos() } : {}),
+      ...(this.plugins ? { plugins: this.plugins.infos(), pluginEvents: this.plugins.retainedEvents() } : {}),
       ...(this.plugins?.catalog() ? { catalog: this.plugins.catalog() } : {}),
     });
   }
