@@ -207,6 +207,7 @@ export class PluginHub {
       method: msg.method,
       ...(msg.params !== undefined ? { params: msg.params } : {}),
       timeoutMs,
+      ...(spec.kind === "write" ? { write: true } : {}),
     });
   }
 
