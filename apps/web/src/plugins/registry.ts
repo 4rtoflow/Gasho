@@ -1,5 +1,5 @@
 // The web parts of the plugins installed on the Gasho server (docs/plugins.md). An enabled plugin's web.js is loaded
-// with import() (and its web.css with <link>) from the Gasho server, where its URL holds the hash of its files; when the
+// with import() (and its web.css, limited to its parts) from the Gasho server, where its URL holds the hash of its files; when the
 // Gasho server announces a new hash, the new version is loaded beside the old one and takes its place once it loaded
 // (hot reload): its parts are drawn anew, while what Gasho keeps for it (the results of its calls, its settings, its
 // state, the open page or panel) stays. When the new version cannot be loaded, the old one stays in use. A plugin that
@@ -31,7 +31,7 @@ interface RegistryState {
 let state: RegistryState = { loaded: {}, errors: {}, loading: {} };
 const listeners = new Set<() => void>();
 /** The stylesheet of the version in use, per plugin. */
-const sheets = new Map<string, HTMLLinkElement>();
+const sheets = new Map<string, CSSStyleSheet>();
 /** The version being loaded, per plugin. */
 const loadingHash = new Map<string, string>();
 
@@ -56,19 +56,56 @@ function timeout<T>(p: Promise<T>, what: string): Promise<T> {
   return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what}が${LOAD_MS / 1000}秒たっても読み込めませんでした。`)), LOAD_MS))]);
 }
 
-function loadSheet(href: string, plugin: string): Promise<HTMLLinkElement> {
-  return new Promise((resolve, reject) => {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.href = href;
-    link.dataset.gashoPlugin = plugin;
-    link.onload = () => resolve(link);
-    link.onerror = () => {
-      link.remove();
-      reject(new Error("web.css を読み込めませんでした。"));
-    };
-    document.head.append(link);
-  });
+/** The layers of a plugin's web.css that are left for the whole page: the theme's variables (on :root) and Tailwind's own. */
+const PAGE_LAYERS = new Set(["theme", "properties"]);
+
+/**
+ * The rules of a plugin's web.css, with each style rule applying only inside the elements its parts are drawn in
+ * (parts.tsx). A plugin's Tailwind classes share Gasho's layer and come after Gasho's, so that, unlimited, the plugin's
+ * `.flex` would win over Gasho's `md:hidden` on Gasho's own elements (and over another plugin's). `:where()` keeps the
+ * specificity of each rule as it is.
+ */
+function scopeRules(rules: CSSRuleList, plugin: string, top = true): string {
+  const scope = `:where([data-gasho-plugin="${plugin}"])`;
+  let out = "";
+  let run = "";
+  const flush = () => {
+    if (run) out += `${scope}{${run}}`;
+    run = "";
+  };
+  for (const rule of Array.from(rules)) {
+    if (rule instanceof CSSLayerBlockRule) {
+      flush();
+      out += top && PAGE_LAYERS.has(rule.name) ? rule.cssText : `@layer ${rule.name}{${scopeRules(rule.cssRules, plugin, false)}}`;
+    } else if (rule instanceof CSSStyleRule || rule instanceof CSSGroupingRule) {
+      run += rule.cssText;
+    } else {
+      // @property, @keyframes, @font-face and the like name things for the whole page; they cannot be nested in a rule.
+      flush();
+      out += rule.cssText;
+    }
+  }
+  flush();
+  return out;
+}
+
+/** A plugin's web.css, limited to the plugin's parts; not on the page yet (addSheet). */
+async function readSheet(href: string, plugin: string): Promise<CSSStyleSheet> {
+  const res = await fetch(href).catch(() => undefined);
+  if (!res?.ok) throw new Error("web.css を読み込めませんでした。");
+  // baseURL: a url() in the CSS stays relative to web.css.
+  const sheet = new CSSStyleSheet({ baseURL: href });
+  sheet.replaceSync(await res.text());
+  sheet.replaceSync(scopeRules(sheet.cssRules, plugin));
+  return sheet;
+}
+
+function addSheet(sheet: CSSStyleSheet): void {
+  document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+}
+
+function removeSheet(sheet: CSSStyleSheet | undefined): void {
+  if (sheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== sheet);
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -94,27 +131,30 @@ async function load(info: PluginInfo): Promise<void> {
   if (!hash || !web) return;
   loadingHash.set(id, hash);
   set({ loading: { ...state.loading, [id]: true } });
-  let sheet: HTMLLinkElement | undefined;
+  let sheet: CSSStyleSheet | undefined;
   try {
     if (!apiSupported(info.manifest.api)) throw new Error(`プラグインの API ${info.manifest.api} に、この画面は対応していません。Gasho を更新してください。`);
     installShared();
-    if (web.css) sheet = await timeout(loadSheet(web.css, id), "web.css ");
+    if (web.css) {
+      sheet = await timeout(readSheet(web.css, id), "web.css ");
+      addSheet(sheet);
+    }
     const mod = (await timeout(import(/* @vite-ignore */ web.js), "web.js ")) as { default?: unknown };
     const def = checkDefinition(mod.default);
     // Another version was asked for meanwhile, or the plugin was turned off.
     const now = getAppState().plugins.find((p) => p.id === id);
     if (loadingHash.get(id) !== hash || !now?.enabled || now.hash !== hash) {
-      sheet?.remove();
+      removeSheet(sheet);
       return;
     }
-    sheets.get(id)?.remove();
+    removeSheet(sheets.get(id));
     if (sheet) sheets.set(id, sheet);
     else sheets.delete(id);
     const errors = { ...state.errors };
     delete errors[id];
     set({ loaded: { ...state.loaded, [id]: { hash, def } }, errors });
   } catch (e) {
-    sheet?.remove();
+    removeSheet(sheet);
     const why = e instanceof Error ? e.message : String(e);
     console.error(`gasho: plugin ${id} (${hash}) could not be loaded`, e);
     set({ errors: { ...state.errors, [id]: state.loaded[id] ? `新しい版を読み込めませんでした（前の版のまま動いています）：${why}` : `読み込めませんでした：${why}` } });
@@ -129,7 +169,7 @@ async function load(info: PluginInfo): Promise<void> {
 }
 
 function unload(id: string): void {
-  sheets.get(id)?.remove();
+  removeSheet(sheets.get(id));
   sheets.delete(id);
   loadingHash.delete(id);
   const loaded = { ...state.loaded };
