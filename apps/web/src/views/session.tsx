@@ -1,15 +1,15 @@
-import { ArrowLeft, ExternalLink, GitBranch, GitPullRequest } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowLeft, ExternalLink, FolderOpen, GitBranch, GitPullRequest } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { CommandResult, InputFeature, MachineInfo, SessionInfo, SessionModel } from "@gasho/protocol";
 import { RepoPicker } from "@/components/repo-picker";
 import { EffortPicker, UltracodeToggle } from "@/components/session-controls";
 import { SessionHeaderToggle } from "@/components/session-header-toggle";
 import { StatusBadge } from "@/components/status-badge";
+import { PermissionRequests } from "@/components/permission-card";
 import { Transcript } from "@/components/transcript";
 import { PromptInput, type PromptModel } from "@/components/ui/prompt-input";
 import {
   branchLabel,
-  claudeUrl,
   formatCost,
   githubTreeUrl,
   relativeTime,
@@ -18,9 +18,10 @@ import {
   waitingLabel,
 } from "@/lib/format";
 import { promptDraft, usePicks } from "@/lib/drafts";
-import { addPending, noneWaiting, pendingShown, removePending, settlePending, usePending } from "@/lib/pending";
+import { addPending, noneWaiting, pendingShown, removePending, sessionWorking, settlePending, usePending } from "@/lib/pending";
 import { go, type SessionPanel } from "@/lib/route";
 import { closeSessionHeaderOnPhone, useSessionHeaderShown } from "@/lib/session-header";
+import { daemonAtLeast } from "@/lib/sessions";
 import { loadTranscript, sendCommand, transcriptKey, useAppState } from "@/lib/store";
 import { useNow } from "@/lib/use-now";
 import { cn } from "@/lib/utils";
@@ -60,7 +61,6 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
   // Opens a panel beside the session (in its place on a phone); one already open is swapped, not stacked in the history.
   const open = (p: SessionPanel) => go({ name: "session", machine, sessionId, panel: p }, { replace: panel !== undefined });
 
-  const url = claudeUrl(s);
   const cost = formatCost(s.costUSD);
   // A folder that is not a repository but holds several shows "複数のリポジトリ…" and "ブランチ…"; one that holds
   // exactly one shows that repository as if the session worked in it.
@@ -69,7 +69,7 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
   const github = only ? only.github : s.github;
   const branch = only ? only.branch : branchLabel(s);
   const repoText = github ? `${github.owner}/${github.name}` : only ? only.path : repoLabel(s);
-  const status = m.connected ? <StatusBadge status={s.status} /> : <span className="text-xs text-muted-foreground">オフライン</span>;
+  const status = <SessionState machine={m} session={s} />;
   const pending = sent.filter((p) => pendingShown(p, t?.entries ?? [], t?.start ?? 0, s.pendingInputs ?? 0, now));
 
   return (
@@ -79,24 +79,15 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
           <BackLink />
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <h1 className="truncate text-lg font-semibold tracking-tight">{sessionLabel(s)}</h1>
+              {/* A phone has the name and the state in its top bar (see App). */}
+              <h1 className="hidden truncate text-lg font-semibold tracking-tight md:block">{sessionLabel(s)}</h1>
               <p className="truncate text-xs text-muted-foreground">
                 {m.name} · {s.cwd}
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="hidden items-center gap-2 md:flex">
               {status}
-              {url && (
-                <a
-                  href={url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-xs hover:border-border-hover"
-                >
-                  公式アプリで開く <ExternalLink className="size-3.5" />
-                </a>
-              )}
-              <SessionHeaderToggle className="-my-1 hidden md:grid" />
+              <SessionHeaderToggle className="-my-1" />
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
@@ -156,6 +147,17 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
               </span>
             )}
             <PluginHeaderItems machine={m} session={s} panel={panel} from={200} to={400} />
+            {/* gasho-daemon 0.11 reads and writes the files of the session's folder. */}
+            {daemonAtLeast(m, 0, 11) && (
+              <PanelLink
+                icon={<FolderOpen className="size-3.5" />}
+                open={panel?.kind === "files" || panel?.kind === "file"}
+                title="このセッションのフォルダーのファイルを開く"
+                onClick={() => open({ kind: "files" })}
+              >
+                ファイル
+              </PanelLink>
+            )}
             <PluginHeaderItems machine={m} session={s} panel={panel} from={400} to={800} />
             {s.prLinks.map((p) => (
               <a
@@ -177,11 +179,12 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
           </div>
         </header>
       ) : (
-        // Header hidden: one line keeps the session's name and status on screen. On phones the toggle is in the top bar.
-        <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-1.5 md:px-6">
+        // Header hidden: one line keeps the session's name and state on screen. A phone has them in its top bar (see
+        // App), with the toggle, so it leaves this line out and the conversation gets the room.
+        <header className="hidden shrink-0 items-center gap-2 border-b border-border px-4 py-1.5 md:flex md:px-6">
           <h1 className="min-w-0 truncate text-sm font-medium">{sessionLabel(s)}</h1>
           {status}
-          <SessionHeaderToggle className="ml-auto hidden md:grid" />
+          <SessionHeaderToggle className="ml-auto" />
         </header>
       )}
       <div className="min-h-0 flex-1">
@@ -195,6 +198,15 @@ export function SessionView({ machine, sessionId, panel }: { machine: string; se
         />
       </div>
     </div>
+  );
+}
+
+/** The session's state, or "オフライン" while its working server is not connected. Also in a phone's top bar (see App). */
+export function SessionState({ machine, session }: { machine: MachineInfo; session: SessionInfo }) {
+  return machine.connected ? (
+    <StatusBadge status={session.status} />
+  ) : (
+    <span className="shrink-0 text-xs text-muted-foreground">オフライン</span>
   );
 }
 
@@ -326,11 +338,13 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
   useEffect(() => {
     if (!s.pendingInputs) noneWaiting(key);
   }, [key, s.pendingInputs]);
-  const url = claudeUrl(s);
+  // A shell command typed from here runs while the session works; Claude Code records it once it has ended.
+  useEffect(() => sessionWorking(key, s.status === "busy"), [key, s.status]);
 
   if (!s.managed) {
     return (
       <div>
+        <PermissionRequests machine={machine} session={s} />
         <PromptInput
           onSend={() => undefined}
           disabled
@@ -339,13 +353,8 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
           placeholder="Gasho からは入力できません"
           hint={false}
         />
-        <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 text-xs text-muted-foreground">
-          <span>claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。</span>
-          {url && (
-            <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-foreground/80 hover:text-foreground">
-              公式アプリで開く <ExternalLink className="size-3" />
-            </a>
-          )}
+        <p className="mt-1.5 px-3 text-xs text-muted-foreground">
+          claude rc が起動したセッションには、外から入力する公式の手段がありません。入力は公式アプリで行ってください。
         </p>
       </div>
     );
@@ -357,8 +366,8 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
     ? "working server がオフラインです。"
     : s.pendingInputs
       ? `送信待ち ${s.pendingInputs} 件。作業が終わったら順に送ります。`
-      : s.status === "waiting"
-        ? "権限の確認を待っています。公式アプリで答えてください。"
+      : s.status === "waiting" && !s.permissionRequests?.length
+        ? "確認を待っています。端末か公式アプリで答えてください。"
         : undefined;
 
   const stop = async () => {
@@ -368,6 +377,7 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
 
   return (
     <div>
+      <PermissionRequests machine={machine} session={s} />
       <PromptInput
         onSend={async ({ text, files }) => {
           setError(undefined);
@@ -453,6 +463,7 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
         maxLength={20_000}
         placeholder="Agent への指示を入力…"
         showCount
+        shell
       />
       {(status || error || warning) && (
         <p className={cn("mt-1.5 px-3 text-xs", error ? "text-red-400" : warning ? "text-amber-400" : "text-muted-foreground")}>
@@ -460,6 +471,34 @@ function Composer({ machine, session: s, entries }: { machine: MachineInfo; sess
         </p>
       )}
     </div>
+  );
+}
+
+/** A text in the session's header that opens one of its panels. */
+function PanelLink({
+  icon,
+  open,
+  title,
+  onClick,
+  children,
+}: {
+  icon: ReactNode;
+  open: boolean;
+  title: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={open}
+      className={cn("inline-flex items-center gap-1 underline-offset-2 hover:text-foreground hover:underline", open && "text-foreground")}
+    >
+      {icon}
+      {children}
+    </button>
   );
 }
 

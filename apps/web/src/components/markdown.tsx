@@ -72,7 +72,7 @@ const components: Components = {
   del: ({ children }) => <del className="text-muted-foreground">{children}</del>,
   table: ({ children }) => (
     <div className="my-3 overflow-x-auto rounded-lg border border-border">
-      <table className="w-full border-collapse text-left text-[13px]">{children}</table>
+      <table className="w-full border-collapse text-left text-[length:calc(13px*var(--chat-scale,1))]">{children}</table>
     </div>
   ),
   thead: ({ children }) => <thead className="bg-surface-raised">{children}</thead>,

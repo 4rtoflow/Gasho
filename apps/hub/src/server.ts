@@ -111,9 +111,12 @@ function serveStatic(webDist: string, url: URL, res: http.ServerResponse): void 
     return;
   }
   const ext = path.extname(file);
+  // Vite puts a hash in the name of each file it writes to assets/. The others (index.html, the manifest,
+  // the icons, the licenses) keep their names, so the browser must ask whether they changed.
+  const hashed = path.relative(webDist, file).startsWith(`assets${path.sep}`);
   res.writeHead(200, {
     "content-type": MIME[ext] ?? "application/octet-stream",
-    "cache-control": ext === ".html" ? "no-cache" : "public, max-age=31536000, immutable",
+    "cache-control": hashed ? "public, max-age=31536000, immutable" : "no-cache",
   });
   fs.createReadStream(file).pipe(res);
 }

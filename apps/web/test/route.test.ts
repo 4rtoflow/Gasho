@@ -6,6 +6,7 @@ test("routes survive a round trip through the URL, including a session's panel a
   const routes: Route[] = [
     { name: "home" },
     { name: "devices" },
+    { name: "settings" },
     { name: "session", machine: "m1", sessionId: "s/1" },
     { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "graph" } },
     { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "graph", repo: "org/web app" } },
@@ -51,5 +52,24 @@ test("links to Gasho's own issues and pull requests, from before the GitHub plug
   assert.deepEqual(parseHash("#/s/m/s/pull/1e3"), { name: "home" });
   // Such a link is told apart, so the address bar can get the plugin panel's URL instead.
   for (const old of ["#/s/m/s/issues", "#/s/m/s/pulls/api", "#/s/m/s/issue/42", "#/s/m/s/pull/7/api"]) assert.equal(isOldGitHubLink(old), true, old);
-  for (const now of ["#/s/m/s", "#/s/m/s/graph", "#/s/m/s/p/github/list?kind=pulls", "#/"]) assert.equal(isOldGitHubLink(now), false, now);
+  for (const now of ["#/s/m/s", "#/s/m/s/graph", "#/s/m/s/p/github/list?kind=pulls", "#/s/m/s/files/issues", "#/"]) assert.equal(isOldGitHubLink(now), false, now);
+});
+
+test("the files panel keeps a folder's or a file's path in the URL, slashes and all, and refuses paths that leave the folder", () => {
+  const routes: Route[] = [
+    { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "files" } },
+    { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "files", path: "apps/web" } },
+    { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "file", path: "apps/web/src/App.tsx" } },
+    { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "file", path: "メモ/今日 の#予定?.md" } },
+    { name: "session", machine: "m1", sessionId: "s1", panel: { kind: "file", path: ".claude/settings.json" } },
+  ];
+  for (const r of routes) assert.deepEqual(parseHash(hrefOf(r)), r);
+  assert.equal(hrefOf({ name: "session", machine: "m", sessionId: "s", panel: { kind: "files" } }), "#/s/m/s/files");
+  assert.equal(hrefOf({ name: "session", machine: "m", sessionId: "s", panel: { kind: "files", path: "" } }), "#/s/m/s/files");
+  assert.equal(hrefOf({ name: "session", machine: "m", sessionId: "s", panel: { kind: "file", path: "src/a b.ts" } }), "#/s/m/s/file/src/a%20b.ts");
+  for (const bad of ["#/s/m/s/file", "#/s/m/s/file/", "#/s/m/s/files/../x", "#/s/m/s/file/a//b", "#/s/m/s/file/a/./b", "#/s/m/s/file/%E0%A4%A", "#/s/m/s/file/a%2F..%2Fb"]) {
+    assert.deepEqual(parseHash(bad), { name: "home" }, bad);
+  }
+  // An encoded slash is just another way of writing the path.
+  assert.deepEqual(parseHash("#/s/m/s/file/src%2Fapp.ts"), { name: "session", machine: "m", sessionId: "s", panel: { kind: "file", path: "src/app.ts" } });
 });

@@ -1,6 +1,9 @@
 // End-to-end over HTTP and WebSocket: registration, cookies, cross-origin guards and the allow list.
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { after, before, test } from "node:test";
 import type { HubToClient, PairResponse } from "@gasho/protocol";
 import { Hub } from "../src/hub.ts";
@@ -124,5 +127,35 @@ test("addresses outside the allow list are refused", async () => {
   } finally {
     strict.closeAllConnections();
     strict.close();
+  }
+});
+
+test("only the hashed files under assets/ are cached for good; the browser asks again for the others", async () => {
+  const dist = fs.mkdtempSync(path.join(os.tmpdir(), "gasho-web-"));
+  fs.mkdirSync(path.join(dist, "assets"));
+  fs.writeFileSync(path.join(dist, "index.html"), "<!doctype html>");
+  fs.writeFileSync(path.join(dist, "assets", "index-AbCd1234.js"), "");
+  fs.writeFileSync(path.join(dist, "manifest.webmanifest"), "{}");
+  const s2 = new Store(":memory:");
+  const web = createServer({ hub: new Hub(s2), store: s2, webDist: dist, allow: buildAllowList(parseNets(undefined)) });
+  await new Promise<void>((r) => web.listen(0, "127.0.0.1", () => r()));
+  const url = `http://127.0.0.1:${(web.address() as AddressInfo).port}`;
+  const get = async (p: string) => {
+    const res = await fetch(`${url}${p}`);
+    await res.arrayBuffer();
+    return { type: res.headers.get("content-type"), cache: res.headers.get("cache-control") };
+  };
+  try {
+    assert.deepEqual(await get("/assets/index-AbCd1234.js"), {
+      type: "text/javascript; charset=utf-8",
+      cache: "public, max-age=31536000, immutable",
+    });
+    assert.deepEqual(await get("/manifest.webmanifest"), { type: "application/manifest+json", cache: "no-cache" });
+    // A path the app routes itself gets index.html.
+    assert.deepEqual(await get("/sessions/x"), { type: "text/html; charset=utf-8", cache: "no-cache" });
+  } finally {
+    web.closeAllConnections();
+    web.close();
+    fs.rmSync(dist, { recursive: true, force: true });
   }
 });
