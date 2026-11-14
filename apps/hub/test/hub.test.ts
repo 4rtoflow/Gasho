@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HubToClient, HubToDaemon, SessionInfo } from "@gasho/protocol";
-import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, legacyFeatures, MAX_FILES_BYTES, validateCommand } from "../src/hub.ts";
+import { CLOSE_INVALID_CREDENTIALS, CLOSE_UNAUTHORIZED, Hub, legacyFeatures, MAX_FILES_BYTES, MAX_WRITE_BYTES, validateCommand } from "../src/hub.ts";
 import { notificationFor } from "../src/notify.ts";
 import { Store } from "../src/store.ts";
 
@@ -176,6 +176,21 @@ test("notificationFor covers permission, idle and errors, and ignores other even
   assert.equal(notificationFor("m", { ...ev, event: "StopFailure" }, session, "3")?.kind, "error");
   assert.equal(notificationFor("m", { ...ev, event: "PreToolUse" }, session, "4"), null);
   assert.equal(notificationFor("m", { ...ev, event: "Stop" }, undefined, "5")?.title, "s1 の応答が終わりました");
+});
+
+test("a permission prompt for Claude's question or plan is notified as such", () => {
+  const ev = { sessionId: "s1", at: 1, event: "Notification", notificationType: "permission_prompt", summary: "Claude needs your permission" };
+  const waiting = (r: Record<string, unknown>) =>
+    ({ ...session, permissionRequests: [{ id: "b", toolName: "Bash", input: "{}", at: 0 }, { id: "r", input: "{}", at: 1, ...r }] }) as SessionInfo;
+  const question = notificationFor("m", ev, waiting({ toolName: "AskUserQuestion", summary: "Which color?", questions: [] }), "1");
+  assert.deepEqual([question?.kind, question?.title, question?.body], ["permission", "プラグインの整理 が質問しています", "Which color?"]);
+  const plan = notificationFor("m", ev, waiting({ toolName: "ExitPlanMode", summary: "Plan: hello", plan: "# Plan: hello" }), "2");
+  assert.deepEqual([plan?.title, plan?.body], ["プラグインの整理 が計画の承認を待っています", "Plan: hello"]);
+  // From a gasho-daemon too old to send the questions, the summary is raw JSON: no body then.
+  const old = notificationFor("m", ev, waiting({ toolName: "AskUserQuestion", summary: '{"questions":[' }), "3");
+  assert.deepEqual([old?.title, old?.body], ["プラグインの整理 が質問しています", undefined]);
+  const other = notificationFor("m", ev, waiting({ toolName: "Bash", summary: "npm test" }), "4");
+  assert.deepEqual([other?.title, other?.body], ["プラグインの整理 が権限の確認を待っています", "Claude needs your permission"]);
 });
 
 test("session commands are relayed to the working server and the result goes back to the asking browser only", () => {
@@ -579,6 +594,77 @@ test("validateCommand checks an answer to a permission request", () => {
   assert.equal(validateCommand({ ...ok, decision: "always" }), undefined);
   assert.ok(validateCommand({ ...ok, permissionId: "" }));
   assert.ok(validateCommand({ ...ok, decision: "maybe" as "allow" }));
+  // Answers to Claude's questions, the mode an approved plan goes on in, and what to tell Claude on a denial.
+  assert.equal(validateCommand({ ...ok, answers: [{ picked: [1] }, { picked: [0, 2], text: "ほかにも" }] }), undefined);
+  assert.equal(validateCommand({ ...ok, answers: [{ picked: [], text: "どちらでもない" }] }), undefined);
+  assert.ok(validateCommand({ ...ok, answers: [] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: [-1] }] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: [1.5] }] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: "1" as unknown as number[] }] }));
+  assert.ok(validateCommand({ ...ok, answers: [{ picked: [], text: 3 as unknown as string }] }));
+  assert.match(validateCommand({ ...ok, answers: [{ picked: [], text: "あ".repeat(4001) }] }) ?? "", /4000文字まで/);
+  assert.equal(validateCommand({ ...ok, mode: "auto" }), undefined);
+  assert.equal(validateCommand({ ...ok, mode: "default" }), undefined);
+  assert.ok(validateCommand({ ...ok, mode: "bypassPermissions" as "auto" }));
+  assert.equal(validateCommand({ ...ok, decision: "deny", message: "ファイル名を変えて" }), undefined);
+  assert.ok(validateCommand({ ...ok, decision: "deny", message: "x".repeat(20_001) }));
+});
+
+test("answers to Claude's questions and plans go to the working server, are recorded as such, and need the answers", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
+  const question = {
+    id: "q1",
+    toolName: "AskUserQuestion",
+    input: "{}",
+    summary: "Which color do you like?",
+    at: 1,
+    questions: [
+      { question: "Which color do you like?", header: "Color", options: [{ label: "Red" }, { label: "Blue" }] },
+      { question: "Which fruits?", options: [{ label: "Apple" }, { label: "Cherry" }], multiSelect: true },
+    ],
+  };
+  const plan = { id: "p1", toolName: "ExitPlanMode", input: "{}", summary: "Plan: hello", at: 2, plan: "# Plan: hello" };
+  // As a gasho-daemon too old for either sends them: no questions, no plan.
+  const oldQuestion = { id: "q0", toolName: "AskUserQuestion", input: '{"questions":[]}', summary: '{"questions":[]}', at: 3 };
+  const oldPlan = { id: "p0", toolName: "ExitPlanMode", input: "{}", summary: "{}", at: 4 };
+  hub.onDaemonMessage(d, { type: "sessions", sessions: [{ ...session, status: "waiting", permissionRequests: [question, plan, oldQuestion, oldPlan] }] });
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const answer = (requestId: string, permissionId: string, rest: Record<string, unknown>) =>
+    hub.onClientMessage(c, { type: "permission.answer", requestId, machine: machineId, sessionId: "s1", permissionId, decision: "allow", ...rest });
+  const result = (requestId: string) => {
+    const r = c.sent.findLast((m) => m.type === "command.result" && m.requestId === requestId);
+    return r?.type === "command.result" ? r.result : undefined;
+  };
+  const relayed = () => d.sent.filter((m) => m.type === "permission.answer").length;
+
+  // "allow" alone would spend the request and leave Claude Code's dialog open.
+  answer("a0", "q1", {});
+  assert.match(result("a0")?.error ?? "", /選んだ答えを添えて/);
+  answer("a1", "q0", { answers: [{ picked: [0] }] });
+  assert.match(result("a1")?.error ?? "", /gasho-daemon は古いため/);
+  answer("a2", "p0", { mode: "auto" });
+  assert.match(result("a2")?.error ?? "", /gasho-daemon は古いため/);
+  assert.equal(relayed(), 0);
+  // Denying still reaches the working server: Claude stops.
+  answer("a3", "q0", { decision: "deny" });
+  assert.equal(relayed(), 1);
+
+  answer("a4", "q1", { answers: [{ picked: [1] }, { picked: [0, 1], text: " and plums " }] });
+  const sent = d.sent.at(-1);
+  assert.ok(sent?.type === "permission.answer");
+  assert.deepEqual(sent.answers, [{ picked: [1] }, { picked: [0, 1], text: " and plums " }]);
+  answer("a5", "p1", { mode: "auto" });
+  answer("a6", "p1", { decision: "deny", message: "ファイル名は farewell.txt に" });
+  const summaries = c.sent.flatMap((m) => (m.type === "event" ? [m.event.summary?.replace(/ \(by .*\)$/, "")] : []));
+  assert.deepEqual(summaries, [
+    "[deny] AskUserQuestion {\"questions\":[]}",
+    "[answer] Color → Blue / Which fruits? → Apple, Cherry, and plums",
+    "[approve] Plan: hello",
+    "[revise] ファイル名は farewell.txt に",
+  ]);
 });
 
 test("a shell command (an input that starts with \"!\") needs a command and cannot carry files", () => {
@@ -592,4 +678,109 @@ test("a shell command (an input that starts with \"!\") needs a command and cann
   // Not a shell command: "!" further on, or files with an ordinary message.
   assert.equal(input("これを見て!"), undefined);
   assert.equal(input("見て", [{ name: "a.txt", data: "YQ==" }]), undefined);
+});
+
+test("a folder and a file of a session go to a gasho-daemon 0.11.0 or later, and back to the browser that asked", () => {
+  const { hub, machineId, machineToken, browserId } = setup();
+  const asking = fakePeer<HubToClient>(browserId);
+  const other = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(asking);
+  hub.onClientConnect(other);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path: "" });
+  const tooOld = asking.sent.at(-1);
+  assert.ok(tooOld?.type === "dir" && tooOld.path === "" && /0\.11\.0/.test(tooOld.error ?? ""));
+  assert.equal(old.sent.length, 1); // the welcome only
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
+  hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path: "src" });
+  const askedDir = d.sent.at(-1);
+  assert.ok(askedDir?.type === "dir.get" && askedDir.path === "src" && askedDir.sessionId === "s1");
+  // An answer of the other kind is not taken for it.
+  hub.onDaemonMessage(d, { type: "file", requestId: askedDir.requestId, sessionId: "s1", path: "src", error: "x" });
+  assert.ok(!asking.sent.some((m) => m.type === "file"));
+  const dir = { path: "src", entries: [{ name: "app.ts", kind: "file" as const, size: 10, mtime: 1 }], truncated: false };
+  hub.onDaemonMessage(d, { type: "dir", requestId: askedDir.requestId, sessionId: "s1", path: "src", dir });
+  assert.deepEqual(asking.sent.at(-1), { type: "dir", machine: machineId, sessionId: "s1", path: "src", dir, error: undefined });
+
+  hub.onClientMessage(asking, { type: "file.get", machine: machineId, sessionId: "s1", path: "src/app.ts" });
+  const askedFile = d.sent.at(-1);
+  assert.ok(askedFile?.type === "file.get" && askedFile.path === "src/app.ts");
+  const file = { path: "src/app.ts", size: 10, mtime: 1, hash: "a".repeat(64), text: "const a=1;", writable: true };
+  hub.onDaemonMessage(d, { type: "file", requestId: askedFile.requestId, sessionId: "s1", path: "src/app.ts", file });
+  const got = asking.sent.at(-1);
+  assert.ok(got?.type === "file" && got.machine === machineId && got.file?.text === "const a=1;");
+  assert.ok(!other.sent.some((m) => m.type === "dir" || m.type === "file"));
+
+  // Paths that leave the folder never reach the working server; a file needs a path.
+  const before = d.sent.length;
+  for (const path of ["../x", "/etc/passwd", "a//b", "a/./b", "a\0b"]) {
+    hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path });
+    const r = asking.sent.at(-1);
+    assert.ok(r?.type === "dir" && r.path === path && r.error, path);
+  }
+  hub.onClientMessage(asking, { type: "file.get", machine: machineId, sessionId: "s1", path: "" });
+  const noFile = asking.sent.at(-1);
+  assert.ok(noFile?.type === "file" && /ファイルを指定/.test(noFile.error ?? ""));
+  assert.equal(d.sent.length, before);
+
+  // Waiting requests fail when the working server goes away.
+  hub.onClientMessage(asking, { type: "file.get", machine: machineId, sessionId: "s1", path: "README.md" });
+  hub.onDaemonClose(d);
+  const gone = asking.sent.at(-1);
+  assert.ok(gone?.type === "file" && gone.path === "README.md" && gone.error && !gone.file);
+  hub.onClientMessage(asking, { type: "dir.get", machine: machineId, sessionId: "s1", path: "" });
+  const offline = asking.sent.at(-1);
+  assert.ok(offline?.type === "dir" && /オフライン/.test(offline.error ?? ""));
+});
+
+test("writing a file is checked, goes to a gasho-daemon 0.11.0 or later, and the audit log keeps its path and size, never its text", () => {
+  const ok = { type: "file.write" as const, sessionId: "s1", path: "notes/a.md", content: "メモ" };
+  assert.equal(validateCommand(ok), undefined);
+  assert.equal(validateCommand({ ...ok, content: "", create: true }), undefined);
+  assert.equal(validateCommand({ ...ok, baseHash: "0123456789abcdef".repeat(4) }), undefined);
+  assert.match(validateCommand({ ...ok, path: "" }) ?? "", /ファイルを指定/);
+  assert.match(validateCommand({ ...ok, path: "../a.md" }) ?? "", /フォルダーの中のパス/);
+  assert.match(validateCommand({ ...ok, path: "/home/rg/a.md" }) ?? "", /フォルダーの中のパス/);
+  assert.match(validateCommand({ ...ok, content: 3 as never }) ?? "", /中身/);
+  assert.match(validateCommand({ ...ok, content: "あ".repeat(MAX_WRITE_BYTES / 3 + 1) }) ?? "", /1MB/);
+  assert.match(validateCommand({ ...ok, baseHash: "abc" }) ?? "", /版/);
+  assert.match(validateCommand({ ...ok, create: "yes" as never }) ?? "", /作成/);
+
+  const { hub, store, machineId, machineToken, browserId } = setup();
+  const c = fakePeer<HubToClient>(browserId);
+  hub.onClientConnect(c);
+  const old = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(old, { type: "hello", machineId, token: machineToken, daemonVersion: "0.10.0" });
+  hub.onClientMessage(c, { ...ok, requestId: "w0", machine: machineId });
+  const refused = c.sent.at(-1);
+  assert.ok(refused?.type === "command.result" && refused.requestId === "w0" && !refused.result.ok);
+  assert.match(refused.result.error ?? "", /ファイルを扱えません/);
+  assert.equal(old.sent.at(-1)?.type, "welcome");
+
+  const d = fakePeer<HubToDaemon>();
+  hub.onDaemonMessage(d, { type: "hello", machineId, token: machineToken, daemonVersion: "0.11.0" });
+  const secret = "これは秘密の本文";
+  hub.onClientMessage(c, { ...ok, content: secret, create: true, requestId: "w1", machine: machineId });
+  const made = d.sent.at(-1);
+  assert.ok(made?.type === "file.write" && made.content === secret && made.create === true && made.path === "notes/a.md");
+  const written = { hash: "b".repeat(64), size: 24, mtime: 5 };
+  hub.onDaemonMessage(d, { type: "command.result", requestId: made.requestId, result: { ok: true, written } });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "w1", machine: machineId, result: { ok: true, written } });
+
+  hub.onClientMessage(c, { ...ok, content: "新しい本文", baseHash: written.hash, requestId: "w2", machine: machineId });
+  const save = d.sent.at(-1);
+  assert.ok(save?.type === "file.write" && save.baseHash === written.hash && save.create === undefined);
+  const conflict = { ok: false, error: "このファイルは、開いたあとで変更されています。", conflict: true };
+  hub.onDaemonMessage(d, { type: "command.result", requestId: save.requestId, result: conflict });
+  assert.deepEqual(c.sent.at(-1), { type: "command.result", requestId: "w2", machine: machineId, result: conflict });
+
+  const logged = store.recentEvents().filter((e) => e.event === "Gasho:file.write");
+  assert.deepEqual(
+    logged.map((e) => e.summary?.replace(/ \(by .*\)$/, "")),
+    ["notes/a.md [new] [1KB]", "notes/a.md [1KB]"],
+  );
+  assert.ok(logged.every((e) => !e.summary?.includes(secret) && !e.summary?.includes("新しい本文")));
 });

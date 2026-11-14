@@ -26,6 +26,16 @@ export function notificationFor(
     return { ...base, kind: "error", title: `${label} がエラーで止まりました`, body: ev.summary || undefined };
   }
   if (ev.event === "Notification" && ev.notificationType === "permission_prompt") {
+    // Claude Code says "needs your permission" for a question or a plan too; the request it is about says which.
+    const requests = session?.permissionRequests ?? [];
+    const r = requests[requests.length - 1];
+    // The summary is the (first) question or the plan's title; from a gasho-daemon too old to send them, raw JSON.
+    if (r?.toolName === "AskUserQuestion") {
+      return { ...base, kind: "permission", title: `${label} が質問しています`, body: (r.questions && r.summary) || undefined };
+    }
+    if (r?.toolName === "ExitPlanMode") {
+      return { ...base, kind: "permission", title: `${label} が計画の承認を待っています`, body: (r.plan !== undefined && r.summary) || undefined };
+    }
     return { ...base, kind: "permission", title: `${label} が権限の確認を待っています`, body: ev.summary || undefined };
   }
   if (ev.event === "Notification" && ev.notificationType === "idle_prompt") {

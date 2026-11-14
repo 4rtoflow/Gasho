@@ -305,3 +305,39 @@ test("the summary of a compaction keeps text of another shape, and lines it quot
   // Claude Code v2.1.323 once left the model's closing tag in.
   assert.equal(compactSummaryText("前置き\nSummary:\n1. 依頼\n</summary>\n\nIf you need specific details from before compaction …"), "1. 依頼");
 });
+
+test("Claude's latest question is kept whole while it has no answer: its result or a new message clears it", () => {
+  const meta = emptyMeta();
+  const long = "x".repeat(3000);
+  const input = { questions: [{ question: "Which color?", header: "Color", options: [{ label: "Red", description: long }, { label: "Blue" }] }] };
+  const ask = (id: string, extra: Record<string, unknown> = {}) =>
+    parseRecord(
+      {
+        type: "assistant",
+        uuid: `a-${id}`,
+        timestamp: "2026-11-14T07:53:36.089Z",
+        message: { role: "assistant", content: [{ type: "tool_use", id, name: "AskUserQuestion", input }] },
+        ...extra,
+      },
+      meta,
+    );
+  const result = (id: string) =>
+    parseRecord({ type: "user", uuid: `r-${id}`, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "answered" }] } }, meta);
+
+  const e = ask("toolu_1");
+  // The entry shows the input clipped; the question is kept whole, to answer it by.
+  assert.ok(e?.blocks[0]?.type === "tool_use" && e.blocks[0].input.length < 3000);
+  assert.deepEqual(meta.question, { toolUseId: "toolu_1", input, at: Date.parse("2026-11-14T07:53:36.089Z") });
+  // Another call's result leaves it; its own clears it.
+  result("toolu_other");
+  assert.equal(meta.question?.toolUseId, "toolu_1");
+  result("toolu_1");
+  assert.equal(meta.question, undefined);
+
+  ask("toolu_2");
+  parseRecord({ type: "user", uuid: "u", message: { role: "user", content: "やっぱり別の案で" } }, meta);
+  assert.equal(meta.question, undefined);
+  // A subagent's question is not the session's.
+  ask("toolu_3", { isSidechain: true });
+  assert.equal(meta.question, undefined);
+});

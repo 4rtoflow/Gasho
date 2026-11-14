@@ -1,7 +1,8 @@
 // Starting a session in a folder Claude Code does not trust yet: the question is found by its choices at the bottom,
 // it is answered only when the launch asks for it (and then only with the cursor on "Yes, I trust this folder"), and
 // the question about a folder's MCP servers that follows is answered with Esc. Screens as Claude Code 2.1.323 drew them
-// in a 50-column zellij pane; the launches run against a fake terminal and a fake `claude agents` (no claude, no zellij).
+// in a 50-column zellij pane (Gasho's own terminals are as wide); the launches run against a fake terminal and a fake
+// `claude agents` (no claude, no terminal).
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { writeFileSync } from "node:fs";
@@ -10,6 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { Daemon } from "../src/daemon.ts";
 import { dialogOpen, mcpQuestionOpen, plainScreen, trustQuestion, typedInBox } from "../src/managed.ts";
+import type { TerminalStart } from "../src/terminal.ts";
 
 const RULE = "─".repeat(50);
 
@@ -146,7 +148,7 @@ class FakeStart {
 
 const SID = "11111111-2222-3333-4444-666666666666";
 
-/** A daemon whose zellij is the fake terminal and whose `claude agents` reads a file the fake writes. */
+/** A daemon whose terminal is the fake one and whose `claude agents` reads a file the fake writes. */
 async function setup(o: { mcp?: boolean; warnings?: string[] } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-launch-"));
   const agentsFile = path.join(dir, "agents.json");
@@ -170,11 +172,12 @@ async function setup(o: { mcp?: boolean; warnings?: string[] } = {}) {
     attachmentsDir: path.join(dir, "attachments"),
   } as ConstructorParameters<typeof Daemon>[0]) as unknown as Record<string, any>;
   d.canLaunch = true;
-  d.zellij = {
-    // launchArgs: … "gasho-launch", <pid file>, <folder>, "env", …: the shell writes Claude Code's PID first.
-    start: async (_session: string, args: string[]) => {
-      const at = args.indexOf("gasho-launch");
-      if (at >= 0) await fs.writeFile(args[at + 1] as string, String(process.pid));
+  const started: TerminalStart[] = [];
+  d.terminals = {
+    // The terminal answers with Claude Code's PID; `claude agents` (the fake) lists this process.
+    start: async (o: TerminalStart) => {
+      started.push(o);
+      return process.pid;
     },
     screen: async () => plainScreen(fake.screen()),
     keys: async (_s: string, ...keys: string[]) => keys.forEach((k) => fake.key(k)),
@@ -185,7 +188,7 @@ async function setup(o: { mcp?: boolean; warnings?: string[] } = {}) {
   };
   d.refresh = async () => undefined;
   d.refreshFolders = async () => undefined;
-  return { d, fake, folder, killed, done: () => fs.rm(dir, { recursive: true, force: true }) };
+  return { d, fake, folder, killed, started, done: () => fs.rm(dir, { recursive: true, force: true }) };
 }
 
 test("without trust, the launch stops at the question: nothing is pressed, and Claude Code's warnings come back", async () => {
@@ -207,13 +210,19 @@ test("without trust, the launch stops at the question: nothing is pressed, and C
 });
 
 test("with trust, the cursor is moved to yes before the one Enter, and the session starts", async () => {
-  const { d, fake, folder, killed, done } = await setup();
+  const { d, fake, folder, killed, started, done } = await setup();
   try {
     const r = await d.launch(folder, "clone-test", true);
     assert.deepEqual(r, { ok: true, sessionId: SID });
     assert.deepEqual(fake.keys, ["Down", "Enter"]);
     assert.deepEqual(killed, []);
     assert.equal(d.managed.get(SID)?.cwd, folder);
+    // Claude Code runs with Remote Control in the folder, in a terminal named after the session.
+    assert.equal(started.length, 1);
+    assert.deepEqual(started[0]?.args, ["--remote-control", "clone-test"]);
+    assert.equal(started[0]?.cwd, folder);
+    assert.match(started[0]?.name ?? "", /^gasho-clone-test-[0-9a-f]{4}$/);
+    assert.equal(d.managed.get(SID)?.terminal, started[0]?.name);
   } finally {
     await done();
   }

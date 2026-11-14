@@ -12,6 +12,7 @@ import type {
   InputFeature,
   MachineHookEvent,
   MachineInfo,
+  PermissionRequestInfo,
   SessionCommand,
 } from "@gasho/protocol";
 import { notificationFor } from "./notify.ts";
@@ -32,9 +33,12 @@ export const CLOSE_INVALID_CREDENTIALS = 4001;
 export const CLOSE_REPLACED = 4002;
 export const CLOSE_UNAUTHORIZED = 4401;
 
-/** A browser's request that a working server answers: a transcript page, a branch graph, or a GitHub list or item. */
+/**
+ * A browser's request that a working server answers: a transcript page, a branch graph, a GitHub list or item, or a
+ * folder or file inside the session's folder.
+ */
 interface PendingRequest {
-  kind: "transcript" | "graph" | "github" | "githubItem";
+  kind: "transcript" | "graph" | "github" | "githubItem" | "dir" | "file";
   client: ClientPeer;
   machine: string;
   sessionId: string;
@@ -44,6 +48,8 @@ interface PendingRequest {
   list?: GitHubListKind;
   /** githubItem: the issue's or pull request's number. */
   number?: number;
+  /** dir, file: where, from the session's folder. */
+  path?: string;
   timer: NodeJS.Timeout;
 }
 
@@ -96,6 +102,23 @@ export function versionAtLeast(version: string | undefined, major: number, minor
 const SESSION_ACTIONS_SINCE: [number, number] = [0, 9];
 /** gasho-daemon 0.10.0 makes folders, clones repositories, and answers Claude Code's question whether to trust a folder. */
 const FOLDER_ACTIONS_SINCE: [number, number] = [0, 10];
+/** gasho-daemon 0.11.0 lists, reads and writes the files of a session's folder. */
+const FILES_SINCE: [number, number] = [0, 11];
+const FILES_TOO_OLD = "この working server の gasho-daemon は古いため、ファイルを扱えません。gasho-daemon を 0.11.0 以上に更新してください。";
+/** A path inside a session's folder, and the text written to a file at most (gasho-daemon checks both again). */
+const MAX_FILE_PATH = 4096;
+export const MAX_WRITE_BYTES = 1024 * 1024;
+
+/**
+ * A path inside a session's folder ("" for the folder itself, "src/app.ts"): an error message, or undefined. Never
+ * one that leaves the folder; gasho-daemon checks it again, links included.
+ */
+function filePathError(p: unknown, file: boolean): string | undefined {
+  if (typeof p !== "string" || p.length > MAX_FILE_PATH || p.includes("\0")) return "パスの指定が正しくありません。";
+  if (p === "") return file ? "ファイルを指定してください。" : undefined;
+  if (p.startsWith("/") || p.split("/").some((s) => s === "" || s === "." || s === "..")) return "セッションのフォルダーの中のパスを指定してください。";
+  return undefined;
+}
 
 /** A session's name: an error message, or undefined when it is fine (or omitted where `required` is false). */
 function nameError(name: unknown, required: boolean): string | undefined {
@@ -120,6 +143,49 @@ function folderNameError(name: unknown): string | undefined {
   if (name === "." || name === ".." || name.includes("/") || name.startsWith("-") || /\p{Cc}/u.test(name)) return "このフォルダーの名前は使えません。";
   if (Buffer.byteLength(name) > 255) return "フォルダーの名前が長すぎます。";
   return undefined;
+}
+
+/** Answers to Claude's questions (AskUserQuestion asks up to 4, with up to 4 options each; with room to spare). */
+const MAX_QUESTIONS = 10;
+const MAX_OPTIONS = 20;
+const MAX_ANSWER = 4000;
+
+/** The answers to an AskUserQuestion: an error message, or undefined. gasho-daemon checks them against the questions. */
+function answersError(answers: unknown): string | undefined {
+  const wrong = "質問への答えが正しくありません。";
+  if (!Array.isArray(answers) || answers.length === 0 || answers.length > MAX_QUESTIONS) return wrong;
+  for (const a of answers as unknown[]) {
+    const { picked, text } = (a ?? {}) as { picked?: unknown; text?: unknown };
+    if (!Array.isArray(picked) || picked.length > MAX_OPTIONS) return wrong;
+    if (!picked.every((k) => Number.isInteger(k) && (k as number) >= 0 && (k as number) < MAX_OPTIONS)) return wrong;
+    if (text !== undefined && typeof text !== "string") return wrong;
+    if (typeof text === "string" && text.length > MAX_ANSWER) return `答えは${MAX_ANSWER}文字までです。`;
+  }
+  return undefined;
+}
+
+/**
+ * How an answer to a permission request is recorded (`r`: the request, when it is known): "[allow] Bash npm test" (the
+ * decision, the tool, what it asked for), "[answer] Color → Blue / Fruits → Apple, Cherry" (Claude's questions),
+ * "[approve] Plan title" (a plan approved), "[revise] what to change" (a plan sent back), and a denial's message after
+ * " — ".
+ */
+export function answerSummary(cmd: Extract<SessionCommand, { type: "permission.answer" }>, r: PermissionRequestInfo | undefined): string {
+  const message = cmd.message?.trim();
+  if (cmd.decision !== "deny" && r?.questions && cmd.answers) {
+    const answers = r.questions.map((q, i) => {
+      const a = cmd.answers?.[i];
+      const chosen = [...(a?.picked ?? []).map((k) => q.options[k]?.label ?? "?"), ...(a?.text?.trim() ? [a.text.trim()] : [])];
+      return `${q.header ?? q.question} → ${chosen.join(", ")}`;
+    });
+    return `[answer] ${answers.join(" / ")}`.slice(0, 300);
+  }
+  if (r?.plan !== undefined) {
+    if (cmd.decision !== "deny") return `[approve] ${r.summary ?? ""}`.trim().slice(0, 300);
+    if (message) return `[revise] ${message}`.slice(0, 300);
+  }
+  const what = r ? `${r.toolName} ${r.summary ?? ""}`.trim() : "";
+  return `[${cmd.decision}] ${what}${message ? ` — ${message}` : ""}`.trim().slice(0, 300);
 }
 
 /** Files sent with one input: how many, and their size in all. */
@@ -198,7 +264,22 @@ export function validateCommand(cmd: SessionCommand): string | undefined {
     case "permission.answer":
       if (typeof cmd.permissionId !== "string" || !cmd.permissionId || cmd.permissionId.length > 100) return "確認の指定が正しくありません。";
       if (!["allow", "always", "deny"].includes(cmd.decision)) return "答えの指定が正しくありません。";
+      if (cmd.answers !== undefined) {
+        const wrong = answersError(cmd.answers);
+        if (wrong) return wrong;
+      }
+      if (cmd.mode !== undefined && cmd.mode !== "auto" && cmd.mode !== "default") return "計画を承認したあとの進め方の指定が正しくありません。";
+      if (cmd.message !== undefined && (typeof cmd.message !== "string" || cmd.message.length > MAX_INPUT)) return `伝えることは${MAX_INPUT}文字までです。`;
       return undefined;
+    case "file.write": {
+      const wrong = filePathError(cmd.path, true);
+      if (wrong) return wrong;
+      if (typeof cmd.content !== "string") return "ファイルの中身が正しくありません。";
+      if (Buffer.byteLength(cmd.content) > MAX_WRITE_BYTES) return `保存できるのは ${MAX_WRITE_BYTES / 1024 / 1024}MB までです。`;
+      if (cmd.baseHash !== undefined && (typeof cmd.baseHash !== "string" || !/^[0-9a-f]{64}$/.test(cmd.baseHash))) return "ファイルの版の指定が正しくありません。";
+      if (cmd.create !== undefined && typeof cmd.create !== "boolean") return "作成の指定が正しくありません。";
+      return undefined;
+    }
     default:
       return "不明な命令です。";
   }
@@ -318,6 +399,18 @@ export class Hub {
           item: msg.item,
           error: msg.error,
         });
+        break;
+      }
+      case "dir":
+      case "file": {
+        const req = this.pending.get(msg.requestId);
+        if (!req || req.kind !== msg.type || req.path === undefined) break;
+        clearTimeout(req.timer);
+        this.pending.delete(msg.requestId);
+        // The path asked for goes back, whatever the answer says.
+        const where = { machine: id, sessionId: req.sessionId, path: req.path };
+        if (msg.type === "dir") req.client.send({ type: "dir", ...where, dir: msg.dir, error: msg.error });
+        else req.client.send({ type: "file", ...where, file: msg.file, error: msg.error });
         break;
       }
       case "hook": {
@@ -445,6 +538,26 @@ export class Hub {
         daemon.send({ type: "github.item.get", requestId, sessionId: msg.sessionId, repo, kind: msg.kind, number });
         break;
       }
+      case "dir.get":
+      case "file.get": {
+        const kind = msg.type === "dir.get" ? "dir" : "file";
+        // Not answered at all when the path is not a string: there is nothing to answer for.
+        if (typeof msg.path !== "string") return;
+        const where = { machine: msg.machine, sessionId: msg.sessionId, path: msg.path };
+        const fail = (error: string) => peer.send(kind === "dir" ? { type: "dir", ...where, error } : { type: "file", ...where, error });
+        const wrong = filePathError(msg.path, kind === "file");
+        if (wrong) return fail(wrong);
+        const daemon = this.daemons.get(msg.machine);
+        if (!daemon) return fail("この working server はオフラインです。");
+        if (!versionAtLeast(this.machines.get(msg.machine)?.daemonVersion, ...FILES_SINCE)) return fail(FILES_TOO_OLD);
+        const requestId = randomUUID();
+        const timer = setTimeout(() => {
+          if (this.pending.delete(requestId)) fail("working server から応答がありません。");
+        }, REQUEST_TIMEOUT_MS).unref();
+        this.pending.set(requestId, { kind, client: peer, machine: msg.machine, sessionId: msg.sessionId, path: msg.path, timer });
+        daemon.send(kind === "dir" ? { type: "dir.get", requestId, sessionId: msg.sessionId, path: msg.path } : { type: "file.get", requestId, sessionId: msg.sessionId, path: msg.path });
+        break;
+      }
       case "notification.read":
         this.store.markRead(msg.ids);
         this.broadcast({ type: "notification.read", ids: msg.ids });
@@ -457,7 +570,8 @@ export class Hub {
       case "session.remove":
       case "permission.answer":
       case "folder.create":
-      case "repo.clone": {
+      case "repo.clone":
+      case "file.write": {
         const { requestId: clientRequestId, machine, ...cmd } = msg;
         this.relayCommand(peer, clientRequestId, machine, cmd);
         break;
@@ -492,6 +606,7 @@ export class Hub {
       "permission.answer": REQUEST_TIMEOUT_MS,
       "folder.create": REQUEST_TIMEOUT_MS,
       "repo.clone": CLONE_TIMEOUT_MS,
+      "file.write": REQUEST_TIMEOUT_MS,
     }[cmd.type];
     const timer = setTimeout(() => {
       if (this.commands.delete(requestId)) reply({ ok: false, error: "working server から応答がありません。" });
@@ -505,11 +620,14 @@ export class Hub {
   /**
    * The audit log's words for a command: an input's text (with what it switches and the names and sizes of its files,
    * never their contents), the folder of a launch (and whether Claude Code was told to trust it), a session's name (the
-   * new one for a rename, the copy's for a fork, the removed session's for a removal), the folder made, or the
-   * repository cloned and where to.
+   * new one for a rename, the copy's for a fork, the removed session's for a removal), the folder made, the
+   * repository cloned and where to, or the file written (its path from the session's folder and its size, never what
+   * was written; "[new]" when it was made).
    */
   private summaryOf(machine: string, cmd: SessionCommand): string {
     switch (cmd.type) {
+      case "file.write":
+        return `${cmd.path.slice(0, 300)}${cmd.create ? " [new]" : ""} [${Math.ceil(Buffer.byteLength(cmd.content) / 1024)}KB]`;
       case "session.input":
         return [
           cmd.text.slice(0, 300),
@@ -535,20 +653,40 @@ export class Hub {
         const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
         return s?.name ?? s?.title ?? "";
       }
-      case "permission.answer": {
-        // The tool and what it was asked for, as the request said; it is gone once answered.
-        const s = this.machines.get(machine)?.sessions.find((x) => x.sessionId === cmd.sessionId);
-        const r = s?.permissionRequests?.find((x) => x.id === cmd.permissionId);
-        return `[${cmd.decision}] ${r ? `${r.toolName} ${r.summary ?? ""}`.trim().slice(0, 300) : ""}`.trim();
-      }
+      case "permission.answer":
+        // What was asked, as the request said: it is gone once answered.
+        return answerSummary(cmd, this.request(machine, cmd.sessionId, cmd.permissionId));
       case "session.interrupt":
         return "";
     }
   }
 
+  /** One of a session's permission requests, as its working server last sent them. */
+  private request(machine: string, sessionId: string, id: string): PermissionRequestInfo | undefined {
+    return this.machines
+      .get(machine)
+      ?.sessions.find((x) => x.sessionId === sessionId)
+      ?.permissionRequests?.find((x) => x.id === id);
+  }
+
   /** A command that asks for more than the working server's gasho-daemon can do: the error to show, or undefined. */
   private unsupported(machine: string, cmd: SessionCommand): string | undefined {
     const m = this.machines.get(machine);
+    if (cmd.type === "file.write") return !m || versionAtLeast(m.daemonVersion, ...FILES_SINCE) ? undefined : FILES_TOO_OLD;
+    if (cmd.type === "permission.answer" && cmd.decision !== "deny") {
+      // Claude Code takes neither a question nor a plan with "allow" alone: its dialog would stay open, and the hook
+      // that Gasho answers through would be spent.
+      const r = this.request(machine, cmd.sessionId, cmd.permissionId);
+      if (r?.toolName === "AskUserQuestion") {
+        // A gasho-daemon that sends no questions would pass "allow" on without the answers.
+        if (!r.questions) return "この working server の gasho-daemon は古いため、Gasho からは質問に答えられません。端末か公式アプリで答えてください。";
+        if (!cmd.answers?.length) return "質問には、選んだ答えを添えて答えてください。画面を読み込み直すと、答えを選べます。";
+      }
+      if (r?.toolName === "ExitPlanMode" && r.plan === undefined) {
+        return "この working server の gasho-daemon は古いため、Gasho からは計画を承認できません。端末か公式アプリで答えてください。";
+      }
+      return undefined;
+    }
     if (cmd.type === "session.rename" || cmd.type === "session.fork" || cmd.type === "session.remove") {
       if (!m || versionAtLeast(m.daemonVersion, ...SESSION_ACTIONS_SINCE)) return undefined;
       return "この working server の gasho-daemon は古いため、セッションの名前の変更、フォーク、削除を扱えません。gasho-daemon を更新してください。";
@@ -654,6 +792,8 @@ export class Hub {
         req.client.send({ type: "github.list", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, error });
       } else if (req.kind === "githubItem" && req.list && req.number !== undefined) {
         req.client.send({ type: "github.item", machine: req.machine, sessionId: req.sessionId, repo: req.repo, kind: req.list, number: req.number, error });
+      } else if ((req.kind === "dir" || req.kind === "file") && req.path !== undefined) {
+        req.client.send({ type: req.kind, machine: req.machine, sessionId: req.sessionId, path: req.path, error });
       } else req.client.send({ type: "transcript.page", machine: req.machine, sessionId: req.sessionId, entries: [], start: 0, total: 0, error });
     }
   }

@@ -10,7 +10,6 @@ import {
   clearPromptKeys,
   dialogOpen,
   launchableFolders,
-  launchArgs,
   ManagedSessions,
   EFFORT_LEVELS,
   forkName,
@@ -35,9 +34,8 @@ import {
   surveyOpen,
   switchedForSession,
   switchQuestion,
+  terminalName,
   typedInBox,
-  Zellij,
-  zellijSessionName,
 } from "../src/managed.ts";
 
 test("cleanEnv keeps only what Claude Code and zellij need", () => {
@@ -58,87 +56,34 @@ test("cleanEnv keeps only what Claude Code and zellij need", () => {
   }
 });
 
-test("zellij session names are safe and unique per launch", () => {
-  assert.equal(zellijSessionName("Bobert の作業", "ab12"), "gasho-bobert-ab12");
-  assert.equal(zellijSessionName("!!!", "ab12"), "gasho-session-ab12");
-  assert.notEqual(zellijSessionName("x"), zellijSessionName("x"));
+test("terminal names are safe and unique per launch", () => {
+  assert.equal(terminalName("Bobert の作業", "ab12"), "gasho-bobert-ab12");
+  assert.equal(terminalName("!!!", "ab12"), "gasho-session-ab12");
+  assert.notEqual(terminalName("x"), terminalName("x"));
 });
 
-// A systemd-run like systemd 254 and later: it writes its arguments to $LOG, then runs the command after "--" (as
-// `--scope` does), with each "$$" made a "$" unless it is given --expand-environment=no. With $OLD set, it is like an
-// older one: it knows no --expand-environment, and expands nothing. With $FAIL set, it fails like one that finds no
-// user manager. The zellij next to it only writes its arguments.
-const fakeSystemdRun = (): string => `#!${process.execPath}
-const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
-const args = process.argv.slice(2);
-fs.appendFileSync(process.env.LOG, "systemd-run " + args.join(" ") + "\\n");
-if (process.env.FAIL) process.exit(1);
-const asGiven = args.includes("--expand-environment=no");
-if (asGiven && process.env.OLD) process.exit(1);
-const command = args.slice(args.indexOf("--") + 1);
-const run = asGiven || process.env.OLD ? command : command.map((a) => a.replaceAll("$$", "$"));
-process.exit(spawnSync(run[0], run.slice(1), { stdio: "inherit" }).status ?? 1);
-`;
-
-test("sessions start in a systemd user scope of their own, so a restart of gasho-daemon's service leaves them running", async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-scope-"));
+test("sessions in zellij (from gasho-daemon 0.10 and before) are read and saved the way those daemons save them", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-test-"));
   try {
-    const log = path.join(dir, "log");
-    await fs.writeFile(path.join(dir, "systemd-run"), fakeSystemdRun(), { mode: 0o755 });
-    await fs.writeFile(path.join(dir, "zellij"), `#!/bin/sh\necho "zellij $*" >> "$LOG"\n`, { mode: 0o755 });
-    // As launchArgs does, the shell records its PID with "$$", which must reach it as it is.
-    const args = (s: string) => ["attach", "--create-background", s, "--", "/bin/sh", "-c", "echo $$"];
-    const lines = async () => (await fs.readFile(log, "utf8")).trim().split("\n");
-    const scoped = new Zellij({ PATH: dir, LOG: log });
-    await scoped.start("gasho-x-1", args("gasho-x-1"));
-    await scoped.start("gasho-x-2", args("gasho-x-2"));
-    assert.deepEqual(await lines(), [
-      // Checked once: user scopes can be started, and their command runs as it is given ("$$" stays "$$").
-      "systemd-run --user --scope --quiet --collect --expand-environment=no -- /bin/echo $$",
-      "systemd-run --user --scope --quiet --collect --expand-environment=no --unit=gasho-x-1 -- zellij attach --create-background gasho-x-1 -- /bin/sh -c echo $$",
-      "zellij attach --create-background gasho-x-1 -- /bin/sh -c echo $$",
-      "systemd-run --user --scope --quiet --collect --expand-environment=no --unit=gasho-x-2 -- zellij attach --create-background gasho-x-2 -- /bin/sh -c echo $$",
-      "zellij attach --create-background gasho-x-2 -- /bin/sh -c echo $$",
+    const file = path.join(dir, "managed.json");
+    const old = { sessionId: "s1", zellijSession: "gasho-old-ab12", pid: 1, cwd: "/x", name: "x", launchedAt: 1 };
+    const now = { sessionId: "s2", terminal: "gasho-new-cd34", pid: 2, cwd: "/y", name: "y", launchedAt: 2 };
+    await fs.writeFile(file, JSON.stringify([old, now]));
+    const a = new ManagedSessions(file);
+    const seen: unknown[] = [];
+    await a.load(async (m) => {
+      seen.push(m);
+      return true;
+    });
+    assert.deepEqual(seen, [
+      { sessionId: "s1", terminal: "gasho-old-ab12", zellij: true, pid: 1, cwd: "/x", name: "x", launchedAt: 1 },
+      now,
     ]);
-
-    // An older systemd (before 254) knows no --expand-environment, and expands nothing: the scope starts without it.
-    await fs.rm(log);
-    await new Zellij({ PATH: dir, LOG: log, OLD: "1" }).start("gasho-x-3", args("gasho-x-3"));
-    assert.deepEqual(await lines(), [
-      "systemd-run --user --scope --quiet --collect --expand-environment=no -- /bin/echo $$",
-      "systemd-run --user --scope --quiet --collect -- /bin/echo $$",
-      "systemd-run --user --scope --quiet --collect --unit=gasho-x-3 -- zellij attach --create-background gasho-x-3 -- /bin/sh -c echo $$",
-      "zellij attach --create-background gasho-x-3 -- /bin/sh -c echo $$",
-    ]);
-
-    // Without systemd for the user (macOS, no user manager), zellij runs as it is.
-    await fs.rm(log);
-    await new Zellij({ PATH: dir, LOG: log, FAIL: "1" }).start("gasho-x-4", args("gasho-x-4"));
-    assert.deepEqual(await lines(), [
-      "systemd-run --user --scope --quiet --collect --expand-environment=no -- /bin/echo $$",
-      "systemd-run --user --scope --quiet --collect -- /bin/echo $$",
-      "zellij attach --create-background gasho-x-4 -- /bin/sh -c echo $$",
-    ]);
+    // Saved again (load saves), each in its own form: an older daemon still finds the session in zellij.
+    assert.deepEqual(JSON.parse(await fs.readFile(file, "utf8")), [old, now]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
-});
-
-test("launchArgs starts claude --remote-control through a shell that records its PID", () => {
-  const args = launchArgs({
-    zellijSession: "gasho-x-1",
-    pidFile: "/s/x.pid",
-    cwd: "/home/rg/repos/Gasho",
-    claudeBin: "claude",
-    rcName: "Gasho-gasho",
-    env: { HOME: "/home/rg", PATH: "/usr/bin" },
-  });
-  assert.deepEqual(args.slice(0, 4), ["attach", "--create-background", "gasho-x-1", "--"]);
-  const i = args.indexOf("-c");
-  assert.match(args[i + 1] ?? "", /echo \$\$ > "\$1" && cd "\$2" && shift 2 && exec "\$@"/);
-  assert.deepEqual(args.slice(i + 3, i + 5), ["/s/x.pid", "/home/rg/repos/Gasho"]);
-  assert.deepEqual(args.slice(-6), ["-i", "HOME=/home/rg", "PATH=/usr/bin", "claude", "--remote-control", "Gasho-gasho"]);
 });
 
 test("managed sessions keep their input queue in order and survive a reload", async () => {
@@ -146,8 +91,8 @@ test("managed sessions keep their input queue in order and survive a reload", as
   try {
     const file = path.join(dir, "managed.json");
     const a = new ManagedSessions(file);
-    a.add({ sessionId: "s1", zellijSession: "z1", pid: 1, cwd: "/x", name: "x", launchedAt: 1 });
-    a.add({ sessionId: "s2", zellijSession: "z2", pid: 2, cwd: "/y", name: "y", launchedAt: 2 });
+    a.add({ sessionId: "s1", terminal: "z1", pid: 1, cwd: "/x", name: "x", launchedAt: 1 });
+    a.add({ sessionId: "s2", terminal: "z2", pid: 2, cwd: "/y", name: "y", launchedAt: 2 });
     await a.save();
     assert.equal(a.enqueue("s1", { text: "one", model: "sonnet" }), 1);
     assert.equal(a.enqueue("s1", { text: "two" }), 2);
@@ -529,19 +474,6 @@ test("the model in Claude Code's welcome banner is read before the transcript ha
   assert.equal(bannerModel(screenWith("❯ ")), undefined);
 });
 
-test("a fork passes Claude Code's own arguments after the Remote Control name", () => {
-  const args = launchArgs({
-    zellijSession: "gasho-x-2",
-    pidFile: "/s/y.pid",
-    cwd: "/home/rg/repos/Gasho",
-    claudeBin: "claude",
-    rcName: "Gasho-gasho のフォーク",
-    env: { HOME: "/home/rg" },
-    claudeArgs: ["--resume", "e1cd0c71-1ad9-4de3-bc6a-5a4da93e78d3", "--fork-session"],
-  });
-  assert.deepEqual(args.slice(-6), ["claude", "--remote-control", "Gasho-gasho のフォーク", "--resume", "e1cd0c71-1ad9-4de3-bc6a-5a4da93e78d3", "--fork-session"]);
-});
-
 test("session names are one line of at most 60 characters, and a fork's default name fits", () => {
   assert.deepEqual(sessionName("  Bobert の調査  "), { name: "Bobert の調査" });
   assert.ok("error" in sessionName("   "));
@@ -577,7 +509,7 @@ test("a /rename still waiting is replaced, but not one whose Enter was pressed; 
   try {
     const file = path.join(dir, "managed.json");
     const a = new ManagedSessions(file);
-    a.add({ sessionId: "s1", zellijSession: "z1", pid: 1, cwd: "/x", name: "x", launchedAt: 1, forkOf: "s0", forkedAt: 1 });
+    a.add({ sessionId: "s1", terminal: "z1", pid: 1, cwd: "/x", name: "x", launchedAt: 1, forkOf: "s0", forkedAt: 1 });
     a.enqueue("s1", { text: "最初の指示" });
     a.enqueue("s1", { text: renameCommand("a") });
     a.enqueue("s1", { text: renameCommand("b"), entered: true, enteredAt: 5 });
@@ -596,7 +528,7 @@ test("a /rename still waiting is replaced, but not one whose Enter was pressed; 
     await a.save();
     const b = new ManagedSessions(file);
     await b.load(async () => true);
-    assert.deepEqual(b.get("s1"), { sessionId: "s1", zellijSession: "z1", pid: 1, cwd: "/x", name: "新しい名前", launchedAt: 1, forkOf: "s0", forkedAt: 1 });
+    assert.deepEqual(b.get("s1"), { sessionId: "s1", terminal: "z1", pid: 1, cwd: "/x", name: "新しい名前", launchedAt: 1, forkOf: "s0", forkedAt: 1 });
   } finally {
     await fs.rm(dir, { recursive: true });
   }

@@ -17,12 +17,14 @@ gasho-daemon は、Claude Code を動かすマシン（working server）ごと�
 |---|---|---|
 | Node.js 24 以上 | gasho-daemon そのもの | 動かない |
 | Claude Code（`claude`）、ログイン済み | セッションを見る、起動する | 動かない |
-| zellij 0.45 以上 | Gasho からセッションを起動し、指示を送る | セッションを見るだけになる |
+| セッションの端末（gasho-daemon に入っている。Linux と macOS の x64・arm64） | Gasho からセッションを起動し、指示を送る | セッションを見るだけになる |
 | git | ブランチグラフ | ブランチグラフが出ない |
 | GitHub CLI（`gh`）、ログイン済み | Issues と Pull requests のパネル、新しいセッションの「GitHub から clone」 | パネルが出ない。clone できない |
 | Claude Code の hooks | 通知（応答の完了、確認待ち、入力待ち）、Gasho からの権限の確認への回答 | 通知が来ない。権限の確認には端末か公式アプリで答える |
 
-Mac では、Homebrew で `brew install node zellij gh` のように入れられる。Ubuntu では、Node.js は公式のバイナリかバージョン管理のツール（nvm など）、zellij は公式のリリースのバイナリ、gh は公式の apt リポジトリから入れる。どれも、`which claude zellij gh` で見つかる場所に置く。
+Mac では、Homebrew で `brew install node gh` のように入れられる。Ubuntu では、Node.js は公式のバイナリかバージョン管理のツール（nvm など）、gh は公式の apt リポジトリから入れる。どれも、`which claude gh` で見つかる場所に置く。
+
+セッションの端末は、gasho-daemon が npm から一緒に入れる node-pty（ビルド済みのもの。コンパイラは要らない）と xterm.js で作る。gasho-daemon 0.10 までは zellij が要ったが、0.11 からは要らない。0.10 までが zellij で起動したセッションは、終わるまで zellij で扱うので、そのあいだは zellij を消さない。
 
 Claude Code は公式の手順で入れ、端末で一度 `claude` を起動してログインしておく。Gasho の「新しいセッション」の一覧には、Claude Code が信頼しているフォルダーと、その親フォルダーが出る。まだ信頼していないフォルダー（clone したリポジトリなど）で起動するときは、Gasho の画面で信頼するかを確かめ、「信頼して起動する」を選べば gasho-daemon が Claude Code の確認に答える（gasho-daemon 0.10.0 以上。それより前の gasho-daemon では、端末で一度 `claude` を起動して信頼しておく）。
 
@@ -63,13 +65,13 @@ npx @4rtoflow/gasho-daemon doctor
 要るものが揃っているかを、1行ずつ確かめる。次は、hooks を入れていないマシンでの例。
 
 ```
-gasho-daemon 0.10.0 のセットアップの確認
+gasho-daemon 0.11.0 のセットアップの確認
 
 ✓ Node.js         24.22.2
 ✓ 登録            「ubuntu-server」として http://192.168.3.133:7740 に登録済み
 ✓ Gasho サーバー  つながります
-✓ Claude Code     2.1.323 (Claude Code)
-✓ zellij          0.45.1
+✓ Claude Code     2.1.325 (Claude Code)
+✓ 端末            セッションの端末を作れます
 ✓ git             2.53.0
 ✓ GitHub CLI      2.103.3、ログイン済み
 ! hooks           入っていません
@@ -85,7 +87,7 @@ daemon は動かせます。! の機能は、入れるまで使えません。
 
 gasho-daemon を、マシンの起動とともに動かし、止まったら動かし直すようにする。そのための設定ファイルは `service print` が書き出す。Ubuntu では systemd のユーザーサービス、Mac では launchd のエージェントになる。
 
-`service print` は、実行した端末の PATH と Node.js の場所を設定ファイルに書き込む。npx で実行したときは、npx のキャッシュは消えることがあるので、同じ版の gasho-daemon を npx で起動する設定になる（キャッシュにあればネットワークを使わない）。`npm install -g` で入れたときは、入れた場所の gasho-daemon を直接起動する。`doctor` で claude・zellij・gh が見つかる端末で実行する。あとでこれらを入れ直して場所が変わったら、もう一度書き出す。
+`service print` は、実行した端末の PATH と Node.js の場所を設定ファイルに書き込む。npx で実行したときは、npx のキャッシュは消えることがあるので、同じ版の gasho-daemon を npx で起動する設定になる（キャッシュにあればネットワークを使わない）。`npm install -g` で入れたときは、入れた場所の gasho-daemon を直接起動する。`doctor` で claude・gh が見つかる端末で実行する。あとでこれらを入れ直して場所が変わったら、もう一度書き出す。
 
 ### Ubuntu（systemd）
 
@@ -99,7 +101,7 @@ loginctl enable-linger "$USER"
 
 最後の `loginctl enable-linger` で、ログインしていなくても、マシンが起動したときから gasho-daemon が動く。
 
-Gasho から起動したセッション（zellij と Claude Code）は、セッションごとに systemd のスコープ（`gasho-<名前>-xxxx.scope`）を作って、その中で動かす。gasho-daemon のサービスの外なので、gasho-daemon を動かし直したり止めたりしても、セッションは止まらない。
+Gasho から起動したセッション（端末と Claude Code）は、セッションごとに systemd のスコープ（`gasho-<名前>-xxxx.scope`）を作って、その中で動かす。gasho-daemon のサービスの外なので、gasho-daemon を動かし直したり止めたりしても、セッションは止まらない。動いているセッションは `systemctl --user list-units 'gasho-*.scope'` で見られる。端末を直接見て操作するには `gasho-daemon attach <名前>` を使う（Ctrl+] で抜ける）。
 
 | すること | コマンド |
 |---|---|
@@ -190,11 +192,12 @@ Mac では、書き出したあと `launchctl bootout` と `launchctl bootstrap`
 |---|---|
 | 「端末」画面で working server がオフラインのまま | `doctor` の「Gasho サーバー」と「daemon」。動いていなければログを見る |
 | ログに `the Gasho server rejected this machine` と出る | 登録が取り消されている。3 からやり直す |
-| 「新しいセッション」で起動できない | `doctor` の zellij。信頼の確認が出たら「信頼して起動する」を選んだか（gasho-daemon が 0.10.0 より前なら、フォルダーを端末の `claude` で信頼したか） |
+| 「新しいセッション」で起動できない | `doctor` の端末。信頼の確認が出たら「信頼して起動する」を選んだか（gasho-daemon が 0.10.0 より前なら、フォルダーを端末の `claude` で信頼したか） |
 | 「GitHub から clone」できない | `doctor` の GitHub CLI（ログインしているか）。gh が SSH で clone する設定（`gh config get git_protocol` が ssh）なら、working server の SSH の鍵と known_hosts。gasho-daemon が 0.10.0 以上か |
 | Issues と Pull requests が出ない | `doctor` の GitHub CLI。gasho-daemon が 0.7.0 以上か |
+| セッション画面に「ファイル」が出ない | gasho-daemon が 0.11.0 以上か |
 | 通知が来ない | `doctor` の hooks。`~/.config/gasho/daemon.env` と `~/.claude/settings.json` の秘密の値が同じか |
-| 常駐させると claude や zellij が見つからない | 設定ファイルの PATH。`doctor` で見つかる端末で `service print` を実行し直す |
+| 常駐させると claude や gh が見つからない | 設定ファイルの PATH。`doctor` で見つかる端末で `service print` を実行し直す |
 
 ## 設定（環境変数）
 

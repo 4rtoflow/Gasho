@@ -115,7 +115,7 @@ class FakeClaude {
     } else this.events.push(`key ${key} in the picker`);
   }
 
-  /** The screen, as `zellij action dump-screen --ansi` gives it. An empty box shows a suggestion, drawn dim. */
+  /** The screen, as a dump of the terminal gives it (see dumpScreen). An empty box shows a suggestion, drawn dim. */
   ansi(): string {
     this.pump();
     const head = [" ▐▛███▛█   Claude Code v2.1.322", ...this.conversation];
@@ -143,7 +143,7 @@ class FakeClaude {
 const SID = "11111111-2222-3333-4444-555555555555";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** A daemon whose zellij is the fake terminal and whose session is idle; Enter is given `enterWaitMs` to be taken. */
+/** A daemon whose terminal is the fake one and whose session is idle; Enter is given `enterWaitMs` to be taken. */
 async function setup(c: FakeClaude, enterWaitMs = 400) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gasho-typing-"));
   const d = new Daemon(
@@ -160,7 +160,7 @@ async function setup(c: FakeClaude, enterWaitMs = 400) {
     } as ConstructorParameters<typeof Daemon>[0],
     { enterWaitMs },
   ) as unknown as Record<string, any>;
-  d.zellij = {
+  d.terminals = {
     screen: async () => readScreen(c.ansi()),
     keys: async (_s: string, ...keys: string[]) => keys.forEach((key) => c.push({ key })),
     paste: async (_s: string, text: string) => c.push({ paste: text }),
@@ -168,7 +168,7 @@ async function setup(c: FakeClaude, enterWaitMs = 400) {
   d.currentStatus = async () => "idle";
   d.scheduleRefresh = () => undefined;
   d.emitSessions = () => undefined;
-  d.managed.add({ sessionId: SID, zellijSession: "z", pid: 1, cwd: dir, name: "fake", launchedAt: 1 });
+  d.managed.add({ sessionId: SID, terminal: "z", pid: 1, cwd: dir, name: "fake", launchedAt: 1 });
   d.tracked.set(SID, {
     info: { sessionId: SID, cwd: dir, status: "idle", rcMode: "none", prLinks: [], model: name(c.model), effort: "medium", ultracode: false },
     meta: { prLinks: [] },
@@ -293,27 +293,27 @@ test("a text whose Enter may have been pressed is never pasted again, even when 
   const { d, done } = await setup(c);
   // The Enter key fails after it reached the pane, and Claude Code takes it late.
   c.enterDelayMs = 900;
-  const keys = d.zellij.keys;
-  d.zellij.keys = async (s: string, ...k: string[]) => {
+  const keys = d.terminals.keys;
+  d.terminals.keys = async (s: string, ...k: string[]) => {
     await keys(s, ...k);
     if (k.includes("Enter")) throw new Error("send-keys timed out");
   };
   const r = await d.input({ type: "session.input", requestId: "r", sessionId: SID, text: "一度だけ送って" });
   assert.equal(r.queued, true);
-  d.zellij.keys = keys;
+  d.terminals.keys = keys;
   assert.equal(d.managed.peek(SID)?.entered, true);
   // The next try finds no prompt box (the screen cannot be read): the text stays marked as entered.
   await sleep(700);
-  const screen = d.zellij.screen;
+  const screen = d.terminals.screen;
   let reads = 0;
-  d.zellij.screen = async () => {
+  d.terminals.screen = async () => {
     reads += 1;
     if (reads > 1) throw new Error("dump-screen failed");
     return screen();
   };
   d.settleUntil.clear();
   await d.flushInput(SID);
-  d.zellij.screen = screen;
+  d.terminals.screen = screen;
   assert.equal(d.managed.peek(SID)?.entered, true);
   d.settleUntil.clear();
   await d.flushInput(SID);
