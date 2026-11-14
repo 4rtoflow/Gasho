@@ -14,6 +14,7 @@ export const SDK_EXPORTS = [
   "useSendInput",
   "useLaunchSession",
   "useSessionActivity",
+  "useEvent",
   "useNow",
   "githubRepos",
   "panelRepo",

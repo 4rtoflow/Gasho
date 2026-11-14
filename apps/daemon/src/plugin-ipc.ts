@@ -59,4 +59,6 @@ export type FromHost =
   | { t: "result"; id: number; ok: true; data?: unknown }
   | { t: "result"; id: number; ok: false; error: string; user: boolean }
   /** `call`: the call it is made in (none from `start`); a write is allowed only in a call of a write method. */
-  | ({ t: "github"; id: number; call?: number; write: boolean } & GitHubAsk);
+  | ({ t: "github"; id: number; call?: number; write: boolean } & GitHubAsk)
+  /** An event for the plugin's web parts (ctx.emit, plugin API 1.5), checked here already (topic, size). */
+  | { t: "event"; topic: string; data: unknown; retain: boolean };

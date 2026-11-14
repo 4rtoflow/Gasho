@@ -5,7 +5,7 @@
 // build that is half written, and a version they loaded keeps its files (such as chunks loaded later). The folders are
 // watched: a change shows up as a new version (hot reload), or, when the new files fail the checks, as an error while
 // the version before stays in use.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -18,16 +18,16 @@ export const PLUGIN_API_MINOR = 5;
 /** The version of the plugin API, as plugins and gasho-daemon name it. */
 export const PLUGIN_API = `${PLUGIN_API_MAJOR}.${PLUGIN_API_MINOR}`;
 
-const ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
-const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+export const ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
+export const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 const API_RE = /^(\d+)\.(\d+)$/;
 const KEY_RE = /^[A-Za-z][\w-]{0,63}$/;
 const PERMISSIONS = new Set<PluginPermission>(["session.input", "session.launch"]);
 export const DEFAULT_TIMEOUT_SECONDS = 15;
 export const MAX_TIMEOUT_SECONDS = 120;
 /** A plugin's files, at most. */
-const MAX_FILES = 500;
-const MAX_BYTES = 20 * 1024 * 1024;
+export const MAX_FILES = 500;
+export const MAX_BYTES = 20 * 1024 * 1024;
 /** Versions kept per plugin in the cache. */
 const KEEP_VERSIONS = 5;
 /** A build writes several files in a row: the folders are read again this long after the last change. */
@@ -37,6 +37,32 @@ export type ManifestCheck = { manifest: PluginManifest } | { error: string };
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isText = (v: unknown, max: number): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
+
+/** Why this Gasho server cannot run a plugin written for the plugin API `api` (undefined when it can). */
+export function apiProblem(api: unknown): string | undefined {
+  const a = typeof api === "string" ? API_RE.exec(api) : null;
+  if (!a) return "api は 1.0 の形で書いてください。";
+  if (Number(a[1]) !== PLUGIN_API_MAJOR || Number(a[2]) > PLUGIN_API_MINOR) {
+    return `このプラグインはプラグインの API ${String(api)} が要りますが、この Gasho は ${PLUGIN_API} までです。`;
+  }
+  return undefined;
+}
+
+/** Orders two plugin versions ("1.2.0", "1.2.0-beta.1"): negative when `a` is older than `b`. */
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(v);
+    return m ? { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] } : { nums: [0, 0, 0], pre: undefined };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) if ((x.nums[i] ?? 0) !== (y.nums[i] ?? 0)) return (x.nums[i] ?? 0) - (y.nums[i] ?? 0);
+  // A pre-release comes before its release.
+  if (x.pre === y.pre) return 0;
+  if (x.pre === undefined) return 1;
+  if (y.pre === undefined) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
 
 /** A file of the plugin, relative to its folder ("web.js", "assets/x.js"): never one outside it. */
 export function safeRelative(p: unknown): string | undefined {
@@ -88,11 +114,8 @@ export function checkManifest(raw: unknown, folder: string | undefined, files: R
   if (!isText(name, 40)) return { error: "name を40文字までで書いてください。" };
   if (typeof version !== "string" || !VERSION_RE.test(version)) return { error: "version は 1.2.0 の形で書いてください。" };
   if (description !== undefined && (typeof description !== "string" || description.length > 300)) return { error: "description は300文字までです。" };
-  const a = typeof api === "string" ? API_RE.exec(api) : null;
-  if (!a) return { error: "api は 1.0 の形で書いてください。" };
-  if (Number(a[1]) !== PLUGIN_API_MAJOR || Number(a[2]) > PLUGIN_API_MINOR) {
-    return { error: `このプラグインはプラグインの API ${api} が要りますが、この Gasho は ${PLUGIN_API} までです。` };
-  }
+  const wrongApi = apiProblem(api);
+  if (wrongApi) return { error: wrongApi };
   const manifest: PluginManifest = { id, name: name.trim(), version, api: api as string };
   if (typeof description === "string" && description.trim()) manifest.description = description.trim();
   const fileOf = (v: unknown, what: string): string | { error: string } => {
@@ -273,6 +296,35 @@ export async function readPluginFolder(
   return { manifest: checked.manifest, hash: h.digest("hex").slice(0, 16), files };
 }
 
+/**
+ * Puts a plugin's folder made aside (`made`, inside the plugins folder) in place of the plugin `id`, so that the Gasho
+ * server never reads a half-written plugin: the old folder (or link) is moved away first and removed after.
+ */
+export async function swapPluginFolder(pluginsDir: string, id: string, made: string): Promise<void> {
+  const target = path.join(pluginsDir, id);
+  const old = path.join(pluginsDir, `.${id}-old-${randomBytes(4).toString("hex")}`);
+  const had = Boolean(await fsp.lstat(target).catch(() => undefined));
+  if (had) await fsp.rename(target, old);
+  try {
+    await fsp.rename(made, target);
+  } catch (e) {
+    if (had) await fsp.rename(old, target).catch(() => undefined);
+    throw e;
+  }
+  if (had) await fsp.rm(old, { recursive: true, force: true });
+}
+
+/** Removes a plugin's folder, or only the link for one being developed; false when there is none. */
+export async function removePluginFolder(pluginsDir: string, id: string): Promise<boolean> {
+  if (!id || id.includes("/") || id.includes("\\") || id.startsWith(".")) return false;
+  const target = path.join(pluginsDir, id);
+  const st = await fsp.lstat(target).catch(() => undefined);
+  if (!st) return false;
+  if (st.isSymbolicLink()) await fsp.unlink(target);
+  else await fsp.rm(target, { recursive: true, force: true });
+  return true;
+}
+
 export interface PluginRegistryOptions {
   /** The plugins folder (GASHO_PLUGINS_DIR). */
   dir: string;
@@ -451,6 +503,10 @@ export class PluginRegistry extends EventEmitter {
       this.watchers.delete(p);
     }
     const changed = JSON.stringify([...this.plugins.entries()]) !== JSON.stringify([...next.entries()]);
+    // A plugin that is gone (removed) leaves no copies behind.
+    for (const id of this.plugins.keys()) {
+      if (!next.has(id) && ID_RE.test(id)) await fsp.rm(path.join(this.cacheDir, id), { recursive: true, force: true }).catch(() => undefined);
+    }
     this.plugins = next;
     if (changed) {
       for (const e of next.values()) {

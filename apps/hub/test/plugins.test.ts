@@ -240,3 +240,55 @@ test("server settings are checked against the manifest, kept, and sent to browse
   assert.ok(toDaemon?.type === "plugins");
   assert.deepEqual(toDaemon.plugins[0]?.settings, { interval: 120 });
 });
+
+test("events of a daemon part go to every browser, and those to keep (retain) reach browsers that connect later", async () => {
+  const { client, daemon, hub, machineId, registry, store } = await setup();
+  const event = (m: object) => hub.onDaemonMessage(daemon, { type: "plugin.event", plugin: "hello", topic: "state", data: { n: 1 }, ...m });
+  const relayed = (sent: HubToClient[]) => sent.flatMap((m) => (m.type === "plugin.event" ? [m.event] : []));
+  const later = () => {
+    const c = fakePeer<HubToClient>(store.createDevice("browser", "Mac").device.id);
+    hub.onClientConnect(c);
+    const snap = c.sent[0];
+    return snap?.type === "snapshot" ? snap.pluginEvents : undefined;
+  };
+
+  event({ topic: "progress", data: 40 });
+  assert.deepEqual(relayed(client.sent), [{ plugin: "hello", machine: machineId, topic: "progress", data: 40 }]);
+  assert.deepEqual(later(), []);
+  event({ retain: true });
+  event({ retain: true, topic: "other", data: null });
+  assert.deepEqual(later(), [
+    { plugin: "hello", machine: machineId, topic: "state", data: { n: 1 } },
+    { plugin: "hello", machine: machineId, topic: "other", data: null },
+  ]);
+  // The newest of a topic replaces the one kept.
+  event({ retain: true, data: { n: 2 } });
+  assert.deepEqual(later()?.find((e) => e.topic === "state")?.data, { n: 2 });
+
+  // Not passed on: a topic or data that is not right, a plugin that is not there.
+  client.sent.length = 0;
+  event({ topic: "" });
+  event({ topic: "x".repeat(101) });
+  event({ data: "a".repeat(300 * 1024) });
+  hub.onDaemonMessage(daemon, { type: "plugin.event", plugin: "nope", topic: "state", data: 1 });
+  assert.deepEqual(relayed(client.sent), []);
+
+  // Not chosen for this working server, or disabled: nothing goes on, and what was kept is dropped.
+  hub.onClientMessage(client, { type: "plugin.machines", requestId: "m1", plugin: "hello", machines: [] });
+  assert.deepEqual(later(), []);
+  event({ retain: true });
+  assert.deepEqual(relayed(client.sent), []);
+  hub.onClientMessage(client, { type: "plugin.machines", requestId: "m2", plugin: "hello", machines: "all" });
+  event({ retain: true });
+  assert.equal(later()?.length, 1);
+  hub.onClientMessage(client, { type: "plugin.enable", requestId: "e1", plugin: "hello", enabled: false });
+  assert.deepEqual(later(), []);
+  hub.onClientMessage(client, { type: "plugin.enable", requestId: "e2", plugin: "hello", enabled: true });
+
+  // A new version of the plugin sends its own from its start: the old version's are dropped.
+  event({ retain: true });
+  assert.equal(later()?.length, 1);
+  fs.writeFileSync(path.join(registry.dir, "hello", "daemon.js"), "export default { methods: { v2: () => 2 } }");
+  await registry.scan();
+  assert.deepEqual(later(), []);
+});
