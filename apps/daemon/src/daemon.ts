@@ -63,7 +63,7 @@ import {
   sessionName,
   shellInputProblem,
   statusLine,
-  surveyOpen,
+  noticeKey,
   switchedForSession,
   switchQuestion,
   type TaskRow,
@@ -1623,8 +1623,8 @@ export class Daemon {
 
   /**
    * Types `text` into Claude Code's prompt box and presses Enter once, checking each step on the screen:
-   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; the feedback survey above
-   *   the box is dismissed ("0");
+   * - nothing is typed unless the prompt box is shown and no picker or dialog has the keys; a notice above the box
+   *   that has the keys is closed first (the feedback survey with "0", the offer to set up auto mode with Esc);
    * - the box is emptied first (Claude Code may have put a stopped prompt back, or a key may have gone into it);
    * - the text must be in the box before Enter, and the box must let go of it after Enter.
    * Enter is never pressed twice for one paste: if Claude Code takes an Enter late, a second one could land in what
@@ -1660,14 +1660,16 @@ export class Daemon {
     let ready = await waitFor((s) => typedInBox(s) !== undefined, 3000);
     if (!ready) return "not-typed";
     if (entered) {
-      // Taken after all if the box no longer holds the text. Otherwise press Enter, unless the survey has the keys.
+      // Taken after all if the box no longer holds the text. Otherwise press Enter, unless a notice above the box
+      // (the survey, the offer to set up auto mode) has the keys.
       if (!promptHolds(ready, text)) return "sent";
-      return surveyOpen(ready.plain) ? "not-typed" : enter();
+      return noticeKey(ready.plain) ? "not-typed" : enter();
     }
-    if (surveyOpen(ready.plain)) {
-      await this.terminals.keys(session, "0");
-      // Decide on what the screen shows now: had the survey not taken the "0", it is in the box.
-      ready = await waitFor((s) => !surveyOpen(s.plain) && typedInBox(s) !== undefined, 1500);
+    const key = noticeKey(ready.plain);
+    if (key) {
+      await this.terminals.keys(session, key);
+      // Decide on what the screen shows now: had the notice not taken the key, a "0" is in the box.
+      ready = await waitFor((s) => !noticeKey(s.plain) && typedInBox(s) !== undefined, 1500);
       if (!ready) return "not-typed";
     }
     if (typedInBox(ready)) {
