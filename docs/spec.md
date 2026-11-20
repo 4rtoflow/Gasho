@@ -297,6 +297,7 @@ Claude Code は、何もしていないあいだも 1 プロセスで 200MB ほ�
 - 次のすべてに当てはまるセッションを、1 分ごとに探して休止する（`apps/daemon/src/hibernate.ts` の `mayHibernate`）
   - 状態が idle で、Claude Code の登録の状態も idle である（シェルや Monitor だけが動いている `shell` は対象外）
   - バックグラウンドの作業、送信待ちの入力、答えを待っている確認がない
+  - Claude の質問（AskUserQuestion）に、会話の記録の上で答えが出ている。Claude Code の状態や画面が質問を示していなくても（gasho-daemon の再起動で hook が外れたときなど）、記録に答えも本人の発言もなければ休止しない
   - gasho-daemon が入力やモデルの切り替えをしている途中ではない
   - Claude がいまのプロセスで `CronCreate` か `ScheduleWakeup` を呼んでいない（止めると、予定した実行が消えるため）。予定は `/clear` のあともプロセスに残るので、呼んだ時刻を `managed.json` に記録して引き継ぎ、再開したら消す
   - 入力欄に文字がなく、選択画面や確認が開いていない。`gasho-daemon attach` で端末を開いている人がいない
@@ -309,6 +310,7 @@ Claude Code は、何もしていないあいだも 1 プロセスで 200MB ほ�
 - 休止の直前に、モデル、Effort、Ultracode、権限モードを `managed.json` に記録する。記録できなかったときは休止をやめ、Claude Code を動かし続ける。`--resume` は Effort と Ultracode を戻さず、モデルは最後の返答のものに戻り、`/clear` のあとは権限モードも既定のものに戻るためである。返答の記録には 1M コンテキストかどうかが残らないので、Claude Code がターンの初めに記録するモデルの名前（`Opus 4.6 (1M context)`）から `[1m]` を付ける
 - 休止中のセッションは、`SessionInfo.hibernation` が `hibernated`、`status` が `idle` になる。サイドバーとホームの同じ場所に同じ名前で残り、会話も読める。過去の会話（S15）の一覧には出ない
 - 再開は、発言（プラグインの `session.input`、`gasho-daemon session send` を含む）か、再開に失敗したあとの「もう一度再開」（`session.wake`）で始まる。`claude --remote-control=<名前> --resume <ID> --model <モデル> --effort <Effort> --permission-mode <権限モード>` を新しい端末で起動し、`claude agents` に同じ ID で出て入力欄が出たら、Ultracode を戻し、預かった発言を入力する。`Resume from summary` の問いは、フォークと同じく Esc で答える。再開のあいだ `hibernation` は `resuming` になる
+- 質問を開いたまま休止したセッション（gasho-daemon 0.36.0 までが休止したものなど）には、その質問を休止中も出す。Gasho から答えると、答えを次の発言として預け（`managed.json` の `answeredQuestion` に質問の ID を記録して、質問はもう出さない）、再開して入力する。`--resume` で質問の画面は戻らないためである。「答えずに止める」は質問を出さなくするだけで、再開はしない
 - 再開に失敗したら、`resumeError` に理由を入れ、発言は預かったままにする。休止中のセッションの送信待ちの入力は `managed.json` に保存するので、gasho-daemon を再起動しても失わない。再開のあとも、入力し終わるまで保存する。再起動のあとは、入力を始めていた発言だけを、始めた時刻より後の会話の記録と全文で比べ、入っていなければ入力する。入力し終わる前に Claude Code が終わったら休止に戻す
 - 休止中に名前を変えたときは、Claude Code を起こさずに記録だけを変え、再開のあとで `/rename` を送る
 - gasho-daemon を再起動・更新しても、休止中のセッションは休止中のまま残る。ただし、1 つの会話を 2 つの Claude Code が開かないよう、起動時に次のように扱う

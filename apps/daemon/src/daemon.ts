@@ -2519,6 +2519,7 @@ export class Daemon {
       background: t.info.background?.length ?? 0,
       pendingInputs: this.managed.pending(m.sessionId),
       permissionRequests: (this.permissions.of(m.sessionId) ?? this.openQuestion(t) ?? this.openPermission(t))?.length ?? 0,
+      question: t.meta.question !== undefined,
       // settleUntil keeps its time until the next input: only a time still to come means anything.
       operating: this.flushing.has(m.terminal) || (this.settleUntil.get(m.sessionId) ?? 0) > Date.now() || this.latePicker.has(m.sessionId),
       scheduled: scheduledAt > 0 && scheduledAt >= (t.info.startedAt ?? 0),
@@ -3575,7 +3576,10 @@ export class Daemon {
    */
   private openQuestion(t: Tracked): PermissionRequestInfo[] | undefined {
     const q = t.meta.question;
-    if (!q || t.info.status !== "waiting" || !this.managed.has(t.info.sessionId)) return undefined;
+    const m = this.managed.get(t.info.sessionId);
+    if (!q || !m) return undefined;
+    // A hibernated session still asks the question it was left with, until that is answered (see answerAsleep).
+    if (m.hibernated ? m.hibernated.answeredQuestion === q.toolUseId : t.info.status !== "waiting") return undefined;
     const r = openQuestionRequest(q);
     return r ? [r] : undefined;
   }
@@ -3594,8 +3598,9 @@ export class Daemon {
     if (m.decision !== "deny") {
       const answers = questionAnswers(q.input, m.answers);
       if (typeof answers === "string") return { ok: false, error: answers };
-      message = answersMessage(answers);
+      message = answersMessage(answers, s.hibernated !== undefined);
     }
+    if (s.hibernated) return this.answerAsleep(s, s.hibernated, q.toolUseId, m.requestId, message);
     if ((await this.currentStatus(s.pid)) !== "waiting") return { ok: false, error: "この質問には、すでに答えられています。" };
     const screen = (await this.terminals.screen(s.terminal).catch(() => undefined))?.plain ?? "";
     if (!atBottom(screen, QUESTION_DIALOG_RE, 12)) {
@@ -3607,6 +3612,21 @@ export class Daemon {
     this.scheduleRefresh(500);
     this.emitSessions();
     log(`${s.name}: closed Claude's question${message ? "; the answers go as the next message" : ""}`);
+    return { ok: true, ...(message ? { queued: true } : {}) };
+  }
+
+  /**
+   * Answers the question a session was hibernated with. Its Claude Code has ended, and `claude --resume` does not bring
+   * the dialog back: the answers go as the next message, kept with the session and typed once it is back, as an input
+   * sent to it would be. "deny" only stops showing the question.
+   */
+  private async answerAsleep(s: ManagedSession, h: Hibernated, toolUseId: string, requestId: string, message: string | undefined): Promise<CommandResult> {
+    h.answeredQuestion = toolUseId;
+    if (message) this.managed.enqueue(s.sessionId, { id: requestId, text: message });
+    await this.managed.save();
+    if (message) void this.wake(s.sessionId);
+    this.emitSessions();
+    log(`${s.name}: answered the question it was hibernated with${message ? "; the answers go once it is back" : ""}`);
     return { ok: true, ...(message ? { queued: true } : {}) };
   }
 

@@ -25,6 +25,7 @@ const facts = (extra: Partial<HibernateFacts> = {}): HibernateFacts => ({
   background: 0,
   pendingInputs: 0,
   permissionRequests: 0,
+  question: false,
   operating: false,
   scheduled: false,
   typed: "",
@@ -62,6 +63,7 @@ const KEPT_AWAKE: [string, Partial<HibernateFacts>][] = [
   ["with background work", { background: 1 }],
   ["with an input waiting", { pendingInputs: 1 }],
   ["with a permission request", { permissionRequests: 1 }],
+  ["with Claude's question unanswered in its transcript, though its state says idle", { question: true }],
   ["that gasho-daemon is working on", { operating: true }],
   ["with work scheduled in its process", { scheduled: true }],
   ["with text in its prompt box", { typed: "書きかけ" }],
@@ -198,8 +200,9 @@ async function setup() {
   const claudeDir = path.join(dir, "claude-dir");
   await fs.mkdir(path.join(claudeDir, "projects", "p"), { recursive: true });
   const old = new Date(Date.now() - 5 * HOUR).toISOString();
+  const transcript = path.join(claudeDir, "projects", "p", `${SID}.jsonl`);
   await fs.writeFile(
-    path.join(claudeDir, "projects", "p", `${SID}.jsonl`),
+    transcript,
     `${JSON.stringify({ type: "assistant", uuid: "a1", timestamp: old, cwd: folder, effort: "low", message: { role: "assistant", model: "claude-haiku-5-5", content: [{ type: "text", text: "はい" }] } })}\n`,
   );
   const cfg = {
@@ -234,7 +237,7 @@ async function setup() {
       return p.pid;
     },
     screen: async () =>
-      plainScreen([`${RULE.slice(0, 30)}${term.ultracode ? " ultracode ─" : ""}`, `❯ ${term.typed}`, RULE, term.footer, ""].join("\n")),
+      plainScreen([`${RULE.slice(0, 30)}${term.ultracode ? " ultracode ─" : ""}`, `❯ ${term.typed.replaceAll("\n", "\n  ")}` /* lines after the first indented, as Claude Code draws them */, RULE, term.footer, ""].join("\n")),
     paste: async (_s: string, text: string) => {
       term.typed = text;
     },
@@ -277,6 +280,7 @@ async function setup() {
     row,
     procs,
     folder,
+    transcript,
     shown,
     done: async () => {
       for (const p of procs) p.kill("SIGKILL");
@@ -1271,6 +1275,96 @@ test("removing a hibernated session signals nothing, and forgets it", async () =
     assert.equal(d.managed.has(SID), false);
     assert.equal(d.tracked.has(SID), false);
     assert.equal(shown(), undefined);
+  } finally {
+    await done();
+  }
+});
+
+// Claude's question (AskUserQuestion), left unanswered hours ago, as Claude Code writes it in the transcript.
+const QUESTION = "どちらの案で進めますか？";
+const askLine = (at: string) =>
+  JSON.stringify({
+    type: "assistant",
+    uuid: "a2",
+    timestamp: at,
+    message: {
+      role: "assistant",
+      model: "claude-haiku-5-5",
+      content: [{ type: "tool_use", id: "toolu_q", name: "AskUserQuestion", input: { questions: [{ question: QUESTION, header: "案", options: [{ label: "A 案" }, { label: "B 案" }], multiSelect: false }] } }],
+    },
+  });
+
+test("a session whose question has no answer in its transcript is not hibernated, even when its state and screen miss it", async () => {
+  // Claude Code's state says idle and its prompt box is shown: the hook held for the question went with a restart of
+  // gasho-daemon, or the dialog is not drawn. The transcript still says it waits for an answer (#250).
+  const { d, procs, transcript, done } = await setup();
+  try {
+    await fs.appendFile(transcript, `${askLine(new Date(Date.now() - 4 * HOUR).toISOString())}\n`);
+    await d.pollTails();
+    assert.ok(d.tracked.get(SID).meta.question);
+    await d.hibernateIdle();
+    assert.equal(procs[0]!.signalCode, null);
+    assert.equal(d.managed.get(SID).hibernated, undefined);
+  } finally {
+    await done();
+  }
+});
+
+test("the question a session was hibernated with is shown, and its answer brings the session back and is typed", async () => {
+  const { d, make, term, agents, transcript, shown, done } = await setup();
+  try {
+    await d.hibernateIdle();
+    assert.ok(d.managed.get(SID).hibernated);
+    agents([]);
+    // Hibernated with the question open (by gasho-daemon 0.36.0 or before), and gasho-daemon restarted since.
+    await fs.appendFile(transcript, `${askLine(new Date(Date.now() - 4 * HOUR).toISOString())}\n`);
+    const again = make();
+    await again.loadManaged();
+    await again.refresh();
+    const [card] = shown(again).permissionRequests ?? [];
+    assert.equal(card?.id, "question:toolu_q");
+    assert.equal(card?.answerAsMessage, true);
+
+    const result = await again.answerQuestion({
+      type: "permission.answer",
+      requestId: "r1",
+      sessionId: SID,
+      permissionId: "question:toolu_q",
+      decision: "allow",
+      answers: [{ picked: [1] }],
+    });
+    assert.deepEqual(result, { ok: true, queued: true });
+    // Not answerable twice, and not forgotten over a restart before it is back.
+    assert.equal(shown(again).permissionRequests, undefined);
+    const third = make();
+    await third.loadManaged();
+    assert.equal(third.managed.get(SID).hibernated.answeredQuestion, "toolu_q");
+    assert.match(third.managed.waiting(SID)[0].text, /「どちらの案で進めますか？」→ B 案/);
+
+    await again.waking.get(SID);
+    await until(() => term.entered.some((e) => e.includes("→ B 案")), "the answer was typed");
+    assert.match(term.entered.at(-1)!, /休止したため、再開してから送っています/);
+    assert.equal(again.managed.get(SID).hibernated, undefined);
+  } finally {
+    await done();
+  }
+});
+
+test("declining the question a session was hibernated with only stops showing it, and does not wake the session", async () => {
+  const { d, agents, transcript, started, shown, done } = await setup();
+  try {
+    await d.hibernateIdle();
+    agents([]);
+    await fs.appendFile(transcript, `${askLine(new Date(Date.now() - 4 * HOUR).toISOString())}\n`);
+    await d.pollTails();
+    d.emitSessions();
+    assert.equal(shown().permissionRequests?.[0]?.id, "question:toolu_q");
+    const result = await d.answerQuestion({ type: "permission.answer", requestId: "r1", sessionId: SID, permissionId: "question:toolu_q", decision: "deny" });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(shown().permissionRequests, undefined);
+    assert.equal(d.waking.has(SID), false);
+    assert.equal(started.length, 0);
+    assert.equal(d.managed.pending(SID), 0);
   } finally {
     await done();
   }

@@ -40,6 +40,12 @@ export interface HibernateFacts {
   /** Inputs waiting to be typed, and permission requests or questions waiting for an answer. */
   pendingInputs: number;
   permissionRequests: number;
+  /**
+   * Claude's question (AskUserQuestion) has no answer in the transcript yet. Told apart from the state and the screen:
+   * neither of those may show it (a hook gone with a restart, a state not written), and a session hibernated with it
+   * would lose the answer. Only an answer, or something the person writes or stops, ends it (see TranscriptMeta.question).
+   */
+  question: boolean;
   /** gasho-daemon is typing into it, switching its model, or otherwise working on it. */
   operating: boolean;
   /** Claude scheduled work in this process (CronCreate, ScheduleWakeup), which would be lost with it. */
@@ -58,7 +64,7 @@ export interface HibernateFacts {
 export function mayHibernate(f: HibernateFacts, now: number, afterMs: number): boolean {
   if (f.zellij || !f.resumable) return false;
   if (f.status !== "idle" || (f.claudeStatus !== undefined && f.claudeStatus !== "idle")) return false;
-  if (f.background > 0 || f.pendingInputs > 0 || f.permissionRequests > 0) return false;
+  if (f.background > 0 || f.pendingInputs > 0 || f.permissionRequests > 0 || f.question) return false;
   if (f.operating || f.scheduled || f.attached || f.typed !== "") return false;
   // Coming back in another mode could run what this one would have asked about.
   if (f.permissionMode === undefined) return false;

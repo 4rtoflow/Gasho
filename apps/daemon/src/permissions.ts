@@ -334,9 +334,12 @@ export function openPermissionRequest(c: { toolUseId: string; name: string; inpu
  * The message that answers Claude's questions once their dialog has been closed: each question (on one line) and its
  * answer, as questionAnswers makes them. Written to Claude on the person's behalf, in the language of Gasho's screens.
  */
-export function answersMessage(answers: Record<string, string>): string {
+export function answersMessage(answers: Record<string, string>, asleep = false): string {
   const lines = Object.entries(answers).map(([q, a]) => `- 「${clip(q.replace(/\s+/g, " ").trim(), 300)}」→ ${a}`);
-  return ["さきほどの質問への答えです（Gasho から答えたため、質問の画面は閉じました）。", ...lines].join("\n");
+  const why = asleep
+    ? "さきほどの質問への答えです（質問を出したままセッションが休止したため、再開してから送っています）。"
+    : "さきほどの質問への答えです（Gasho から答えたため、質問の画面は閉じました）。";
+  return [why, ...lines].join("\n");
 }
 
 /** A plan's title: its first line with text, without Markdown's heading marks. */

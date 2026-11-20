@@ -809,6 +809,11 @@ export interface Hibernated {
   /** Why it could not be brought back the last time. */
   resumeError?: string;
   /**
+   * The id of Claude's question it was left with (see TranscriptMeta.question), once that was answered from Gasho while
+   * it slept: the answers wait among its inputs, and the question is no longer shown.
+   */
+  answeredQuestion?: string;
+  /**
    * The terminal it is being brought back in, saved before that terminal starts: a restart of gasho-daemon meanwhile
    * takes that terminal over instead of starting a second Claude Code on the conversation.
    */
